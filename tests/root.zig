@@ -4,12 +4,17 @@ const std = @import("std");
 const testing = std.testing;
 const workz = @import("workz");
 const workflow = workz.workflow;
+const state = workz.state;
 const sys = workz.sys;
 
 test {
     testing.refAllDecls(workz);
     testing.refAllDecls(workz.workflow);
     testing.refAllDecls(workz.graph);
+    testing.refAllDecls(workz.state);
+    testing.refAllDecls(workz.records);
+    testing.refAllDecls(workz.process);
+    testing.refAllDecls(workz.cgroup);
     testing.refAllDecls(workz.sys);
 }
 
@@ -196,6 +201,47 @@ test "format 1 rejects unknown keys, bad values and unsafe paths" {
     try expectInvalid("[workflow\nname = 1\n", "line 1");
 }
 
+test "the rule key changes with each of its parts" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("in.txt", "data");
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ "[[rules]]\nname = \"x\"\ninput = [\"in.txt\"]\noutput = [\"x\"]\nshell = \"cat in.txt > x\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+    var missing: ?[]const u8 = null;
+    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    try testing.expectEqualStrings(base.key, same.key);
+    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    try testing.expect(!std.mem.eql(u8, base.key, other_path.key));
+    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", &missing)).?;
+    try testing.expect(!std.mem.eql(u8, base.key, other_engine.key));
+    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", &missing)).?;
+    try testing.expect(!std.mem.eql(u8, base.key, with_parent.key));
+    var changed = wf.rules[0];
+    changed.threads = 2;
+    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    try testing.expectEqualStrings("threads=2 memory=1M", more_threads.request);
+    try testing.expect(!std.mem.eql(u8, base.key, more_threads.key));
+    changed = wf.rules[0];
+    changed.shell = "cat in.txt in.txt > x";
+    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    try testing.expect(!std.mem.eql(u8, base.key, other_cmd.key));
+
+    // Rewriting the input changes its identity even with the same size.
+    _ = try s.file("in.txt", "DATA");
+    var fresh = state.Identities.init(testing.allocator);
+    defer fresh.deinit();
+    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    try testing.expect(!std.mem.eql(u8, base.inputs, rewritten.inputs));
+    try testing.expectEqualStrings(base.command, rewritten.command);
+}
+
 test "graph order puts producers first and detects cycles" {
     var s = try Scratch.init();
     defer s.deinit();
@@ -223,4 +269,37 @@ test "graph order puts producers first and detects cycles" {
     defer wf2.deinit();
     try testing.expectError(error.Cycle, workz.graph.build(testing.allocator, &wf2, &problem));
     testing.allocator.free(problem.message);
+}
+
+test "state round-trips through its file and refuses other versions" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var st = try state.load(testing.allocator, s.path);
+    defer st.deinit();
+    const a = st.allocator();
+    try st.data.rules.map.put(a, "x", .{
+        .key = "k",
+        .command = "c",
+        .env = "e",
+        .request = "threads=1 memory=1M",
+        .writes = "w",
+        .inputs = "i",
+        .parents = "p",
+        .engine = "workz",
+        .outputs = &.{.{ .path = "/w/x", .id = "1:2:3:4:5" }},
+        .attempt = "dir",
+        .finished = "now",
+    });
+    try st.save(testing.allocator);
+    try s.files.append(testing.allocator, try std.fs.path.join(testing.allocator, &.{ s.path, "state.json" }));
+    var again = try state.load(testing.allocator, s.path);
+    defer again.deinit();
+    const e = again.data.rules.map.get("x").?;
+    try testing.expectEqualStrings("k", e.key);
+    try testing.expectEqualStrings("1:2:3:4:5", e.outputs[0].id);
+
+    _ = try s.file("state.json", "{\"format_version\": 9}");
+    try testing.expectError(error.UnsupportedState, state.load(testing.allocator, s.path));
+    _ = try s.file("state.json", "not json");
+    try testing.expectError(error.CorruptState, state.load(testing.allocator, s.path));
 }
