@@ -6,14 +6,22 @@ const sys = workz.sys;
 const workflow = workz.workflow;
 const graph = workz.graph;
 const run = workz.run;
+const plan = workz.plan;
 const state = workz.state;
+const monitor = workz.monitor;
+
 const usage =
     \\usage: workz <command> [options]
     \\
     \\commands:
     \\  validate WORKFLOW        check the workflow file and graph
+    \\  plan WORKFLOW            show which rules would run or be reused (alias: dry-run)
+    \\  explain WORKFLOW RULE    show why a rule would run
     \\  graph WORKFLOW           print the selected graph in DOT form
     \\  run WORKFLOW             run the selected rules
+    \\  watch [WORKFLOW]         live view of the newest launch
+    \\  status [WORKFLOW]        summary of the newest launch
+    \\  verify WORKFLOW          check recorded outputs (--content hashes them)
     \\  version                  print the engine version
     \\
     \\common options:
@@ -33,6 +41,10 @@ const usage =
     \\  --grace SECONDS          wait before killing a stopped task (default 10)
     \\  --no-isolation           no network namespace and no cgroup limits
     \\  -q, --quiet              no progress lines on stderr
+    \\
+    \\watch options:
+    \\  --once                   print one view and exit
+    \\  --interval MS            refresh interval (default 1000)
     \\
 ;
 
@@ -71,7 +83,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "__hold")) hold(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -199,9 +211,124 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
     return .ok;
 }
 
+const PlanExtra = struct {
+    rerun: *bool,
+    fn option(self: PlanExtra, arg: []const u8, _: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--rerun")) {
+            self.rerun.* = true;
+            return 1;
+        }
+        return 0;
+    }
+};
+
+fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities) !plan.Context {
+    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, c.env.get("PATH") orelse "");
+}
+
+fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
+    var common: Common = .{};
+    var rerun = false;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun })) |e| return e;
+    var l = (try load(c, &common)) orelse return .usage;
+    defer l.deinit();
+    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    defer st.deinit();
+    var ids = state.Identities.init(c.gpa);
+    defer ids.deinit();
+    var ctx = try planContext(c, &l, &st, &ids);
+    ctx.rerun = rerun;
+    var buf: [16384]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    try plan.printPlan(&w.interface, &ctx, l.mask);
+    try w.interface.flush();
+    return .ok;
+}
+
+fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    if (try parseArgs(c.a, args, &common, NoExtra{})) |e| return e;
+    if (common.positional.items.len != 1) return fail("explain needs a workflow file and one rule name", .{});
+    var l = (try load(c, &common)) orelse return .usage;
+    defer l.deinit();
+    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    defer st.deinit();
+    var ids = state.Identities.init(c.gpa);
+    defer ids.deinit();
+    var ctx = try planContext(c, &l, &st, &ids);
+    var buf: [16384]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);
+    try w.interface.flush();
+    if (!found) return fail("unknown rule '{s}'", .{common.positional.items[0]});
+    return .ok;
+}
+
+const VerifyExtra = struct {
+    content: *bool,
+    fn option(self: VerifyExtra, arg: []const u8, _: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--content")) {
+            self.content.* = true;
+            return 1;
+        }
+        return 0;
+    }
+};
+
+fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    var content = false;
+    if (try parseArgs(c.a, args, &common, VerifyExtra{ .content = &content })) |e| return e;
+    var l = (try load(c, &common)) orelse return .usage;
+    defer l.deinit();
+    const rec = try workz.records.recordsDir(c.a, l.wf.root);
+    try sys.mkdirAll(c.gpa, rec);
+    const lock = workz.records.lock(c.gpa, rec) catch |err| switch (err) {
+        error.Busy => return fail("a run is active in {s}", .{l.wf.root}),
+        else => return err,
+    };
+    defer sys.close(lock);
+    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    defer st.deinit();
+    var ids = state.Identities.init(c.gpa);
+    defer ids.deinit();
+    var buf: [16384]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
+    try w.interface.flush();
+    return if (ok) .ok else .failed;
+}
+
+const WatchExtra = struct {
+    once: *bool,
+    interval: *u64,
+    fn option(self: WatchExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--once")) {
+            self.once.* = true;
+            return 1;
+        }
+        if (std.mem.eql(u8, arg, "--interval")) {
+            const v = value orelse return badValue(arg);
+            self.interval.* = std.fmt.parseInt(u64, v, 10) catch return badValue(arg);
+            return 2;
+        }
+        return 0;
+    }
+};
+
 fn badValue(arg: []const u8) usize {
     std.debug.print("workz: {s} needs a valid value\n", .{arg});
     return std.math.maxInt(usize);
+}
+
+fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
+    var common: Common = .{};
+    var once = summary;
+    var interval: u64 = 1000;
+    if (try parseArgs(c.a, args, &common, WatchExtra{ .once = &once, .interval = &interval })) |e| return e;
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    const ok = if (summary) try monitor.status(c.gpa, c.io, root) else try monitor.watch(c.gpa, c.io, root, once, @max(interval, 100));
+    return if (ok) .ok else .failed;
 }
 
 const RunExtra = struct {

@@ -15,6 +15,8 @@ test {
     testing.refAllDecls(workz.records);
     testing.refAllDecls(workz.process);
     testing.refAllDecls(workz.cgroup);
+    testing.refAllDecls(workz.plan);
+    testing.refAllDecls(workz.monitor);
     testing.refAllDecls(workz.sys);
 }
 
@@ -64,6 +66,17 @@ test "within accepts only a path at or below the root" {
     try testing.expect(workflow.within("/w", "/w/a/b"));
     try testing.expect(!workflow.within("/w", "/work/a"));
     try testing.expect(!workflow.within("/w/a", "/w"));
+}
+
+test "event times parse back to the epoch nanoseconds they were written from" {
+    const ns: i128 = 1_792_782_446_812_000_000;
+    var buf: [32]u8 = undefined;
+    var w = std.Io.Writer.fixed(&buf);
+    try sys.formatTime(&w, ns);
+    try testing.expectEqualStrings("2026-10-23T19:07:26.812Z", w.buffered());
+    try testing.expectEqual(@as(?i128, ns), workz.monitor.parseTime(w.buffered()));
+    try testing.expectEqual(@as(?i128, 0), workz.monitor.parseTime("1970-01-01T00:00:00.000Z"));
+    try testing.expectEqual(@as(?i128, null), workz.monitor.parseTime("garbage"));
 }
 
 /// A temporary working directory under /var/tmp, removed file by file.
