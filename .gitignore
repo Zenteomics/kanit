@@ -1,0 +1,11 @@
+zig-out/
+.zig*/
+zig-pkg/
+
+AGENTS.md
+plan/
+tests/rules/
+tools/.local/
+tools/bin/
+data/
+tmp/
