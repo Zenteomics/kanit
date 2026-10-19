@@ -350,3 +350,10 @@ test "the keyed environment lists PATH, locale, time zone and passed names in or
     const text = try state.envText(arena.allocator(), &env, &.{ "REF", "MISSING" });
     try testing.expectEqualStrings("PATH=/usr/bin\nLANG unset\nLC_ALL unset\nTZ=UTC\nMISSING unset\nREF=/data\n", text);
 }
+
+test "pressure totals are read from their some and full lines" {
+    const text = "some avg10=0.00 avg60=0.10 avg300=0.00 total=1234\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=56\n";
+    try testing.expectEqual(@as(?u64, 1234), workz.cgroup.pressureTotal(text, "some"));
+    try testing.expectEqual(@as(?u64, 56), workz.cgroup.pressureTotal(text, "full"));
+    try testing.expectEqual(@as(?u64, null), workz.cgroup.pressureTotal("garbage\n", "some"));
+}

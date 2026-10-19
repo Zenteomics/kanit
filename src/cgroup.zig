@@ -102,6 +102,13 @@ pub const Counters = struct {
     anon: ?u64 = null,
     file: ?u64 = null,
     file_mapped: ?u64 = null,
+    /// Pressure stall totals in microseconds: time at least one task of the
+    /// group ("some") or all of them ("full") waited for the resource.
+    cpu_some_us: ?u64 = null,
+    memory_some_us: ?u64 = null,
+    memory_full_us: ?u64 = null,
+    io_some_us: ?u64 = null,
+    io_full_us: ?u64 = null,
 };
 
 pub fn read(gpa: Allocator, path: []const u8) Counters {
@@ -117,6 +124,20 @@ pub fn read(gpa: Allocator, path: []const u8) Counters {
     if (readKeyed(gpa, path, "cpu.stat")) |kv| {
         defer gpa.free(kv);
         c.cpu_usage_usec = field(kv, "usage_usec");
+    }
+    if (readKeyed(gpa, path, "cpu.pressure")) |kv| {
+        defer gpa.free(kv);
+        c.cpu_some_us = pressureTotal(kv, "some");
+    }
+    if (readKeyed(gpa, path, "memory.pressure")) |kv| {
+        defer gpa.free(kv);
+        c.memory_some_us = pressureTotal(kv, "some");
+        c.memory_full_us = pressureTotal(kv, "full");
+    }
+    if (readKeyed(gpa, path, "io.pressure")) |kv| {
+        defer gpa.free(kv);
+        c.io_some_us = pressureTotal(kv, "some");
+        c.io_full_us = pressureTotal(kv, "full");
     }
     if (readKeyed(gpa, path, "memory.stat")) |kv| {
         defer gpa.free(kv);
@@ -148,6 +169,24 @@ fn field(text: []const u8, name: []const u8) ?u64 {
         return std.fmt.parseInt(u64, parts.next() orelse return null, 10) catch null;
     }
     return null;
+}
+
+/// The `total=` field of a pressure line ("some avg10=... total=N").
+pub fn pressureTotal(text: []const u8, kind: []const u8) ?u64 {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (!std.mem.startsWith(u8, line, kind)) continue;
+        const at = std.mem.indexOf(u8, line, "total=") orelse return null;
+        return std.fmt.parseInt(u64, std.mem.trim(u8, line[at + 6 ..], " "), 10) catch null;
+    }
+    return null;
+}
+
+/// CPU time used by the group so far, in microseconds.
+pub fn cpuUsage(gpa: Allocator, path: []const u8) ?u64 {
+    const kv = readKeyed(gpa, path, "cpu.stat") orelse return null;
+    defer gpa.free(kv);
+    return field(kv, "usage_usec");
 }
 
 /// True while any process remains in the group.

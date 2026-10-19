@@ -141,6 +141,10 @@ const Engine = struct {
     dirty: bool = false,
     pending_done: std.ArrayList([]const u8) = .empty,
     last_save_ns: i128 = 0,
+    /// Run samples: the next sample time and the CPU counter at the last one.
+    next_sample_ns: i128 = 0,
+    last_sample_ns: i128 = 0,
+    last_cpu_us: ?u64 = null,
     leftover_cgroups: std.ArrayList([]const u8) = .empty,
     finished: usize = 0,
     selected: usize = 0,
@@ -775,7 +779,41 @@ const Engine = struct {
             const save_at = self.last_save_ns + std.time.ns_per_s;
             best = if (best) |b| @min(b, save_at) else save_at;
         }
+        best = if (best) |b| @min(b, self.next_sample_ns) else self.next_sample_ns;
         return best;
+    }
+
+    /// Appends a `sample` event: what is running and waiting, what is
+    /// reserved, and, inside the run's cgroup, the memory and CPU in use.
+    fn sample(self: *Engine) void {
+        const now = sys.monoNs();
+        if (now < self.next_sample_ns) return;
+        var running_n: usize = 0;
+        var ready_n: usize = 0;
+        for (self.tasks) |t| switch (t.status) {
+            .running, .staging => running_n += 1,
+            .ready => ready_n += 1,
+            else => {},
+        };
+        var memory_current: ?u64 = null;
+        var cpu_cores: ?f64 = null;
+        if (self.tree) |tree| {
+            memory_current = cgroup.readNumber(self.gpa, tree.root, "memory.current");
+            const cpu = cgroup.cpuUsage(self.gpa, tree.root);
+            if (cpu != null and self.last_cpu_us != null and now > self.last_sample_ns)
+                cpu_cores = @as(f64, @floatFromInt(cpu.? -| self.last_cpu_us.?)) / (@as(f64, @floatFromInt(now - self.last_sample_ns)) / 1e3);
+            self.last_cpu_us = cpu;
+        }
+        self.events.emit("sample", .{
+            .running = running_n,
+            .ready = ready_n,
+            .threads_reserved = self.threads_used,
+            .memory_reserved_mib = self.memory_used,
+            .memory_current = memory_current,
+            .cpu_cores_used = cpu_cores,
+        });
+        self.last_sample_ns = now;
+        self.next_sample_ns = now + sample_interval_ns;
     }
 
     fn saveState(self: *Engine, force: bool) !void {
@@ -858,9 +896,13 @@ const Engine = struct {
             };
             try self.reapAll();
             self.checkTimers();
+            self.sample();
         }
     }
 };
+
+/// Interval between run samples.
+const sample_interval_ns: i128 = 5 * std.time.ns_per_s;
 
 fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
     for (wf.groups, 0..) |g, i| if (std.mem.eql(u8, g.name, name)) return i;
@@ -1077,6 +1119,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         t.max_attempts = 1 + (wf.rules[i].retries orelse opts.retry);
     }
     engine.last_save_ns = sys.monoNs();
+    engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
+    engine.last_sample_ns = engine.last_save_ns;
+    if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);
     const t0 = sys.monoNs();
     events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation });
 

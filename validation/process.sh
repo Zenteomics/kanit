@@ -236,6 +236,11 @@ check "the holder group carries the shared page cache" '[ "$held" -ge $((60 * 10
 peak=$(jq -r '.cgroup.file' "$(last_launch)/attempts/use1/001/record.json")
 check "a user task is not charged for the shared pages" '[ "$peak" -lt $((8 * 1024 * 1024)) ]'
 
+new samples
+{ header samples; rule busy '[]' '["b.txt"]' '"timeout 6 sh -c \"while :; do :; done\" || true; touch b.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "run samples show the CPU in use and attempts keep their pressure totals" 'jq -e "select(.event == \"sample\") | select(.cpu_cores_used > 0.5)" "$(last_launch)/events.jsonl" > /dev/null && jq -e ".cgroup.cpu_some_us != null and .cgroup.io_some_us != null" "$(last_launch)/attempts/busy/001/record.json" > /dev/null'
+
 # ---------------------------------------------------------------- inputs and formats
 new manifest
 echo data > ext.txt
