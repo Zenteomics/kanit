@@ -24,6 +24,7 @@ pub const Context = struct {
     env_text: []const u8,
     engine_id: []const u8,
     rerun: bool = false,
+    cut: ?state.Cutoff = null,
 
     pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8) !Context {
         return .{
@@ -41,6 +42,7 @@ pub const Context = struct {
     /// Decides every selected rule in graph order. A rule whose producer
     /// runs also runs: its inputs will change.
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
+        self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
         const out = try self.a.alloc(Decision, self.wf.rules.len);
         for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
         for (self.g.order) |i| {
@@ -52,16 +54,23 @@ pub const Context = struct {
 
     fn decide(self: *Context, i: usize, prior: []const Decision) !Decision {
         const r = &self.wf.rules[i];
-        for (self.g.parents[i]) |p| if (prior[p].run) return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "producer {s} runs", .{self.wf.rules[p].name}) };
+        for (self.g.parents[i]) |p| if (prior[p].run) {
+            const pr = &self.wf.rules[p];
+            const reason = if (pr.cutoff)
+                try std.fmt.allocPrint(self.a, "producer {s} runs; reused if its outputs repeat", .{pr.name})
+            else
+                try std.fmt.allocPrint(self.a, "producer {s} runs", .{pr.name});
+            return .{ .run = true, .reason = reason };
+        };
         const e = self.st.data.rules.map.get(r.name) orelse return .{ .run = true, .reason = "no completed record" };
         var names: std.ArrayList([]const u8) = .empty;
         var keys: std.ArrayList([]const u8) = .empty;
         for (self.g.parents[i]) |p| {
             try names.append(self.a, self.wf.rules[p].name);
-            try keys.append(self.a, if (prior[p].key) |k| k.key else if (self.st.data.rules.map.get(self.wf.rules[p].name)) |pe| pe.key else "none");
+            try keys.append(self.a, self.cut.?.parentKey(p, if (prior[p].key) |k| k.key else if (self.st.data.rules.map.get(self.wf.rules[p].name)) |pe| pe.key else "none"));
         }
         var missing: ?[]const u8 = null;
-        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &missing)) orelse
+        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
         if (self.rerun) return .{ .run = true, .reason = "rerun requested", .key = k };
         if (state.firstDifference(&e, &k)) |what| return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };

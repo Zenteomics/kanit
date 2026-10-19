@@ -106,6 +106,7 @@ const Engine = struct {
 
     st: *state.State,
     ids: *state.Identities,
+    cut: *state.Cutoff,
     events: *records.Events,
     journal: *records.Journal,
     records: []const u8,
@@ -179,10 +180,10 @@ const Engine = struct {
         for (self.g.parents[i]) |p| {
             try names.append(self.a, self.rule(p).name);
             const pk = if (self.tasks[p].key) |k| k.key else if (self.st.data.rules.map.get(self.rule(p).name)) |e| e.key else "none";
-            try keys.append(self.a, pk);
+            try keys.append(self.a, self.cut.parentKey(p, pk));
         }
         var missing: ?[]const u8 = null;
-        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &missing);
+        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, self.cut, &missing);
         if (key == null) {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
@@ -553,9 +554,13 @@ const Engine = struct {
 
         var outputs: std.ArrayList(state.Output) = .empty;
         if (ok) for (r.output_abs) |o| {
+            const sa = self.st.allocator();
             const id = (try self.ids.get(o)) orelse "";
-            try outputs.append(self.st.allocator(), .{ .path = try self.st.allocator().dupe(u8, o), .id = try self.st.allocator().dupe(u8, id) });
+            // Cutoff rules keep a content digest beside the identity.
+            const digest: ?[]const u8 = if (r.cutoff) try sa.dupe(u8, &try sys.sha256File(self.gpa, o)) else null;
+            try outputs.append(sa, .{ .path = try sa.dupe(u8, o), .id = try sa.dupe(u8, id), .sha256 = digest });
         };
+        if (ok and r.cutoff) try self.cut.record(self.a, i, outputs.items);
 
         try self.writeSideFiles(r, t, ok, wall_s, reaped, counters);
         const status: []const u8 = if (ok) "completed" else if (t.cancelled) "cancelled" else "failed";
@@ -896,6 +901,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     var ids = state.Identities.init(gpa);
     defer ids.deinit();
+    var cut = try state.Cutoff.init(a, gpa, wf, &st, &ids, true);
 
     // A recorded output that changed outside the engine is refused unless --rerun.
     var changed: usize = 0;
@@ -993,6 +999,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .group_used = try a.alloc(u32, wf.groups.len),
         .st = &st,
         .ids = &ids,
+        .cut = &cut,
         .events = &events,
         .journal = &journal,
         .records = rec,
@@ -1037,6 +1044,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // Inputs of finished rules must not have changed while the run went on.
     var post = state.Identities.init(gpa);
     defer post.deinit();
+    var post_cut = try state.Cutoff.init(a, gpa, wf, engine.st, &post, false);
     for (wf.rules, 0..) |*r, i| {
         const t = &engine.tasks[i];
         if (t.status != .completed and t.status != .reused) continue;
@@ -1045,10 +1053,10 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         var keys: std.ArrayList([]const u8) = .empty;
         for (g.parents[i]) |p| {
             try names.append(a, wf.rules[p].name);
-            try keys.append(a, if (engine.tasks[p].key) |pk| pk.key else "none");
+            try keys.append(a, post_cut.parentKey(p, if (engine.tasks[p].key) |pk| pk.key else "none"));
         }
         var missing: ?[]const u8 = null;
-        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &missing);
+        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &post_cut, &missing);
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
             _ = engine.st.data.rules.map.swapRemove(r.name);

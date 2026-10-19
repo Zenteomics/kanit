@@ -77,6 +77,41 @@ check "plan names the environment when the locale changes" 'grep -q "run   a  (e
 TZ=Asia/Tokyo "$workz" plan wf.toml --pass-env NEWVAR > plan-pass.txt
 check "a passed variable is part of the key" 'grep -q "run   a  (environment changed)" plan-pass.txt'
 
+# ---------------------------------------------------------------- early cutoff
+new cutoff
+echo data > in.txt
+write_cutoff() {
+  { header cutoff
+    rule up '["in.txt"]' '["up.txt"]' "\"$1\"" 'cutoff = true'
+    rule down '["up.txt"]' '["down.txt"]' '"cat up.txt up.txt > down.txt"'
+    rule plain '["in.txt"]' '["plain.txt"]' '"tr a-z A-Z < in.txt > plain.txt"' "$2"
+    rule after '["plain.txt"]' '["after.txt"]' '"cat plain.txt plain.txt > after.txt"'
+  } > wf.toml
+}
+write_cutoff "tr a-z A-Z < in.txt > up.txt" ""
+"$workz" run wf.toml "${iso[@]}" -q > c1.json
+check "a cutoff rule records the digests of its outputs" '[ "$(status_of c1.json completed)" = 4 ] && jq -e ".outputs[0].sha256 | length == 64" "$(last_launch)/attempts/up/001/record.json" > /dev/null'
+rm up.txt plain.txt
+"$workz" run wf.toml "${iso[@]}" -q > c2.json
+check "a regenerated cutoff output with the same bytes keeps its consumer reused" '[ "$(jq -r .counts.completed c2.json)" = 3 ] && [ "$(jq -r .counts.reused c2.json)" = 1 ] && jq -e "select(.event == \"task_reused\") | select(.rule == \"down\")" "$(last_launch)/events.jsonl" > /dev/null'
+write_cutoff "cat in.txt | tr a-z A-Z > up.txt" ""
+"$workz" run wf.toml "${iso[@]}" -q > c3.json
+check "a changed command that writes the same bytes keeps its consumer reused" '[ "$(status_of c3.json completed)" = 1 ] && [ "$(status_of c3.json reused)" = 3 ]'
+echo other > in.txt
+"$workz" run wf.toml "${iso[@]}" -q > c4.json
+check "different bytes rerun the consumers of a cutoff rule" '[ "$(status_of c4.json completed)" = 4 ]'
+echo tampered > up.txt
+"$workz" run wf.toml "${iso[@]}" -q > c5.json 2> err5.txt
+rc=$?
+check "a changed cutoff output is refused" '[ $rc = 1 ] && grep -q "changed since it was recorded" err5.txt'
+"$workz" run wf.toml "${iso[@]}" -q --rerun -t up > /dev/null 2>&1
+"$workz" run wf.toml "${iso[@]}" -q > /dev/null
+write_cutoff "cat in.txt | tr a-z A-Z > up.txt" "cutoff = true"
+"$workz" run wf.toml "${iso[@]}" -q > c6.json
+c6_runs=$(jq -r 'select(.event == "task_started") | .rule' "$(last_launch)/events.jsonl" | tr '\n' ' ')
+"$workz" run wf.toml "${iso[@]}" -q > c7.json
+check "turning cutoff on reruns only the direct consumers, once" '[ "$c6_runs" = "after " ] && [ "$(status_of c7.json reused)" = 4 ]'
+
 # ---------------------------------------------------------------- failure policy
 new failure
 { header failure

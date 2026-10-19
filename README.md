@@ -50,6 +50,7 @@ Each rule names its input files, its output files, one shell command and a resou
 - `groups` limits how many rules of a kind run together; `resource_groups.NAME.max` is the capacity.
 - `shared` names large read-only inputs. Before their first user starts, a holder maps each file once, and memory admission counts its size once however many rules use it.
 - `retries` (0-3) and `timeout` (`90s`, `30m`, `2h`, `1h30m`) apply to each attempt.
+- `cutoff = true` hashes the rule's outputs after it succeeds. When the rule runs again and writes the same bytes, its consumers are reused instead of run again. Use it on rules whose outputs repeat byte for byte (trimmed reads, sorted alignments, call tables); reports with dates gain nothing from it.
 
 ## Commands
 
@@ -76,7 +77,7 @@ Ready rules start in priority order, then by the time they became ready, then by
 
 A rule is reused when its command, keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and names given with `--pass-env`), resource request, written paths, input identities, producing rules and engine key are unchanged, and each recorded output still has its recorded identity. The engine key is a version number raised only when a change to workz can change what a rule produces, so rebuilding or upgrading workz does not by itself rerun work; `launch.json` records the executable's digest. A file's identity is its device, inode, size, and modification and change times. A rewrite that restores the modification time still changes the change time, which programs cannot set back.
 
-File contents are read only when asked: `--input-manifest` checks external inputs against `sha256:` digests (re-reading a file only when its identity changed), and `verify --content` hashes recorded outputs. An output changed outside workz stops the next run until `--rerun` runs the rule again; earlier bytes are kept.
+File contents are read only when asked: outputs of `cutoff` rules are hashed after they succeed, `--input-manifest` checks external inputs against `sha256:` digests (re-reading a file only when its identity changed), and `verify --content` hashes recorded outputs. An output changed outside workz stops the next run until `--rerun` runs the rule again; earlier bytes are kept.
 
 ## Records
 

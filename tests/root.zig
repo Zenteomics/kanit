@@ -165,6 +165,7 @@ test "format 1 accepts every rule field and the oxo-local resource tables" {
         \\benchmark = "bench/a.json"
         \\retries = 2
         \\timeout = "1h30m"
+        \\cutoff = true
         \\[rules.resources]
         \\threads = 4
         \\memory = "512M"
@@ -184,6 +185,8 @@ test "format 1 accepts every rule field and the oxo-local resource tables" {
     try testing.expectEqual(@as(i64, -5), r.priority);
     try testing.expectEqual(@as(?u32, 2), r.retries);
     try testing.expectEqual(@as(?u64, 5400), r.timeout_s);
+    try testing.expect(r.cutoff);
+    try testing.expect(!wf.rules[1].cutoff);
     try testing.expectEqualStrings("disk", r.groups[0].name);
     try testing.expectEqualStrings("ref", r.shared[0]);
     try testing.expectEqualStrings("/abs/in.txt", r.input_abs[1]);
@@ -201,6 +204,7 @@ test "format 1 rejects unknown keys, bad values and unsafe paths" {
     try expectInvalid(head ++ "[[rules]]\nname = \"-x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "invalid rule name");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\nretries = 9\n", "retries must be between 0 and 3");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ntimeout = \"soon\"\n", "invalid timeout");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ncutoff = \"yes\"\n", "cutoff must be true or false");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ninput = [\"*.bam\"]\n", "explicit local path");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"/tmp/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "relative path inside the working directory");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\".workz/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "engine record directory");
@@ -227,30 +231,30 @@ test "the rule key changes with each of its parts" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
-    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
     try testing.expectEqualStrings(base.key, same.key);
-    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_path.key));
-    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", &missing)).?;
+    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", null, &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_engine.key));
-    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", &missing)).?;
+    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", null, &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, with_parent.key));
     var changed = wf.rules[0];
     changed.threads = 2;
-    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
     try testing.expectEqualStrings("threads=2 memory=1M", more_threads.request);
     try testing.expect(!std.mem.eql(u8, base.key, more_threads.key));
     changed = wf.rules[0];
     changed.shell = "cat in.txt in.txt > x";
-    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_cmd.key));
 
     // Rewriting the input changes its identity even with the same size.
     _ = try s.file("in.txt", "DATA");
     var fresh = state.Identities.init(testing.allocator);
     defer fresh.deinit();
-    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", &missing)).?;
+    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.inputs, rewritten.inputs));
     try testing.expectEqualStrings(base.command, rewritten.command);
 }
@@ -329,7 +333,7 @@ test "the key of a fixed rule matches its pinned value" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, &missing)).?;
+    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, &missing)).?;
     try testing.expectEqualStrings("workz-key 1", k.engine);
     try testing.expectEqualStrings("fb44c8554f20cbcce320f90cc01a60ee6a202b0c374fc2aaf8d4e239196e4ed9", k.key);
 }

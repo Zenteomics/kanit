@@ -30,6 +30,8 @@ pub const Rule = struct {
     benchmark_abs: ?[]const u8,
     retries: ?u32,
     timeout_s: ?u64,
+    /// Hash outputs after success so consumers are reused when they repeat.
+    cutoff: bool,
     groups: []const GroupUse,
     shared: []const []const u8,
 };
@@ -84,7 +86,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
 const shared_keys = [_][]const u8{"path"};
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -144,6 +146,14 @@ const Parser = struct {
         return switch (v) {
             .integer => |i| @intCast(i.value),
             else => self.failKey(at, key, "{s}.{s} must be an integer", .{ where, key }),
+        };
+    }
+
+    fn boolean(self: *Parser, table: *const toml.Table, key: []const u8, at: []const toml.PathSegment, where: []const u8) !?bool {
+        const v = table.get(key) orelse return null;
+        return switch (v) {
+            .boolean => |b| b,
+            else => self.failKey(at, key, "{s}.{s} must be true or false", .{ where, key }),
         };
     }
 
@@ -459,6 +469,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
             .retries = retries,
             .timeout_s = timeout_s,
+            .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
             .groups = group_uses.items,
             .shared = shared_uses,
         };
