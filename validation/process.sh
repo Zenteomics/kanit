@@ -126,7 +126,8 @@ check "a process that leaves the task's session is ended with its cgroup" '! ali
 new oom
 { header oom; rule hog '[]' '["h.txt"]' '"python3 -I -c \"b = bytearray(300 * 1024 * 1024)\"; touch h.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
-check "a task above its memory request is OOM-killed and reported" 'grep -q "out of memory: exceeded its 64 MiB request" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "a task above its memory request is OOM-killed and reported" 'grep -q "out of memory: could not stay within its 64 MiB request" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "an OOM kill ends the whole task, its shell included" 'jq -e ".signal == 9 and .exit_code == null" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
 
 new interrupt
 { header interrupt

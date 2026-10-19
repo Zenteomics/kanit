@@ -339,7 +339,7 @@ const Engine = struct {
         t.cg = null;
         if (self.tree) |tree| {
             const name = try std.fmt.allocPrint(self.a, "task-{d}-{d}", .{ i, t.attempts });
-            t.cg = try cgroup.create(self.gpa, self.a, tree, name, .{ .memory_bytes = r.memory_mib * 1024 * 1024, .threads = r.threads });
+            t.cg = try cgroup.create(self.gpa, self.a, tree, name, .{ .memory_bytes = r.memory_mib * 1024 * 1024, .threads = r.threads, .oom_group = true });
             procs = try cgroup.openProcs(self.gpa, t.cg.?);
         }
         defer if (procs >= 0) sys.close(procs);
@@ -533,7 +533,7 @@ const Engine = struct {
         } else if (t.timed_out) {
             reason = try std.fmt.allocPrint(self.a, "timed out after {d} s", .{self.timeoutOf(r).?});
         } else if (counters != null and counters.?.oom_kill > 0) {
-            reason = try std.fmt.allocPrint(self.a, "out of memory: exceeded its {d} MiB request", .{r.memory_mib});
+            reason = try std.fmt.allocPrint(self.a, "out of memory: could not stay within its {d} MiB request", .{r.memory_mib});
         } else if (code) |c| {
             if (c == 0) {
                 ok = true;

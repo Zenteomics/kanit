@@ -46,7 +46,7 @@ shared = ["reference"]
 
 Each rule names its input files, its output files, one shell command and a resource request. A rule runs after the rules that produce its inputs. Samples and parameters are expanded by whatever prepares the file; workz reads an explicit graph. Unknown keys are errors that name their line and the closest known key.
 
-- `threads` and `memory` (`K`, `M`, `G` or `T`) are reserved while the rule runs and enforced through the task's cgroup: memory above the request ends the attempt as out of memory.
+- `threads` and `memory` (`K`, `M`, `G` or `T`) are reserved while the rule runs and enforced through the task's cgroup: private memory above the request ends every process of the attempt as out of memory. Page cache from the files a task reads and writes is not reserved; the kernel reclaims it at the limit, which can slow large writes under a small request.
 - `groups` limits how many rules of a kind run together; `resource_groups.NAME.max` is the capacity.
 - `shared` names large read-only inputs. Before their first user starts, a holder maps each file once, and memory admission counts its size once however many rules use it.
 - `retries` (0-3) and `timeout` (`90s`, `30m`, `2h`, `1h30m`) apply to each attempt.

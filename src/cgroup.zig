@@ -3,7 +3,8 @@
 //! The engine moves itself into an `engine` leaf, enables the memory, cpu and
 //! pids controllers for the scope, and gives each task attempt and each shared
 //! input holder its own child group. Task groups get `memory.max` equal to the
-//! request, no swap, and a CPU quota equal to the requested threads.
+//! request, no swap, whole-group OOM kills, and a CPU quota equal to the
+//! requested threads.
 const std = @import("std");
 const sys = @import("sys.zig");
 const Allocator = std.mem.Allocator;
@@ -54,6 +55,9 @@ fn writeText(gpa: Allocator, path: []const u8, text: []const u8) !void {
 pub const Limits = struct {
     memory_bytes: ?u64 = null,
     threads: ?u32 = null,
+    /// On OOM the kernel kills every process of the group together, so a
+    /// command never runs on after one of its processes was killed.
+    oom_group: bool = false,
 };
 
 /// Creates `<root>/<name>` with the given limits and swap disabled.
@@ -65,6 +69,7 @@ pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits
         var buf: [32]u8 = undefined;
         try set(gpa, path, "memory.max", try std.fmt.bufPrint(&buf, "{d}", .{m}));
     }
+    if (limits.oom_group) try set(gpa, path, "memory.oom.group", "1");
     if (limits.threads) |t| {
         var buf: [48]u8 = undefined;
         try set(gpa, path, "cpu.max", try std.fmt.bufPrint(&buf, "{d} 100000", .{@as(u64, t) * 100000}));
