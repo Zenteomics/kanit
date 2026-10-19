@@ -358,3 +358,10 @@ test "pressure totals are read from their some and full lines" {
     try testing.expectEqual(@as(?u64, 56), workz.cgroup.pressureTotal(text, "full"));
     try testing.expectEqual(@as(?u64, null), workz.cgroup.pressureTotal("garbage\n", "some"));
 }
+
+test "kinds of rules drop their sample part" {
+    try testing.expectEqualStrings("STAR_ALIGN", workz.report.pattern("pool_01_baseline__STAR_ALIGN"));
+    try testing.expectEqualStrings("classify", workz.report.pattern("classify_03JW"));
+    try testing.expectEqualStrings("merge", workz.report.pattern("merge"));
+    try testing.expectEqualStrings("_x", workz.report.pattern("_x"));
+}

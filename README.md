@@ -101,6 +101,8 @@ Events also say why a ready rule waited (`task_waiting`) and sample the run's re
 
 `workz report` prints one row per attempt of the newest launch (or `--launch ID`) as TSV, or JSON with `--format json`: wall and CPU time, CPU efficiency, memory request, cgroup peak, process peak RSS, OOM kills and limit events, time spent ready but waiting and its main reason, and the share of wall time the attempt stalled on CPU, memory and I/O.
 
+`workz report --bottlenecks` reads the same records and says what limited the run: the critical path from the last task back to the start, with each step's run and waiting time; total waiting per reason (`threads`, `memory`, `jobs`, `group:NAME`, `loading shared inputs`); for each kind of rule (its name without the sample part), the request against the largest peak, a suggested request, CPU efficiency and whether it was CPU-, memory- or I/O-bound; and the reserved and used CPU and memory from the run samples.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY.md).

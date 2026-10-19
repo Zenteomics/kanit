@@ -208,6 +208,8 @@ check "time spent waiting for the group is recorded with its reason" '[ "$waited
 "$workz" report -d . > report.tsv
 "$workz" report -d . --format json > report.json
 check "report lists every attempt with its use" '[ "$(wc -l < report.tsv)" = 4 ] && head -1 report.tsv | grep -q "^rule	attempt	status	wall_s" && jq -e "length == 3 and (.[0].waited_s | type == \"number\")" report.json > /dev/null'
+"$workz" report -d . --bottlenecks > bottlenecks.txt
+check "the bottleneck report names the critical path, the waiting group and request sizing" 'grep -q "critical path" bottlenecks.txt && grep -q "group:disk" bottlenecks.txt && grep -q "^  g3  *1 " bottlenecks.txt'
 
 new budget
 { header budget

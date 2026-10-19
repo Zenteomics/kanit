@@ -23,7 +23,7 @@ const usage =
     \\  watch [WORKFLOW]         live view of the newest launch
     \\  status [WORKFLOW]        summary of the newest launch
     \\  verify WORKFLOW          check recorded outputs (--content hashes them)
-    \\  report [WORKFLOW]        what each attempt of a launch used
+    \\  report [WORKFLOW]        what each attempt of a launch used (--bottlenecks: what limited it)
     \\  version                  print the engine version
     \\
     \\common options:
@@ -47,6 +47,7 @@ const usage =
     \\report options:
     \\  --launch ID              a launch other than the newest
     \\  --format tsv|json        attempt table format (default tsv)
+    \\  --bottlenecks            critical path, waiting, request sizing, utilization
     \\
     \\watch options:
     \\  --once                   print one view and exit
@@ -350,7 +351,12 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
 const ReportExtra = struct {
     launch: *?[]const u8,
     json: *bool,
+    bottlenecks: *bool,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--bottlenecks")) {
+            self.bottlenecks.* = true;
+            return 1;
+        }
         if (std.mem.eql(u8, arg, "--launch")) {
             self.launch.* = value orelse return badValue(arg);
             return 2;
@@ -368,15 +374,20 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var launch: ?[]const u8 = null;
     var json = false;
-    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .json = &json })) |e| return e;
+    var bottlenecks = false;
+    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .json = &json, .bottlenecks = &bottlenecks })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
     if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
     var buf: [65536]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
-    const rows = try report.attempts(c.gpa, c.a, dir);
-    if (json) try report.writeJson(&w.interface, rows) else try report.writeTsv(&w.interface, rows);
+    if (bottlenecks) {
+        try report.writeBottlenecks(c.gpa, c.a, &w.interface, dir);
+    } else {
+        const rows = try report.attempts(c.gpa, c.a, dir);
+        if (json) try report.writeJson(&w.interface, rows) else try report.writeTsv(&w.interface, rows);
+    }
     try w.interface.flush();
     return .ok;
 }
