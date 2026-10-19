@@ -20,11 +20,12 @@ pub const Context = struct {
     g: *const graph.Graph,
     st: *state.State,
     ids: *state.Identities,
-    path_env: []const u8,
+    /// Environment part of rule keys (state.envText).
+    env_text: []const u8,
     engine_id: []const u8,
     rerun: bool = false,
 
-    pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, path_env: []const u8) !Context {
+    pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8) !Context {
         return .{
             .gpa = gpa,
             .a = a,
@@ -32,7 +33,7 @@ pub const Context = struct {
             .g = g,
             .st = st,
             .ids = ids,
-            .path_env = path_env,
+            .env_text = env_text,
             .engine_id = state.engine_key_text,
         };
     }
@@ -60,7 +61,7 @@ pub const Context = struct {
             try keys.append(self.a, if (prior[p].key) |k| k.key else if (self.st.data.rules.map.get(self.wf.rules[p].name)) |pe| pe.key else "none");
         }
         var missing: ?[]const u8 = null;
-        const k = (try state.computeKey(self.a, self.ids, r, self.path_env, names.items, keys.items, self.engine_id, &missing)) orelse
+        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
         if (self.rerun) return .{ .run = true, .reason = "rerun requested", .key = k };
         if (state.firstDifference(&e, &k)) |what| return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };
@@ -98,7 +99,7 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
     if (d.key) |k| {
         const parts = [_]struct { []const u8, []const u8, []const u8 }{
             .{ "command", e.command, k.command },
-            .{ "PATH", e.env, k.env },
+            .{ "environment", e.env, k.env },
             .{ "request", e.request, k.request },
             .{ "writes", e.writes, k.writes },
             .{ "inputs", e.inputs, k.inputs },

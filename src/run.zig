@@ -112,7 +112,8 @@ const Engine = struct {
     launch_dir: []const u8,
     /// Engine part of every rule key (state.engine_key_text).
     engine_id: []const u8,
-    path_env: []const u8,
+    /// Environment part of rule keys (state.envText).
+    env_text: []const u8,
     envp: process.Vec,
     bash: [:0]const u8,
     devnull: sys.Fd,
@@ -181,7 +182,7 @@ const Engine = struct {
             try keys.append(self.a, pk);
         }
         var missing: ?[]const u8 = null;
-        const key = try state.computeKey(self.a, self.ids, r, self.path_env, names.items, keys.items, self.engine_id, &missing);
+        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &missing);
         if (key == null) {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
@@ -938,10 +939,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     }
 
     var env_list: std.ArrayList([]const u8) = .empty;
-    var path_env: []const u8 = "";
+    const env_text = try state.envText(a, environ, opts.pass_env);
     for (env_allow) |name| if (environ.get(name)) |v| {
         try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
-        if (std.mem.eql(u8, name, "PATH")) path_env = v;
     };
     for (opts.pass_env) |name| if (environ.get(name)) |v| {
         try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
@@ -998,7 +998,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .records = rec,
         .launch_dir = launch.dir,
         .engine_id = state.engine_key_text,
-        .path_env = path_env,
+        .env_text = env_text,
         .envp = try process.Vec.init(a, env_list.items),
         .bash = findBash(gpa) orelse {
             std.debug.print("workz: bash not found\n", .{});
@@ -1048,7 +1048,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             try keys.append(a, if (engine.tasks[p].key) |pk| pk.key else "none");
         }
         var missing: ?[]const u8 = null;
-        const again = try state.computeKey(a, &post, r, path_env, names.items, keys.items, state.engine_key_text, &missing);
+        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &missing);
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
             _ = engine.st.data.rules.map.swapRemove(r.name);

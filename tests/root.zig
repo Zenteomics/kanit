@@ -333,3 +333,16 @@ test "the key of a fixed rule matches its pinned value" {
     try testing.expectEqualStrings("workz-key 1", k.engine);
     try testing.expectEqualStrings("fb44c8554f20cbcce320f90cc01a60ee6a202b0c374fc2aaf8d4e239196e4ed9", k.key);
 }
+
+test "the keyed environment lists PATH, locale, time zone and passed names in order" {
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", "/usr/bin");
+    try env.put("TZ", "UTC");
+    try env.put("HOME", "/home/x");
+    try env.put("REF", "/data");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const text = try state.envText(arena.allocator(), &env, &.{ "REF", "MISSING" });
+    try testing.expectEqualStrings("PATH=/usr/bin\nLANG unset\nLC_ALL unset\nTZ=UTC\nMISSING unset\nREF=/data\n", text);
+}

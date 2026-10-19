@@ -32,6 +32,7 @@ alive() { [ -d "/proc/$1" ] && ! grep -q '^State:.*Z' "/proc/$1/status" 2>/dev/n
 iso=(--max-threads 4 --max-memory 2G)
 
 # ---------------------------------------------------------------- reuse
+export TZ=UTC LANG=C.UTF-8
 new reuse
 echo hello > in.txt
 { header reuse
@@ -66,6 +67,15 @@ check "--rerun keeps the earlier bytes in previous/" 'grep -rq tampered "$(last_
 check "verify accepts recorded outputs" 'grep -q "all match" verify.txt'
 "$workz" verify wf.toml --content > verify2.txt
 check "verify --content stores digests" 'grep -q "digests stored" verify2.txt && grep -q sha256 .workz/state.json'
+"$workz" run wf.toml "${iso[@]}" -q > settle.json
+"$workz" run wf.toml "${iso[@]}" -q > tz1.json
+TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > tz2.json
+TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > tz3.json
+check "a time zone change reruns every rule and an unchanged one reuses them" '[ "$(status_of tz1.json reused)" = 3 ] && [ "$(status_of tz2.json completed)" = 3 ] && [ "$(status_of tz3.json reused)" = 3 ]'
+TZ=Asia/Tokyo LANG=C "$workz" plan wf.toml > plan-lang.txt
+check "plan names the environment when the locale changes" 'grep -q "run   a  (environment changed)" plan-lang.txt && grep -q "run   c  (environment changed)" plan-lang.txt'
+TZ=Asia/Tokyo "$workz" plan wf.toml --pass-env NEWVAR > plan-pass.txt
+check "a passed variable is part of the key" 'grep -q "run   a  (environment changed)" plan-pass.txt'
 
 # ---------------------------------------------------------------- failure policy
 new failure

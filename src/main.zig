@@ -16,7 +16,7 @@ const usage =
     \\commands:
     \\  validate WORKFLOW        check the workflow file and graph
     \\  plan WORKFLOW            show which rules would run or be reused (alias: dry-run)
-    \\  explain WORKFLOW RULE    show why a rule would run
+    \\  explain WORKFLOW RULE    show why a rule would run (plan and explain accept --pass-env)
     \\  graph WORKFLOW           print the selected graph in DOT form
     \\  run WORKFLOW             run the selected rules
     \\  watch [WORKFLOW]         live view of the newest launch
@@ -213,30 +213,37 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
 
 const PlanExtra = struct {
     rerun: *bool,
-    fn option(self: PlanExtra, arg: []const u8, _: ?[]const u8) !usize {
+    pass: *std.ArrayList([]const u8),
+    a: std.mem.Allocator,
+    fn option(self: PlanExtra, arg: []const u8, value: ?[]const u8) !usize {
         if (std.mem.eql(u8, arg, "--rerun")) {
             self.rerun.* = true;
             return 1;
+        }
+        if (std.mem.eql(u8, arg, "--pass-env")) {
+            try self.pass.append(self.a, value orelse return badValue(arg));
+            return 2;
         }
         return 0;
     }
 };
 
-fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities) !plan.Context {
-    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, c.env.get("PATH") orelse "");
+fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
+    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass));
 }
 
 fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var common: Common = .{};
     var rerun = false;
-    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun })) |e| return e;
+    var pass: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .a = c.a })) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     var st = try plan.loadState(c.gpa, l.wf.root, c.a);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = try planContext(c, &l, &st, &ids);
+    var ctx = try planContext(c, &l, &st, &ids, pass.items);
     ctx.rerun = rerun;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
@@ -247,7 +254,9 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
 
 fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
-    if (try parseArgs(c.a, args, &common, NoExtra{})) |e| return e;
+    var rerun = false;
+    var pass: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .a = c.a })) |e| return e;
     if (common.positional.items.len != 1) return fail("explain needs a workflow file and one rule name", .{});
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
@@ -255,7 +264,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = try planContext(c, &l, &st, &ids);
+    var ctx = try planContext(c, &l, &st, &ids, pass.items);
+    ctx.rerun = rerun;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
     const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);

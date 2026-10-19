@@ -74,7 +74,7 @@ Ready rules start in priority order, then by the time they became ready, then by
 
 ## Reuse
 
-A rule is reused when its command, search path, resource request, written paths, input identities, producing rules and engine are unchanged, and each recorded output still has its recorded identity. A file's identity is its device, inode, size, and modification and change times. A rewrite that restores the modification time still changes the change time, which programs cannot set back.
+A rule is reused when its command, keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and names given with `--pass-env`), resource request, written paths, input identities, producing rules and engine key are unchanged, and each recorded output still has its recorded identity. The engine key is a version number raised only when a change to workz can change what a rule produces, so rebuilding or upgrading workz does not by itself rerun work; `launch.json` records the executable's digest. A file's identity is its device, inode, size, and modification and change times. A rewrite that restores the modification time still changes the change time, which programs cannot set back.
 
 File contents are read only when asked: `--input-manifest` checks external inputs against `sha256:` digests (re-reading a file only when its identity changed), and `verify --content` hashes recorded outputs. An output changed outside workz stops the next run until `--rerun` runs the rule again; earlier bytes are kept.
 

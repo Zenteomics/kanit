@@ -214,6 +214,27 @@ pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !v
     }
 }
 
+/// Environment variables that can change a command's output and so belong
+/// to the rule key. Session variables (HOME, USER, TERM, XDG_RUNTIME_DIR,
+/// DBUS_SESSION_BUS_ADDRESS) and TMPDIR are passed to rules but not keyed.
+pub const keyed_env = [_][]const u8{ "PATH", "LANG", "LC_ALL", "TZ" };
+
+/// The environment part of rule keys: each keyed variable and each name
+/// passed with --pass-env (sorted), with its value or as unset.
+pub fn envText(a: Allocator, environ: *const std.process.Environ.Map, pass_env: []const []const u8) ![]const u8 {
+    const passed = try a.dupe([]const u8, pass_env);
+    std.mem.sort([]const u8, passed, {}, lessConst);
+    var w: std.Io.Writer.Allocating = .init(a);
+    for ([_][]const []const u8{ &keyed_env, passed }) |names| for (names) |name| {
+        if (environ.get(name)) |v| try w.writer.print("{s}={s}\n", .{ name, v }) else try w.writer.print("{s} unset\n", .{name});
+    };
+    return w.toOwnedSlice();
+}
+
+fn lessConst(_: void, x: []const u8, y: []const u8) bool {
+    return std.mem.lessThan(u8, x, y);
+}
+
 pub const Key = struct {
     command: []const u8,
     env: []const u8,
@@ -245,7 +266,7 @@ pub fn computeKey(
     a: Allocator,
     ids: *Identities,
     r: *const workflow.Rule,
-    path_env: []const u8,
+    env_text: []const u8,
     parent_names: []const []const u8,
     parent_keys: []const []const u8,
     engine: []const u8,
@@ -253,7 +274,7 @@ pub fn computeKey(
 ) !?Key {
     var k: Key = undefined;
     k.command = try hex(a, r.shell);
-    k.env = try hex(a, path_env);
+    k.env = try hex(a, env_text);
     k.request = try requestText(a, r);
     {
         var w: std.Io.Writer.Allocating = .init(a);
@@ -292,7 +313,7 @@ pub fn computeKey(
 /// The first differing key part between a recorded entry and a new key.
 pub fn firstDifference(e: *const Entry, k: *const Key) ?[]const u8 {
     if (!std.mem.eql(u8, e.command, k.command)) return "command";
-    if (!std.mem.eql(u8, e.env, k.env)) return "PATH";
+    if (!std.mem.eql(u8, e.env, k.env)) return "environment";
     if (!std.mem.eql(u8, e.request, k.request)) return "resource request";
     if (!std.mem.eql(u8, e.writes, k.writes)) return "declared outputs, log or benchmark";
     if (!std.mem.eql(u8, e.inputs, k.inputs)) return "inputs";
