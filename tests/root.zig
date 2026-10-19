@@ -17,6 +17,7 @@ test {
     testing.refAllDecls(workz.cgroup);
     testing.refAllDecls(workz.plan);
     testing.refAllDecls(workz.monitor);
+    testing.refAllDecls(workz.report);
     testing.refAllDecls(workz.sys);
 }
 

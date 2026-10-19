@@ -9,6 +9,7 @@ const run = workz.run;
 const plan = workz.plan;
 const state = workz.state;
 const monitor = workz.monitor;
+const report = workz.report;
 
 const usage =
     \\usage: workz <command> [options]
@@ -22,6 +23,7 @@ const usage =
     \\  watch [WORKFLOW]         live view of the newest launch
     \\  status [WORKFLOW]        summary of the newest launch
     \\  verify WORKFLOW          check recorded outputs (--content hashes them)
+    \\  report [WORKFLOW]        what each attempt of a launch used
     \\  version                  print the engine version
     \\
     \\common options:
@@ -41,6 +43,10 @@ const usage =
     \\  --grace SECONDS          wait before killing a stopped task (default 10)
     \\  --no-isolation           no network namespace and no cgroup limits
     \\  -q, --quiet              no progress lines on stderr
+    \\
+    \\report options:
+    \\  --launch ID              a launch other than the newest
+    \\  --format tsv|json        attempt table format (default tsv)
     \\
     \\watch options:
     \\  --once                   print one view and exit
@@ -83,7 +89,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "__hold")) hold(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -339,6 +345,40 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     const ok = if (summary) try monitor.status(c.gpa, c.io, root) else try monitor.watch(c.gpa, c.io, root, once, @max(interval, 100));
     return if (ok) .ok else .failed;
+}
+
+const ReportExtra = struct {
+    launch: *?[]const u8,
+    json: *bool,
+    fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--launch")) {
+            self.launch.* = value orelse return badValue(arg);
+            return 2;
+        }
+        if (std.mem.eql(u8, arg, "--format")) {
+            const v = value orelse return badValue(arg);
+            if (std.mem.eql(u8, v, "json")) self.json.* = true else if (!std.mem.eql(u8, v, "tsv")) return badValue(arg);
+            return 2;
+        }
+        return 0;
+    }
+};
+
+fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    var launch: ?[]const u8 = null;
+    var json = false;
+    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .json = &json })) |e| return e;
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    const rec = try workz.records.recordsDir(c.a, root);
+    const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
+    if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
+    var buf: [65536]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    const rows = try report.attempts(c.gpa, c.a, dir);
+    if (json) try report.writeJson(&w.interface, rows) else try report.writeTsv(&w.interface, rows);
+    try w.interface.flush();
+    return .ok;
 }
 
 const RunExtra = struct {

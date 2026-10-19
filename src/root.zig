@@ -10,3 +10,4 @@ pub const cgroup = @import("cgroup.zig");
 pub const run = @import("run.zig");
 pub const plan = @import("plan.zig");
 pub const monitor = @import("monitor.zig");
+pub const report = @import("report.zig");

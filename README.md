@@ -95,6 +95,12 @@ Everything workz writes for itself lives in `.workz/` in the working directory:
 
 `watch` reads these files from any terminal and shows each running task with its elapsed time, current and peak memory, and last line of output.
 
+Events also say why a ready rule waited (`task_waiting`) and sample the run's reserved and used CPU and memory every 5 s (`sample`). `record.json` keeps each attempt's waiting time by reason and the kernel's CPU, memory and I/O pressure totals for its cgroup.
+
+## Reports
+
+`workz report` prints one row per attempt of the newest launch (or `--launch ID`) as TSV, or JSON with `--format json`: wall and CPU time, CPU efficiency, memory request, cgroup peak, process peak RSS, OOM kills and limit events, time spent ready but waiting and its main reason, and the share of wall time the attempt stalled on CPU, memory and I/O.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY.md).
