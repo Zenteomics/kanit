@@ -7,8 +7,6 @@ const state = @import("state.zig");
 const records = @import("records.zig");
 const Allocator = std.mem.Allocator;
 
-const version = @import("root.zig").version;
-
 pub const Decision = struct {
     run: bool,
     reason: []const u8,
@@ -27,8 +25,6 @@ pub const Context = struct {
     rerun: bool = false,
 
     pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, path_env: []const u8) !Context {
-        const exe = try sys.selfExe(a);
-        const digest = try sys.sha256File(gpa, exe);
         return .{
             .gpa = gpa,
             .a = a,
@@ -37,7 +33,7 @@ pub const Context = struct {
             .st = st,
             .ids = ids,
             .path_env = path_env,
-            .engine_id = try std.fmt.allocPrint(a, "workz {s} sha256:{s}", .{ version, &digest }),
+            .engine_id = state.engine_key_text,
         };
     }
 
@@ -107,7 +103,7 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
             .{ "writes", e.writes, k.writes },
             .{ "inputs", e.inputs, k.inputs },
             .{ "producers", e.parents, k.parents },
-            .{ "engine", e.engine, k.engine },
+            .{ "engine key", e.engine, k.engine },
         };
         for (parts) |p| try w.print("  {s:<10} {s}\n", .{ p[0], if (std.mem.eql(u8, p[1], p[2])) "same" else "changed" });
         if (!std.mem.eql(u8, e.request, k.request)) try w.print("    was: {s}\n    now: {s}\n", .{ e.request, k.request });

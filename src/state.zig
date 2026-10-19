@@ -12,6 +12,15 @@ const Allocator = std.mem.Allocator;
 
 pub const format_version: i64 = 1;
 
+/// Version of what a rule key covers. Raise it when the key parts or their
+/// encoding change, when what a command starts with changes (shell, flags,
+/// working directory, environment, `WORKZ_*` variables), when how outputs are
+/// taken or judged complete changes, or when a fix changes the bytes a rule
+/// leaves for the same inputs. Raising it reruns every rule once. Scheduling,
+/// records, monitoring and speed changes do not raise it.
+pub const engine_key: u32 = 1;
+pub const engine_key_text = std.fmt.comptimePrint("workz-key {d}", .{engine_key});
+
 pub const Output = struct {
     path: []const u8,
     id: []const u8,
@@ -288,6 +297,6 @@ pub fn firstDifference(e: *const Entry, k: *const Key) ?[]const u8 {
     if (!std.mem.eql(u8, e.writes, k.writes)) return "declared outputs, log or benchmark";
     if (!std.mem.eql(u8, e.inputs, k.inputs)) return "inputs";
     if (!std.mem.eql(u8, e.parents, k.parents)) return "a producing rule";
-    if (!std.mem.eql(u8, e.engine, k.engine)) return "engine";
+    if (!std.mem.eql(u8, e.engine, k.engine)) return "engine key";
     return null;
 }

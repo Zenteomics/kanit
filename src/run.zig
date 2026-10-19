@@ -110,6 +110,7 @@ const Engine = struct {
     journal: *records.Journal,
     records: []const u8,
     launch_dir: []const u8,
+    /// Engine part of every rule key (state.engine_key_text).
     engine_id: []const u8,
     path_env: []const u8,
     envp: process.Vec,
@@ -952,6 +953,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .bytes = h.bytes };
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.json" }), .{
         .engine = engine_id,
+        .engine_key = state.engine_key,
         .launch = launch.id,
         .workflow = wf.path,
         .workflow_sha256 = &sys.sha256Bytes(wf.source),
@@ -995,7 +997,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .journal = &journal,
         .records = rec,
         .launch_dir = launch.dir,
-        .engine_id = engine_id,
+        .engine_id = state.engine_key_text,
         .path_env = path_env,
         .envp = try process.Vec.init(a, env_list.items),
         .bash = findBash(gpa) orelse {
@@ -1046,7 +1048,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             try keys.append(a, if (engine.tasks[p].key) |pk| pk.key else "none");
         }
         var missing: ?[]const u8 = null;
-        const again = try state.computeKey(a, &post, r, path_env, names.items, keys.items, engine_id, &missing);
+        const again = try state.computeKey(a, &post, r, path_env, names.items, keys.items, state.engine_key_text, &missing);
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
             _ = engine.st.data.rules.map.swapRemove(r.name);
@@ -1069,6 +1071,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const elapsed = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
     const summary = .{
         .engine = engine_id,
+        .engine_key = state.engine_key,
         .launch = launch.id,
         .status = switch (outcome) {
             .ok => "completed",

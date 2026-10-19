@@ -316,3 +316,20 @@ test "state round-trips through its file and refuses other versions" {
     _ = try s.file("state.json", "not json");
     try testing.expectError(error.CorruptState, state.load(testing.allocator, s.path));
 }
+
+test "the key of a fixed rule matches its pinned value" {
+    // A change here means the key encoding changed: raise state.engine_key.
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ "[[rules]]\nname = \"pinned\"\noutput = [\"out.txt\"]\nlog = \"l.log\"\nshell = \"echo pinned > out.txt\"\nmemory = \"1G\"\n[rules.resources]\nthreads = 2\n", &problem);
+    defer wf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+    var missing: ?[]const u8 = null;
+    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, &missing)).?;
+    try testing.expectEqualStrings("workz-key 1", k.engine);
+    try testing.expectEqualStrings("fb44c8554f20cbcce320f90cc01a60ee6a202b0c374fc2aaf8d4e239196e4ed9", k.key);
+}
