@@ -203,6 +203,8 @@ new groups
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 overlap=$(cat g1.txt g2.txt g3.txt | paste - - | sort -n | awk 'NR > 1 && $1 < prev { o = 1 } { prev = $2 } END { print o + 0 }')
 check "a group of size 1 never runs two members together" '[ "$overlap" = 0 ] && [ "$(status_of s.json completed)" = 3 ]'
+waited=$(jq -r '[.queue.reasons[] | select(.reason == "group:disk") | .seconds] | add // 0' "$(last_launch)"/attempts/g*/001/record.json | awk '{ s += $1 } END { print (s > 0.5) }')
+check "time spent waiting for the group is recorded with its reason" '[ "$waited" = 1 ] && grep -q "\"reason\":\"group:disk\"" "$(last_launch)/events.jsonl"'
 
 new budget
 { header budget

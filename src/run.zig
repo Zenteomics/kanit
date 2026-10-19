@@ -53,7 +53,18 @@ const Task = struct {
     timed_out: bool = false,
     cancelled: bool = false,
     reason: []const u8 = "",
+    /// When the current attempt became ready (monotonic).
+    ready_ns: i128 = 0,
+    /// What keeps the ready attempt from starting, and since when.
+    wait_reason: ?[]const u8 = null,
+    wait_since: i128 = 0,
+    waits: std.ArrayList(Wait) = .empty,
+    /// Seconds from ready to start of the current attempt.
+    queued_s: f64 = 0,
 };
+
+/// Time a ready attempt spent waiting for one reason.
+const Wait = struct { reason: []const u8, seconds: f64 };
 
 const HolderState = enum { idle, loading, ready, stopping, failed };
 
@@ -99,6 +110,8 @@ const Engine = struct {
     tasks: []Task,
     holders: []Holder,
     group_used: []u32,
+    /// "group:NAME" per resource group, the wait reason it reports.
+    group_reasons: []const []const u8,
     threads_used: u32 = 0,
     memory_used: u64 = 0,
     jobs_used: u32 = 0,
@@ -205,6 +218,7 @@ const Engine = struct {
         t.status = .ready;
         self.ready_counter += 1;
         t.ready_seq = self.ready_counter;
+        t.ready_ns = sys.monoNs();
     }
 
     fn outputsIntact(self: *Engine, e: *const state.Entry) !bool {
@@ -217,21 +231,44 @@ const Engine = struct {
 
     // ---- admission ----
 
-    fn fits(self: *Engine, i: usize) bool {
+    /// The first resource that keeps a ready rule from starting, or null
+    /// when it fits: "jobs", "threads", "memory" or "group:NAME".
+    fn blocker(self: *Engine, i: usize) ?[]const u8 {
         const r = self.rule(i);
-        if (self.jobs_used + 1 > self.max_jobs) return false;
-        if (self.threads_used + r.threads > self.max_threads) return false;
+        if (self.jobs_used + 1 > self.max_jobs) return "jobs";
+        if (self.threads_used + r.threads > self.max_threads) return "threads";
         var mem = r.memory_mib;
         for (r.shared) |s| {
             const h = &self.holders[self.wf.sharedIndex(s).?];
             if (h.users == 0) mem += h.mib;
         }
-        if (self.memory_used + mem > self.max_memory) return false;
+        if (self.memory_used + mem > self.max_memory) return "memory";
         for (r.groups) |gu| {
             const gi = groupIndex(self.wf, gu.name);
-            if (self.group_used[gi] + gu.count > self.wf.groups[gi].max) return false;
+            if (self.group_used[gi] + gu.count > self.wf.groups[gi].max) return self.group_reasons[gi];
         }
-        return true;
+        return null;
+    }
+
+    /// Starts, changes or ends the current wait of a ready attempt.
+    fn setWait(self: *Engine, i: usize, reason: ?[]const u8) !void {
+        const t = &self.tasks[i];
+        if (t.wait_reason) |cur| {
+            if (reason != null and std.mem.eql(u8, cur, reason.?)) return;
+            try self.closeWait(t, cur);
+        }
+        t.wait_reason = reason;
+        t.wait_since = sys.monoNs();
+        if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why });
+    }
+
+    fn closeWait(self: *Engine, t: *Task, reason: []const u8) !void {
+        const s = @as(f64, @floatFromInt(sys.monoNs() - t.wait_since)) / 1e9;
+        for (t.waits.items) |*w| if (std.mem.eql(u8, w.reason, reason)) {
+            w.seconds += s;
+            return;
+        };
+        try t.waits.append(self.a, .{ .reason = reason, .seconds = s });
     }
 
     fn reserve(self: *Engine, i: usize, take: bool) void {
@@ -258,7 +295,10 @@ const Engine = struct {
         for (self.tasks, 0..) |t, i| if (t.status == .ready) try ready.append(self.gpa, i);
         std.mem.sort(usize, ready.items, self, readyBefore);
         for (ready.items) |i| {
-            if (!self.fits(i)) continue;
+            if (self.blocker(i)) |why| {
+                try self.setWait(i, why);
+                continue;
+            }
             self.reserve(i, true);
             const r = self.rule(i);
             var waiting = false;
@@ -272,6 +312,7 @@ const Engine = struct {
             }
             if (waiting) {
                 self.tasks[i].status = .staging;
+                try self.setWait(i, "loading shared inputs");
             } else try self.start(i);
         }
     }
@@ -297,6 +338,8 @@ const Engine = struct {
         t.timed_out = false;
         t.cancelled = false;
         t.kill_at = null;
+        try self.setWait(i, null);
+        t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
 
         const script = try std.fmt.allocPrint(self.a, "{s}/command.sh", .{t.dir});
         const body = try std.fmt.allocPrint(self.gpa, "#!/usr/bin/env bash\nset -euo pipefail\n{s}\n", .{r.shell});
@@ -372,7 +415,7 @@ const Engine = struct {
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
-        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib });
+        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s });
         self.progress("started {s} (attempt {d})", .{ r.name, t.attempts });
     }
 
@@ -583,6 +626,7 @@ const Engine = struct {
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared },
             .outputs = outputs.items,
+            .queue = .{ .waited_s = t.queued_s, .reasons = t.waits.items },
             .key = if (t.key) |k| k.key else null,
         });
 
@@ -617,6 +661,9 @@ const Engine = struct {
             t.status = .ready;
             self.ready_counter += 1;
             t.ready_seq = self.ready_counter;
+            t.ready_ns = sys.monoNs();
+            t.waits = .empty;
+            t.wait_reason = null;
             self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
             self.alert("retrying {s}: {s}", .{ r.name, reason });
             return;
@@ -997,6 +1044,11 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .tasks = try a.alloc(Task, wf.rules.len),
         .holders = holders,
         .group_used = try a.alloc(u32, wf.groups.len),
+        .group_reasons = blk: {
+            const reasons = try a.alloc([]const u8, wf.groups.len);
+            for (wf.groups, reasons) |grp, *s| s.* = try std.fmt.allocPrint(a, "group:{s}", .{grp.name});
+            break :blk reasons;
+        },
         .st = &st,
         .ids = &ids,
         .cut = &cut,
