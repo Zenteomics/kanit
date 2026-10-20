@@ -247,9 +247,12 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
 
     try criticalPath(gpa, a, w, launch_dir, &timing, t0);
 
-    var by_reason = try waitTotals(gpa, a, launch_dir);
+    var recorded = false;
+    var by_reason = try waitTotals(gpa, a, launch_dir, &recorded);
     try w.writeAll("\nwaiting for resources (ready but not started)\n");
-    if (by_reason.count() == 0) try w.writeAll("  none\n");
+    if (!recorded) {
+        try w.writeAll("  not recorded: this launch's engine did not record wait reasons\n");
+    } else if (by_reason.count() == 0) try w.writeAll("  none\n");
     sortByValue(&by_reason);
     for (by_reason.keys(), by_reason.values()) |k, s| try w.print("  {s:<32} {d:>9.1} s\n", .{ k, s });
 
@@ -307,7 +310,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
 
     try w.writeAll("\nutilization (run samples every 5 s)\n");
     if (samples == 0) {
-        try w.writeAll("  no samples: the run was shorter than one interval\n");
+        try w.writeAll("  no samples: the run was shorter than one interval, or its engine did not record them\n");
     } else {
         const ns: f64 = @floatFromInt(samples);
         try w.print("  threads reserved {d:.1} of {d:.0} on average", .{ threads_reserved_sum / ns, max_threads });
@@ -339,7 +342,7 @@ fn sortByValue(map: *std.StringArrayHashMapUnmanaged(f64)) void {
 }
 
 /// Total seconds of waiting per reason, from every attempt record.
-fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8) !std.StringArrayHashMapUnmanaged(f64) {
+fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded: *bool) !std.StringArrayHashMapUnmanaged(f64) {
     var totals: std.StringArrayHashMapUnmanaged(f64) = .empty;
     var files: std.ArrayList([]u8) = .empty;
     defer {
@@ -353,6 +356,7 @@ fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8) !std.StringA
         defer gpa.free(bytes);
         const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch continue;
         const q = get(v, "queue") orelse continue;
+        recorded.* = true;
         const rs = get(q, "reasons") orelse continue;
         if (rs != .array) continue;
         for (rs.array.items) |item| {
@@ -416,13 +420,21 @@ fn criticalPath(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []c
     var i = path.items.len;
     while (i > 0) {
         i -= 1;
-        const r = &wf.rules[path.items[i]];
+        const ri = path.items[i];
+        const r = &wf.rules[ri];
         const t = timing.get(r.name).?;
         const run = if (t.start != null and t.finish != null) @as(f64, @floatFromInt(t.finish.? - t.start.?)) / 1e9 else 0;
         const at = if (t.start) |s| @as(f64, @floatFromInt(s - t0)) / 1e9 else 0;
+        // Ready when the last producer finished, or at the launch start; the
+        // time from ready to start is waiting, whether or not records say why.
+        var ready = t0;
+        for (g.parents[ri]) |p| if (timing.get(wf.rules[p].name)) |pt| if (pt.finish) |f| {
+            ready = @max(ready, f);
+        };
+        const waited = if (t.start) |s| @max(@as(f64, @floatFromInt(s - ready)) / 1e9, 0) else 0;
         run_s += run;
-        wait_s += t.waited;
-        try w.print("  at {d:>8.1} s  {s:<44} ran {d:>8.1} s, waited {d:>6.1} s\n", .{ at, r.name[0..@min(r.name.len, 44)], run, t.waited });
+        wait_s += waited;
+        try w.print("  at {d:>8.1} s  {s:<44} ran {d:>8.1} s, waited {d:>6.1} s\n", .{ at, r.name[0..@min(r.name.len, 44)], run, waited });
     }
     try w.print("  {d} steps: {d:.1} s running, {d:.1} s waiting for resources\n", .{ path.items.len, run_s, wait_s });
 }
