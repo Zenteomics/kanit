@@ -263,7 +263,7 @@ echo stamped > st.txt
 { header stamped; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stamped.toml
 printf '{"%s": {"sha256": "sha256:%s", "stamp": %s}}\n' "$PWD/st.txt" "$(sha256sum st.txt | cut -d" " -f1)" "$(stamp st.txt)" > stamped.json
 "$workz" run stamped.toml "${iso[@]}" -q --input-manifest stamped.json > s2.json
-check "a stamped manifest whose stamp matches runs" '[ "$(status_of s2.json completed)" = 1 ]'
+check "a stamped manifest whose stamp matches runs without reading the file" '[ "$(status_of s2.json completed)" = 1 ] && jq -e "select(.event == \"inputs_checked\") | select(.files == 1 and .files_read == 0)" "$(last_launch)/events.jsonl" > /dev/null'
 mkdir stale && cd stale && echo old > st.txt
 { header stale; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stale.toml
 printf '{"%s": {"sha256": "sha256:%s", "stamp": %s}}\n' "$PWD/st.txt" "$(sha256sum st.txt | cut -d" " -f1)" "$(stamp st.txt)" > stale.json
@@ -271,7 +271,9 @@ echo new > st.txt
 "$workz" run stale.toml "${iso[@]}" -q --input-manifest stale.json > /dev/null 2> err.txt
 rc=$?
 cd ..
-check "a stale stamp makes workz read the file and refuse changed content" '[ $rc = 1 ] && grep -q "does not match its manifest digest" stale/err.txt'
+check "a stale stamp makes workz read the file and refuse changed content" '[ $rc = 1 ] && grep -q "does not match its manifest digest" stale/err.txt && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" stale/.workz/launches/*/events.jsonl > /dev/null'
+"$workz" status -d stale > stale-status.json
+check "a refused launch is recorded and shown by status" 'jq -e ".status == \"refused\" and (.error | test(\"manifest\"))" stale-status.json > /dev/null'
 
 new during
 echo x > in.txt

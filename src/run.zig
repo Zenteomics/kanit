@@ -909,6 +909,43 @@ fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
     unreachable;
 }
 
+/// Ends a launch before any rule ran: records why, in the event stream and
+/// a summary with status "refused", so `status` shows the attempt.
+const Refusal = struct {
+    gpa: Allocator,
+    a: Allocator,
+    events: *records.Events,
+    launch: []const u8,
+    dir: []const u8,
+    engine: []const u8,
+    selected: usize,
+    t0: i128,
+
+    fn refuse(self: Refusal, outcome: Outcome, reason: []const u8) !Outcome {
+        std.debug.print("workz: {s}\n", .{reason});
+        const elapsed = @as(f64, @floatFromInt(sys.monoNs() - self.t0)) / 1e9;
+        self.events.emit("launch_refused", .{ .reason = reason });
+        const summary = .{
+            .engine = self.engine,
+            .launch = self.launch,
+            .status = "refused",
+            .counts = .{ .completed = 0, .reused = 0, .failed = 0, .blocked = 0, .cancelled = 0, .not_started = self.selected },
+            .selected = self.selected,
+            .elapsed_s = elapsed,
+            .finished = try records.timeText(self.a, sys.realNs()),
+            .@"error" = reason,
+            .launch_dir = self.dir,
+        };
+        self.events.emit("launch_finished", .{ .status = "refused", .elapsed_s = elapsed, .@"error" = reason });
+        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.dir, "summary.json" }), summary);
+        var w: std.Io.Writer.Allocating = .init(self.gpa);
+        defer w.deinit();
+        try w.writer.print("{f}\n", .{std.json.fmt(summary, .{})});
+        try sys.writeAll(1, w.written());
+        return outcome;
+    }
+};
+
 const env_allow = [_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TERM" };
 
 fn findBash(gpa: Allocator) ?[:0]const u8 {
@@ -925,39 +962,6 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const max_memory = opts.max_memory_mib orelse defaultMemoryMib(gpa);
     const max_jobs = opts.jobs orelse max_threads;
 
-    // Budget and input checks before anything is written.
-    var holders = try a.alloc(Holder, wf.shared.len);
-    for (wf.shared, 0..) |s, i| {
-        const bytes = state.pageBytes(gpa, s.path_abs) catch |err| {
-            std.debug.print("workz: shared input {s} ({s}): {s}\n", .{ s.name, s.path, @errorName(err) });
-            return .invalid;
-        };
-        holders[i] = .{ .bytes = bytes, .mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable };
-    }
-    var produced: std.StringHashMapUnmanaged(void) = .empty;
-    defer produced.deinit(gpa);
-    for (wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try produced.put(gpa, o, {});
-    for (wf.rules, 0..) |r, i| {
-        if (!mask[i]) continue;
-        var need = r.memory_mib;
-        for (r.shared) |s| need += holders[wf.sharedIndex(s).?].mib;
-        if (r.threads > max_threads) {
-            std.debug.print("workz: rule {s} requests {d} threads; the run allows {d}\n", .{ r.name, r.threads, max_threads });
-            return .invalid;
-        }
-        if (need > max_memory) {
-            std.debug.print("workz: rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB\n", .{ r.name, need, max_memory });
-            return .invalid;
-        }
-        for (r.input_abs, r.input) |in, written| {
-            if (produced.contains(in)) continue;
-            if (!sys.exists(gpa, in)) {
-                std.debug.print("workz: missing input of rule {s}: {s}\n", .{ r.name, written });
-                return .invalid;
-            }
-        }
-    }
-
     const rec = try records.recordsDir(a, wf.root);
     try sys.mkdirAll(gpa, rec);
     const lock_fd = records.lock(gpa, rec) catch |err| switch (err) {
@@ -973,80 +977,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try sys.writeFile(gpa, pid_path, try std.fmt.allocPrint(a, "{d}\n", .{linux.getpid()}));
     defer sys.writeFile(gpa, pid_path, "") catch {};
 
-    var st = state.load(gpa, rec) catch |err| switch (err) {
-        error.UnsupportedState => {
-            std.debug.print("workz: {s}/state.json has an unsupported format version\n", .{rec});
-            return .invalid;
-        },
-        error.CorruptState => {
-            std.debug.print("workz: {s}/state.json cannot be read\n", .{rec});
-            return .invalid;
-        },
-        else => return err,
-    };
-    defer st.deinit();
-    // Rules dispatched by an interrupted launch without a saved result run again.
-    for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
-
-    var ids = state.Identities.init(gpa);
-    defer ids.deinit();
-    var cut = try state.Cutoff.init(a, gpa, wf, &st, &ids, true);
-
-    // A recorded output that changed outside the engine is refused unless --rerun.
-    var changed: usize = 0;
-    for (wf.rules, 0..) |r, i| {
-        if (!mask[i]) continue;
-        const e = st.data.rules.map.get(r.name) orelse continue;
-        for (e.outputs) |o| {
-            const now = (try ids.get(o.path)) orelse continue;
-            if (std.mem.eql(u8, now, o.id)) continue;
-            changed += 1;
-            if (!opts.rerun) std.debug.print("workz: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
-        }
-    }
-    if (changed > 0 and !opts.rerun) {
-        std.debug.print("workz: refusing to reuse changed outputs; use --rerun to run the affected rules again (earlier bytes are kept in previous/)\n", .{});
-        return .failed;
-    }
-
-    const exe = try sys.selfExe(a);
-    const exe_digest = try sys.sha256File(gpa, exe);
-    const engine_id = try std.fmt.allocPrint(a, "workz {s} sha256:{s}", .{ version, &exe_digest });
-
-    // Input manifest: authoritative digests for external inputs.
-    if (opts.input_manifest) |mpath| {
-        const m = try checkManifest(gpa, &st, &ids, mpath);
-        if (!m.ok) return .failed;
-    }
-
+    // Every launch past the lock leaves a record, refused ones included.
+    const t_open = sys.monoNs();
     const launch = try records.newLaunch(gpa, a, rec);
     try sys.writeFile(gpa, try std.fs.path.join(a, &.{ launch.dir, "workflow" }), wf.source);
     var events = try records.Events.open(gpa, launch.dir);
     defer events.close();
-    var journal = try records.Journal.open(gpa, rec);
-    defer journal.close();
-
-    var tree: ?cgroup.Tree = null;
-    if (opts.isolation) {
-        tree = cgroup.setup(gpa, a) catch {
-            std.debug.print("workz: the run's cgroup is not delegated; start workz without WORKZ_STAGE set, or use --no-isolation\n", .{});
-            return .invalid;
-        };
-    }
-
-    var env_list: std.ArrayList([]const u8) = .empty;
-    const env_text = try state.envText(a, environ, opts.pass_env);
-    for (env_allow) |name| if (environ.get(name)) |v| {
-        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
-    };
-    for (opts.pass_env) |name| if (environ.get(name)) |v| {
-        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
-    };
-
+    const exe = try sys.selfExe(a);
+    const exe_digest = try sys.sha256File(gpa, exe);
+    const engine_id = try std.fmt.allocPrint(a, "workz {s} sha256:{s}", .{ version, &exe_digest });
     var selected: usize = 0;
     for (mask) |m| selected += @intFromBool(m);
-    const shared_info = try a.alloc(struct { name: []const u8, path: []const u8, bytes: u64 }, wf.shared.len);
-    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .bytes = h.bytes };
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.json" }), .{
         .engine = engine_id,
         .engine_key = state.engine_key,
@@ -1059,15 +1000,102 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .max_memory_mib = max_memory,
         .jobs = max_jobs,
         .isolation = opts.isolation,
-        .cgroup = if (tree) |t| t.root else null,
         .keep_going = opts.keep_going,
         .rerun = opts.rerun,
         .retry = opts.retry,
         .timeout_s = opts.timeout_s,
         .input_manifest = opts.input_manifest,
+        .pass_env = opts.pass_env,
         .selected = selected,
-        .shared = shared_info,
     });
+    const refusal: Refusal = .{ .gpa = gpa, .a = a, .events = &events, .launch = launch.id, .dir = launch.dir, .engine = engine_id, .selected = selected, .t0 = t_open };
+
+    // Budget and input checks.
+    var holders = try a.alloc(Holder, wf.shared.len);
+    for (wf.shared, 0..) |s, i| {
+        const bytes = state.pageBytes(gpa, s.path_abs) catch |err|
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path, @errorName(err) }));
+        holders[i] = .{ .bytes = bytes, .mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable };
+    }
+    var produced: std.StringHashMapUnmanaged(void) = .empty;
+    defer produced.deinit(gpa);
+    for (wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try produced.put(gpa, o, {});
+    for (wf.rules, 0..) |r, i| {
+        if (!mask[i]) continue;
+        var need = r.memory_mib;
+        for (r.shared) |s| need += holders[wf.sharedIndex(s).?].mib;
+        if (r.threads > max_threads)
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}", .{ r.name, r.threads, max_threads }));
+        if (need > max_memory)
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB", .{ r.name, need, max_memory }));
+        for (r.input_abs, r.input) |in, written| {
+            if (produced.contains(in)) continue;
+            if (!sys.exists(gpa, in)) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s}", .{ r.name, written }));
+        }
+    }
+
+    var st = state.load(gpa, rec) catch |err| switch (err) {
+        error.UnsupportedState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json has an unsupported format version", .{rec})),
+        error.CorruptState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json cannot be read", .{rec})),
+        else => return err,
+    };
+    defer st.deinit();
+    // Rules dispatched by an interrupted launch without a saved result run again.
+    for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
+
+    var ids = state.Identities.init(gpa);
+    defer ids.deinit();
+    var cut = try state.Cutoff.init(a, gpa, wf, &st, &ids, true);
+
+    // A recorded output that changed outside the engine is refused unless --rerun.
+    var changed: usize = 0;
+    var first_changed: []const u8 = "";
+    for (wf.rules, 0..) |r, i| {
+        if (!mask[i]) continue;
+        const e = st.data.rules.map.get(r.name) orelse continue;
+        for (e.outputs) |o| {
+            const now = (try ids.get(o.path)) orelse continue;
+            if (std.mem.eql(u8, now, o.id)) continue;
+            changed += 1;
+            if (first_changed.len == 0) first_changed = o.path;
+            if (!opts.rerun) {
+                std.debug.print("workz: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
+                events.emit("output_changed", .{ .rule = r.name, .path = o.path });
+            }
+        }
+    }
+    if (changed > 0 and !opts.rerun) {
+        std.debug.print("workz: refusing to reuse changed outputs; use --rerun to run the affected rules again (earlier bytes are kept in previous/)\n", .{});
+        return refusal.refuse(.failed, try std.fmt.allocPrint(a, "{d} recorded outputs changed outside workz, first {s}; use --rerun", .{ changed, first_changed }));
+    }
+
+    // Input manifest: authoritative digests for external inputs.
+    if (opts.input_manifest) |mpath| {
+        const m = try checkManifest(gpa, &st, &ids, mpath);
+        events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
+        if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
+    }
+
+    var journal = try records.Journal.open(gpa, rec);
+    defer journal.close();
+
+    var tree: ?cgroup.Tree = null;
+    if (opts.isolation) {
+        tree = cgroup.setup(gpa, a) catch
+            return refusal.refuse(.invalid, "the run's cgroup is not delegated; start workz without WORKZ_STAGE set, or use --no-isolation");
+    }
+
+    var env_list: std.ArrayList([]const u8) = .empty;
+    const env_text = try state.envText(a, environ, opts.pass_env);
+    for (env_allow) |name| if (environ.get(name)) |v| {
+        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
+    };
+    for (opts.pass_env) |name| if (environ.get(name)) |v| {
+        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
+    };
+
+    const shared_info = try a.alloc(struct { name: []const u8, path: []const u8, bytes: u64 }, wf.shared.len);
+    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .bytes = h.bytes };
 
     const devnull = try sys.openRead(gpa, "/dev/null");
     defer sys.close(devnull);
@@ -1123,8 +1151,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
     engine.last_sample_ns = engine.last_save_ns;
     if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);
-    const t0 = sys.monoNs();
-    events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation });
+    const t0 = t_open;
+    events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation, .cgroup = if (tree) |t| t.root else null, .shared = shared_info, .checks_s = @as(f64, @floatFromInt(sys.monoNs() - t_open)) / 1e9 });
 
     engine.loop() catch |err| {
         engine.fatal = @errorName(err);

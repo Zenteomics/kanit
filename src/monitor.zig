@@ -24,6 +24,7 @@ pub const View = struct {
     started_ns: i128 = 0,
     finished: bool = false,
     final_status: []const u8 = "",
+    final_error: []const u8 = "",
     rules: std.StringArrayHashMapUnmanaged(RuleView) = .empty,
     shared: std.StringArrayHashMapUnmanaged([]const u8) = .empty,
 
@@ -86,12 +87,13 @@ pub fn load(gpa: Allocator, launch_dir: []const u8) !View {
         const ev = str(parsed, "event") orelse continue;
         const at = parseTime(str(parsed, "time") orelse "") orelse 0;
         const rule = str(parsed, "rule");
+        if (view.started_ns == 0) view.started_ns = at;
         if (std.mem.eql(u8, ev, "launch_started")) {
             view.selected = int(parsed, "selected") orelse 0;
-            view.started_ns = at;
         } else if (std.mem.eql(u8, ev, "launch_finished")) {
             view.finished = true;
             view.final_status = str(parsed, "status") orelse "";
+            view.final_error = str(parsed, "error") orelse "";
         } else if (std.mem.eql(u8, ev, "shared_loading")) {
             try view.shared.put(a, str(parsed, "name") orelse "?", "loading");
         } else if (std.mem.eql(u8, ev, "shared_loaded")) {
@@ -168,7 +170,10 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, view: *View) !void {
         if (std.mem.eql(u8, e.value_ptr.status, c) or (i == 0 and std.mem.eql(u8, e.value_ptr.status, "cancelling"))) n[i] += 1;
     };
     try w.print("launch {s}  ", .{view.launch});
-    if (view.finished) try w.print("{s}", .{view.final_status}) else {
+    if (view.finished) {
+        try w.print("{s}", .{view.final_status});
+        if (view.final_error.len > 0) try w.print(": {s}", .{view.final_error});
+    } else {
         try w.writeAll("elapsed ");
         try duration(w, sys.realNs() - view.started_ns);
     }

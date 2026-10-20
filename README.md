@@ -77,7 +77,7 @@ Ready rules start in priority order, then by the time they became ready, then by
 
 A rule is reused when its command, keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and names given with `--pass-env`), resource request, written paths, input identities, producing rules and engine key are unchanged, and each recorded output still has its recorded identity. The engine key is a version number raised only when a change to workz can change what a rule produces, so rebuilding or upgrading workz does not by itself rerun work; `launch.json` records the executable's digest. A file's identity is its device, inode, size, and modification and change times. A rewrite that restores the modification time still changes the change time, which programs cannot set back.
 
-File contents are read only when asked: outputs of `cutoff` rules are hashed after they succeed, `--input-manifest` checks external inputs against `sha256:` digests (re-reading a file only when its identity changed), and `verify --content` hashes recorded outputs. An output changed outside workz stops the next run until `--rerun` runs the rule again; earlier bytes are kept.
+File contents are read only when asked: outputs of `cutoff` rules are hashed after they succeed, `--input-manifest` checks external inputs against `sha256:` digests, and `verify --content` hashes recorded outputs. A manifest entry is either `"sha256:<hex>"` or `{"sha256": "sha256:<hex>", "stamp": {"dev": N, "ino": N, "size": N, "mtime_ns": N, "ctime_ns": N}}`, the identity the manifest's writer saw when it hashed the file (`dev` as `stat` reports it). A file is read only when neither its cached identity nor its stamp matches; a matching stamp is trusted, so use stamps only from a preparer you trust. An output changed outside workz stops the next run until `--rerun` runs the rule again; earlier bytes are kept.
 
 ## Records
 
@@ -91,7 +91,7 @@ Everything workz writes for itself lives in `.workz/` in the working directory:
     command.sh  request.json  stdout.log  stderr.log  record.json  previous/
 ```
 
-`events.jsonl` is an append-only stream of typed events. Each attempt keeps its complete standard output and error, its request, its exit status, `wait4` resource usage and the cgroup's peak memory, OOM events and CPU time. `record.json` is written last. Nothing is deleted: a rerun moves earlier outputs into the attempt's `previous/`.
+Every launch that takes the lock gets a directory, refused ones included: a changed output, a manifest mismatch, a missing input or a request larger than the budget ends the launch with a `summary.json` of status `refused` and its reason, which `status` shows. `events.jsonl` is an append-only stream of typed events; `inputs_checked` reports how many manifest files were read and how long the check took. Each attempt keeps its complete standard output and error, its request, its exit status, `wait4` resource usage and the cgroup's peak memory, OOM events and CPU time. `record.json` is written last. Nothing is deleted: a rerun moves earlier outputs into the attempt's `previous/`.
 
 `watch` reads these files from any terminal and shows each running task with its elapsed time, current and peak memory, and last line of output.
 
