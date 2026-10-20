@@ -66,10 +66,10 @@ Each rule names its input files, its output files, one shell command and a resou
 | `verify`       | check recorded outputs      |
 
 - Select rules with `--target RULE` (repeatable); a target brings its dependencies.
-- `run` options: `--jobs`, `--max-threads`, `--max-memory`, `--keep-going`, `--retry`, `--timeout`, `--rerun`, `--input-manifest FILE`, `--pass-env NAME`, `--grace SECONDS`, `--no-isolation`, `--quiet`.
+- `run` options: `--jobs`, `--max-threads`, `--max-memory`, `--keep-going`, `--retry`, `--timeout`, `--rerun`, `--input-manifest FILE`, `--pass-env NAME`, `--grace SECONDS`, `--slice NAME`, `--no-isolation`, `--quiet`.
 - Exit status: 0 success, 1 a rule or check failed, 2 invalid command line or workflow, 130 interrupted.
 
-`run` starts in a transient systemd user scope limited to the run's memory and CPU budget, inside a bubblewrap network namespace: rules have no network. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--no-isolation` runs without the namespace and the cgroups.
+`run` starts in a transient systemd user scope limited to the run's memory and CPU budget, inside a bubblewrap network namespace: rules have no network. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--slice NAME.slice` places the run's scope inside a systemd slice of the caller, so its limits sit within the caller's. `--no-isolation` runs without the namespace and the cgroups. `summary.json` records the engine's own CPU time and peak memory beside the counts.
 
 Ready rules start in priority order, then by the time they became ready, then by file order; every rule that fits the free CPU, memory, group and job capacity starts, so a rule waiting for room never holds back a smaller one.
 

@@ -31,6 +31,8 @@ pub const Options = struct {
     pass_env: []const []const u8 = &.{},
     grace_s: u64 = 10,
     quiet: bool = false,
+    /// systemd slice the isolated run's scope is placed in.
+    slice: ?[]const u8 = null,
 };
 
 pub const Outcome = enum(u8) { ok = 0, failed = 1, invalid = 2, interrupted = 130 };
@@ -909,6 +911,14 @@ fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
     unreachable;
 }
 
+/// The engine's own CPU time and peak memory, without its tasks.
+fn engineCost() struct { cpu_s: f64, max_rss_mib: f64 } {
+    var ru: linux.rusage = undefined;
+    _ = linux.getrusage(linux.rusage.SELF, &ru);
+    const cpu = @as(f64, @floatFromInt(ru.utime.sec + ru.stime.sec)) + @as(f64, @floatFromInt(ru.utime.usec + ru.stime.usec)) / 1e6;
+    return .{ .cpu_s = cpu, .max_rss_mib = @as(f64, @floatFromInt(ru.maxrss)) / 1024.0 };
+}
+
 /// Ends a launch before any rule ran: records why, in the event stream and
 /// a summary with status "refused", so `status` shows the attempt.
 const Refusal = struct {
@@ -1006,6 +1016,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .timeout_s = opts.timeout_s,
         .input_manifest = opts.input_manifest,
         .pass_env = opts.pass_env,
+        .slice = opts.slice,
         .selected = selected,
     });
     const refusal: Refusal = .{ .gpa = gpa, .a = a, .events = &events, .launch = launch.id, .dir = launch.dir, .engine = engine_id, .selected = selected, .t0 = t_open };
@@ -1224,6 +1235,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .elapsed_s = elapsed,
         .finished = try records.timeText(a, sys.realNs()),
         .@"error" = engine.fatal,
+        .engine_cost = engineCost(),
         .launch_dir = launch.dir,
     };
     events.emit("launch_finished", .{ .status = summary.status, .counts = summary.counts, .elapsed_s = elapsed, .@"error" = engine.fatal });

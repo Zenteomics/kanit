@@ -256,6 +256,11 @@ new delegated
 "$workz" report -d . --bottlenecks > b.txt
 check "work handed to another supervisor is reported as delegated, without sizing advice" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt'
 
+new slice
+{ header slice; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" --slice workz-validation.slice -q > s.json
+check "--slice places the run in the named slice and the summary has the engine's cost" 'jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | grep -q "/workz-validation.slice/" && jq -e ".engine_cost.cpu_s > 0 and .engine_cost.max_rss_mib > 0" s.json > /dev/null'
+
 # ---------------------------------------------------------------- inputs and formats
 new manifest
 echo data > ext.txt

@@ -41,6 +41,7 @@ const usage =
     \\  --input-manifest FILE    JSON of absolute paths to "sha256:<hex>" to check
     \\  --pass-env NAME          pass an extra environment variable to rules
     \\  --grace SECONDS          wait before killing a stopped task (default 10)
+    \\  --slice NAME             place the run's scope in this systemd slice (NAME.slice)
     \\  --no-isolation           no network namespace and no cgroup limits
     \\  -q, --quiet              no progress lines on stderr
     \\
@@ -436,6 +437,9 @@ const RunExtra = struct {
             o.grace_s = std.fmt.parseInt(u64, v, 10) catch return badValue(arg);
         } else if (eq(u8, arg, "--input-manifest")) {
             o.input_manifest = v;
+        } else if (eq(u8, arg, "--slice")) {
+            if (!std.mem.endsWith(u8, v, ".slice") or v.len <= ".slice".len or std.mem.indexOfScalar(u8, v, '/') != null) return badValue(arg);
+            o.slice = v;
         } else if (eq(u8, arg, "--pass-env")) {
             try self.pass.append(self.a, v);
         } else return 0;
@@ -496,6 +500,14 @@ fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
         "/",               "/",            "--proc",                                                                 "/proc",                                                  "--chdir",
         here,              "--",           exe,
     });
+    if (opts.slice) |slice| {
+        // The scope becomes a child of the caller's slice, inside its limits.
+        var at: usize = 0;
+        for (argv.items, 0..) |arg, k| if (std.mem.eql(u8, arg, "--expand-environment=no")) {
+            at = k + 1;
+        };
+        try argv.insert(c.a, at, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
+    }
     for (c.argv[1..]) |arg| try argv.append(c.a, arg);
     var env: std.ArrayList([]const u8) = .empty;
     var it = c.env.iterator();
