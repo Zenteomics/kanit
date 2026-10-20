@@ -76,6 +76,15 @@ TZ=Asia/Tokyo LANG=C "$workz" plan wf.toml > plan-lang.txt
 check "plan names the environment when the locale changes" 'grep -q "run   a  (environment changed)" plan-lang.txt && grep -q "run   c  (environment changed)" plan-lang.txt'
 TZ=Asia/Tokyo "$workz" plan wf.toml --pass-env NEWVAR > plan-pass.txt
 check "a passed variable is part of the key" 'grep -q "run   a  (environment changed)" plan-pass.txt'
+TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > /dev/null
+TZ=Asia/Tokyo "$workz" verify wf.toml --content > /dev/null
+cp a.txt a.copy && mv a.copy a.txt
+TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > restored.json
+check "an output restored with the same bytes is accepted; its non-cutoff consumer reruns" '[ "$(status_of restored.json reused)" = 2 ] && [ "$(status_of restored.json completed)" = 1 ] && grep -q output_identity_refreshed "$(last_launch)/events.jsonl"'
+cp a.txt a.copy && echo extra >> a.copy && mv a.copy a.txt
+TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > changed.json 2> /dev/null
+rc=$?
+check "an output with a stored digest and different bytes is still refused" '[ $rc = 1 ] && jq -e ".status == \"refused\"" changed.json > /dev/null'
 
 # ---------------------------------------------------------------- early cutoff
 new cutoff
@@ -111,6 +120,9 @@ write_cutoff "cat in.txt | tr a-z A-Z > up.txt" "cutoff = true"
 c6_runs=$(jq -r 'select(.event == "task_started") | .rule' "$(last_launch)/events.jsonl" | tr '\n' ' ')
 "$workz" run wf.toml "${iso[@]}" -q > c7.json
 check "turning cutoff on reruns only the direct consumers, once" '[ "$c6_runs" = "after " ] && [ "$(status_of c7.json reused)" = 4 ]'
+cp up.txt up.copy && mv up.copy up.txt
+"$workz" run wf.toml "${iso[@]}" -q > c8.json
+check "a cutoff output copied back with the same bytes keeps everything reused" '[ "$(status_of c8.json reused)" = 4 ]'
 
 # ---------------------------------------------------------------- failure policy
 new failure
@@ -273,6 +285,9 @@ rc=$?
 check "a wrong manifest digest refuses the run" '[ $rc = 1 ] && grep -q "does not match its manifest digest" err.txt'
 "$workz" run wf.toml "${iso[@]}" -q --input-manifest good.json > s.json
 check "a matching manifest digest runs" '[ "$(status_of s.json completed)" = 1 ]'
+touch ext.txt
+"$workz" run wf.toml "${iso[@]}" -q --input-manifest good.json > touched.json
+check "a touched manifest input with the same bytes is read once and its rule reused" '[ "$(status_of touched.json reused)" = 1 ] && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" "$(last_launch)/events.jsonl" > /dev/null'
 stamp() { stat -c '{"dev": %d, "ino": %i, "size": %s, "mtime_ns": %.9Y, "ctime_ns": %.9Z}' "$1" | sed 's/\.//g'; }
 echo stamped > st.txt
 { header stamped; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stamped.toml

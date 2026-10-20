@@ -335,8 +335,8 @@ test "the key of a fixed rule matches its pinned value" {
     defer ids.deinit();
     var missing: ?[]const u8 = null;
     const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, &missing)).?;
-    try testing.expectEqualStrings("workz-key 1", k.engine);
-    try testing.expectEqualStrings("fb44c8554f20cbcce320f90cc01a60ee6a202b0c374fc2aaf8d4e239196e4ed9", k.key);
+    try testing.expectEqualStrings("workz-key 2", k.engine);
+    try testing.expectEqualStrings("7d15b2e0e68740f40d5a9f9e3081ebc2563c64ef5783a077ec50bee62edf996e", k.key);
 }
 
 test "the keyed environment lists PATH, locale, time zone and passed names in order" {

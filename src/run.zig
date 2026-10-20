@@ -1056,17 +1056,27 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     var ids = state.Identities.init(gpa);
     defer ids.deinit();
-    var cut = try state.Cutoff.init(a, gpa, wf, &st, &ids, true);
-
-    // A recorded output that changed outside the engine is refused unless --rerun.
+    // A recorded output that changed outside the engine is refused unless
+    // --rerun, except when it has a stored digest and its bytes still match:
+    // then its identity is refreshed and it stays reusable.
     var changed: usize = 0;
     var first_changed: []const u8 = "";
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
-        const e = st.data.rules.map.get(r.name) orelse continue;
-        for (e.outputs) |o| {
+        const e = st.data.rules.map.getPtr(r.name) orelse continue;
+        for (e.outputs, 0..) |o, k| {
             const now = (try ids.get(o.path)) orelse continue;
             if (std.mem.eql(u8, now, o.id)) continue;
+            if (o.sha256) |want| {
+                const d = try sys.sha256File(gpa, o.path);
+                if (std.mem.eql(u8, want, &d)) {
+                    const outs = try st.allocator().dupe(state.Output, e.outputs);
+                    outs[k].id = try st.allocator().dupe(u8, now);
+                    e.outputs = outs;
+                    events.emit("output_identity_refreshed", .{ .rule = r.name, .path = o.path });
+                    continue;
+                }
+            }
             changed += 1;
             if (first_changed.len == 0) first_changed = o.path;
             if (!opts.rerun) {
@@ -1086,6 +1096,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
         if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
     }
+    // Content digests valid for this launch: cutoff outputs and manifest inputs.
+    var cut = try state.Cutoff.init(a, gpa, wf, &st, &ids, true);
 
     var journal = try records.Journal.open(gpa, rec);
     defer journal.close();

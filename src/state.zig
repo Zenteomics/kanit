@@ -18,7 +18,7 @@ pub const format_version: i64 = 1;
 /// taken or judged complete changes, or when a fix changes the bytes a rule
 /// leaves for the same inputs. Raising it reruns every rule once. Scheduling,
 /// records, monitoring and speed changes do not raise it.
-pub const engine_key: u32 = 1;
+pub const engine_key: u32 = 2;
 pub const engine_key_text = std.fmt.comptimePrint("workz-key {d}", .{engine_key});
 
 pub const Output = struct {
@@ -235,6 +235,11 @@ fn lessConst(_: void, x: []const u8, y: []const u8) bool {
     return std.mem.lessThan(u8, x, y);
 }
 
+/// Content-keyed files. Inputs listed in the input manifest and outputs of
+/// rules marked `cutoff = true` are keyed on their SHA-256 digest; their
+/// identity only decides when the digest must be computed again. A touched
+/// or copied-back file with the same bytes therefore keeps every key.
+///
 /// Early cutoff. A rule marked `cutoff = true` has its outputs hashed after
 /// success. A consumer then keys such an input on its content digest, and the
 /// producer contributes its output digests instead of its rule key, so a
@@ -251,6 +256,11 @@ pub const Cutoff = struct {
     pub fn init(a: Allocator, gpa: Allocator, wf: *const workflow.Workflow, st: *State, ids: *Identities, store: bool) !Cutoff {
         var c: Cutoff = .{ .parent = try a.alloc(?[]const u8, wf.rules.len) };
         @memset(c.parent, null);
+        var mit = st.data.manifest.map.iterator();
+        while (mit.next()) |m| {
+            const now = (try ids.get(m.key_ptr.*)) orelse continue;
+            if (std.mem.eql(u8, now, m.value_ptr.id)) try c.digests.put(a, m.key_ptr.*, m.value_ptr.sha256);
+        }
         for (wf.rules, 0..) |r, i| {
             if (!r.cutoff) continue;
             const e = st.data.rules.map.getPtr(r.name) orelse continue;
