@@ -365,3 +365,19 @@ test "kinds of rules drop their sample part" {
     try testing.expectEqualStrings("merge", workz.report.pattern("merge"));
     try testing.expectEqualStrings("_x", workz.report.pattern("_x"));
 }
+
+test "an attempt that ran but used almost none of its requests is delegated" {
+    const base: workz.report.Attempt = .{ .rule = "r", .attempt = 1, .status = "completed", .reason = "", .wall_s = 30, .cpu_s = 29, .threads = 1, .request_mib = 3072, .peak_mib = 900, .rss_mib = 880, .oom_kill = 0, .limit_events = 0, .waited_s = 0, .wait_reason = "", .cpu_stall = null, .memory_stall = null, .io_stall = null, .uses_shared = false };
+    try testing.expect(!base.delegated());
+    var client = base;
+    client.cpu_s = 0.04;
+    client.peak_mib = 4;
+    client.rss_mib = 4;
+    try testing.expect(client.delegated());
+    var quick = client;
+    quick.wall_s = 0.3;
+    try testing.expect(!quick.delegated());
+    var failed = client;
+    failed.status = "failed";
+    try testing.expect(!failed.delegated());
+}

@@ -246,6 +246,13 @@ new samples
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 check "run samples show the CPU in use and attempts keep their pressure totals" 'jq -e "select(.event == \"sample\") | select(.cpu_cores_used > 0.5)" "$(last_launch)/events.jsonl" > /dev/null && jq -e ".cgroup.cpu_some_us != null and .cgroup.io_some_us != null" "$(last_launch)/attempts/busy/001/record.json" > /dev/null'
 
+new delegated
+{ header delegated; rule hand '[]' '["h.txt"]' '"systemd-run --user --wait -q timeout 1.5 sh -c \"while :; do :; done\" || true; touch h.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+"$workz" report -d . > r.tsv
+"$workz" report -d . --bottlenecks > b.txt
+check "work handed to another supervisor is reported as delegated, without sizing advice" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt'
+
 # ---------------------------------------------------------------- inputs and formats
 new manifest
 echo data > ext.txt

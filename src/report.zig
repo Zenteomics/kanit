@@ -40,6 +40,16 @@ pub const Attempt = struct {
         if (self.wall_s <= 0 or self.threads <= 0) return 0;
         return self.cpu_s / (self.wall_s * self.threads);
     }
+
+    /// The attempt ran for at least half a second but its own cgroup did almost nothing:
+    /// under a tenth of its CPU request and a twentieth of its memory request. The command
+    /// most likely handed the work to another supervisor (systemd, a
+    /// container runtime), whose use workz does not see.
+    pub fn delegated(self: Attempt) bool {
+        if (self.wall_s < 0.5 or !std.mem.eql(u8, self.status, "completed")) return false;
+        const memory = @max(self.peak_mib orelse 0, self.rss_mib);
+        return self.cpuEfficiency() < 0.1 and memory < @max(self.request_mib * 0.05, 64);
+    }
 };
 
 fn num(v: ?Value) ?f64 {
@@ -136,7 +146,7 @@ fn opt(w: *std.Io.Writer, v: ?f64, comptime fmt: []const u8) !void {
 
 /// One row per attempt, tab-separated, with a header.
 pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
-    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\treason\n");
+    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tdelegated\treason\n");
     for (rows) |r| {
         try w.print("{s}\t{d}\t{s}\t{d:.3}\t{d:.3}\t{d:.2}\t{d:.0}\t{d:.0}\t", .{ r.rule, r.attempt, r.status, r.wall_s, r.cpu_s, r.cpuEfficiency(), r.threads, r.request_mib });
         try opt(w, r.peak_mib, "{d:.1}");
@@ -148,7 +158,7 @@ pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
         try opt(w, r.memory_stall, "{d:.3}");
         try w.writeAll("\t");
         try opt(w, r.io_stall, "{d:.3}");
-        try w.print("\t{s}\n", .{if (r.reason.len > 0) r.reason else "-"});
+        try w.print("\t{}\t{s}\n", .{ r.delegated(), if (r.reason.len > 0) r.reason else "-" });
     }
 }
 
@@ -226,11 +236,14 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     const elapsed = if (launch_end != null and launch_start != null) @as(f64, @floatFromInt(launch_end.? - t0)) / 1e9 else 0;
     var ran: usize = 0;
     var task_s: f64 = 0;
+    var delegated: usize = 0;
     for (rows) |r| {
         ran += 1;
         task_s += r.wall_s;
+        delegated += @intFromBool(r.delegated());
     }
     try w.print("launch {s}: {d:.1} s elapsed, {d} attempts, {d:.1} task-seconds\n", .{ std.fs.path.basename(launch_dir), elapsed, ran, task_s });
+    if (delegated > 0) try w.print("note: {d} attempts used almost none of their requests while they ran; their commands most likely handed the work to another supervisor, so workz's counters, sizing and character below do not describe it\n", .{delegated});
 
     try criticalPath(gpa, a, w, launch_dir, &timing, t0);
 
@@ -241,7 +254,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     for (by_reason.keys(), by_reason.values()) |k, s| try w.print("  {s:<32} {d:>9.1} s\n", .{ k, s });
 
     // Sizing and character per kind of rule.
-    const Kind = struct { n: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
+    const Kind = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
     var kinds: std.StringArrayHashMapUnmanaged(Kind) = .empty;
     for (rows) |r| {
         if (!std.mem.eql(u8, r.status, "completed") and r.oom_kill == 0) continue;
@@ -249,6 +262,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         if (!gop.found_existing) gop.value_ptr.* = .{};
         const k = gop.value_ptr;
         k.n += 1;
+        k.delegated += @intFromBool(r.delegated());
         k.request = @max(k.request, r.request_mib);
         k.peak = @max(k.peak, r.peak_mib orelse 0);
         k.rss = @max(k.rss, r.rss_mib);
@@ -276,6 +290,10 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         const basis = if (k.shared and k.peak > 0) k.peak else k.rss;
         const suggest = @ceil(basis * 1.2 / 64.0) * 64.0;
         const eff = k.eff / n;
+        if (k.delegated * 2 > k.n) {
+            try w.print("  {s:<30} {d:>3} {d:>8.1} {d:>8.0}M {s:>8} {s:>7} {s:>8} {d:>8.0} {s:>8}  work ran outside workz ({d} of {d} attempts); no sizing\n", .{ name[0..@min(name.len, 30)], k.n, k.wall, k.request, "-", "-", "-", k.threads, "-", k.delegated, k.n });
+            continue;
+        }
         try w.print("  {s:<30} {d:>3} {d:>8.1} {d:>8.0}M {d:>7.0}M {d:>6.0}M {d:>7.0}M {d:>8.0} {d:>8.2}  {s}", .{ name[0..@min(name.len, 30)], k.n, k.wall, k.request, k.rss, k.peak, @max(suggest, 64), k.threads, eff, character(k.stall_n, k.cpu_stall / @max(n, 1), k.mem_stall / @max(n, 1), k.io_stall / @max(n, 1), eff) });
         if (k.oom > 0) {
             try w.print("; {d:.0} out-of-memory kills: raise the request", .{k.oom});
