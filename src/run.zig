@@ -1015,7 +1015,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     // Input manifest: authoritative digests for external inputs.
     if (opts.input_manifest) |mpath| {
-        if (!try checkManifest(gpa, a, &st, &ids, mpath)) return .failed;
+        const m = try checkManifest(gpa, &st, &ids, mpath);
+        if (!m.ok) return .failed;
     }
 
     const launch = try records.newLaunch(gpa, a, rec);
@@ -1206,50 +1207,98 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     return outcome;
 }
 
-/// Checks an input manifest (absolute path to "sha256:<hex>"). A file is
-/// read only when its identity differs from the one its digest was cached with.
-fn checkManifest(gpa: Allocator, a: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8) !bool {
-    const bytes = sys.readFile(gpa, mpath, 64 << 20) catch |err| {
+pub const ManifestCheck = struct { ok: bool, files: usize = 0, read: usize = 0, bytes_read: u64 = 0, seconds: f64 = 0 };
+
+/// Checks an input manifest: absolute paths to "sha256:<hex>", or to
+/// {"sha256": "sha256:<hex>", "stamp": {dev, ino, size, mtime_ns, ctime_ns}}.
+/// A file is read only when neither the cached identity nor the stamp equals
+/// its current identity; a matching stamp is trusted as the identity the
+/// manifest's writer hashed.
+fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8) !ManifestCheck {
+    const t0 = sys.monoNs();
+    var res: ManifestCheck = .{ .ok = true };
+    const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
         std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, @errorName(err) });
-        return false;
+        return .{ .ok = false };
     };
     defer gpa.free(bytes);
-    const parsed = std.json.parseFromSlice(std.json.ArrayHashMap([]const u8), gpa, bytes, .{}) catch {
-        std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths to \"sha256:<hex>\"\n", .{mpath});
-        return false;
+    const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch {
+        std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
+        return .{ .ok = false };
     };
     defer parsed.deinit();
-    var ok = true;
-    var hashed: usize = 0;
+    if (parsed.value != .object) {
+        std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
+        return .{ .ok = false };
+    }
     const sa = st.allocator();
-    var it = parsed.value.map.iterator();
+    var hashed_any = false;
+    var it = parsed.value.object.iterator();
     while (it.next()) |e| {
         const path = e.key_ptr.*;
-        const want = e.value_ptr.*;
+        res.files += 1;
+        var want: []const u8 = "";
+        var stamp: ?std.json.ObjectMap = null;
+        switch (e.value_ptr.*) {
+            .string => |s| want = s,
+            .object => |o| {
+                if (o.get("sha256")) |v| if (v == .string) {
+                    want = v.string;
+                };
+                if (o.get("stamp")) |v| if (v == .object) {
+                    stamp = v.object;
+                };
+            },
+            else => {},
+        }
         if (!std.fs.path.isAbsolute(path) or !std.mem.startsWith(u8, want, "sha256:") or want.len != 71) {
             std.debug.print("workz: invalid input manifest entry {s}\n", .{path});
-            ok = false;
+            res.ok = false;
             continue;
         }
-        const id = (try ids.get(path)) orelse {
+        const id_text = (try ids.get(path)) orelse {
             std.debug.print("workz: input manifest file is missing: {s}\n", .{path});
-            ok = false;
+            res.ok = false;
             continue;
         };
         const cached = st.data.manifest.map.get(path);
-        const digest = if (cached != null and std.mem.eql(u8, cached.?.id, id)) cached.?.sha256 else blk: {
-            hashed += 1;
+        var digest: []const u8 = undefined;
+        if (cached != null and std.mem.eql(u8, cached.?.id, id_text)) {
+            digest = cached.?.sha256;
+        } else if (stamp != null and stampMatches(stamp.?, (try sys.stat(gpa, path)).?)) {
+            digest = try sa.dupe(u8, want);
+            try st.data.manifest.map.put(sa, try sa.dupe(u8, path), .{ .id = try sa.dupe(u8, id_text), .sha256 = digest });
+            hashed_any = true;
+        } else {
+            const id = (try sys.stat(gpa, path)).?;
+            res.read += 1;
+            res.bytes_read += id.size;
             const d = try sys.sha256File(gpa, path);
-            const text = try std.fmt.allocPrint(sa, "sha256:{s}", .{&d});
-            try st.data.manifest.map.put(sa, try sa.dupe(u8, path), .{ .id = try sa.dupe(u8, id), .sha256 = text });
-            break :blk text;
-        };
+            digest = try std.fmt.allocPrint(sa, "sha256:{s}", .{&d});
+            try st.data.manifest.map.put(sa, try sa.dupe(u8, path), .{ .id = try sa.dupe(u8, id_text), .sha256 = digest });
+            hashed_any = true;
+        }
         if (!std.mem.eql(u8, digest, want)) {
             std.debug.print("workz: input does not match its manifest digest: {s}\n", .{path});
-            ok = false;
+            res.ok = false;
         }
     }
-    _ = a;
-    if (ok and hashed > 0) try st.save(gpa);
-    return ok;
+    if (res.ok and hashed_any) try st.save(gpa);
+    res.seconds = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
+    return res;
+}
+
+fn stampMatches(stamp: std.json.ObjectMap, id: sys.Identity) bool {
+    const field = struct {
+        fn int(m: std.json.ObjectMap, k: []const u8) ?i128 {
+            const v = m.get(k) orelse return null;
+            return switch (v) {
+                .integer => |x| x,
+                .number_string => |s| std.fmt.parseInt(i128, s, 10) catch null,
+                else => null,
+            };
+        }
+    }.int;
+    return field(stamp, "dev") == @as(i128, id.stDev()) and field(stamp, "ino") == @as(i128, id.ino) and
+        field(stamp, "size") == @as(i128, id.size) and field(stamp, "mtime_ns") == id.mtime_ns and field(stamp, "ctime_ns") == id.ctime_ns;
 }

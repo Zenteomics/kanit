@@ -258,6 +258,20 @@ rc=$?
 check "a wrong manifest digest refuses the run" '[ $rc = 1 ] && grep -q "does not match its manifest digest" err.txt'
 "$workz" run wf.toml "${iso[@]}" -q --input-manifest good.json > s.json
 check "a matching manifest digest runs" '[ "$(status_of s.json completed)" = 1 ]'
+stamp() { stat -c '{"dev": %d, "ino": %i, "size": %s, "mtime_ns": %.9Y, "ctime_ns": %.9Z}' "$1" | sed 's/\.//g'; }
+echo stamped > st.txt
+{ header stamped; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stamped.toml
+printf '{"%s": {"sha256": "sha256:%s", "stamp": %s}}\n' "$PWD/st.txt" "$(sha256sum st.txt | cut -d" " -f1)" "$(stamp st.txt)" > stamped.json
+"$workz" run stamped.toml "${iso[@]}" -q --input-manifest stamped.json > s2.json
+check "a stamped manifest whose stamp matches runs" '[ "$(status_of s2.json completed)" = 1 ]'
+mkdir stale && cd stale && echo old > st.txt
+{ header stale; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stale.toml
+printf '{"%s": {"sha256": "sha256:%s", "stamp": %s}}\n' "$PWD/st.txt" "$(sha256sum st.txt | cut -d" " -f1)" "$(stamp st.txt)" > stale.json
+echo new > st.txt
+"$workz" run stale.toml "${iso[@]}" -q --input-manifest stale.json > /dev/null 2> err.txt
+rc=$?
+cd ..
+check "a stale stamp makes workz read the file and refuse changed content" '[ $rc = 1 ] && grep -q "does not match its manifest digest" stale/err.txt'
 
 new during
 echo x > in.txt

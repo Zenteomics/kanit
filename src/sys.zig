@@ -243,6 +243,14 @@ pub const Identity = struct {
         return self.mode & 0o170000 == 0o100000;
     }
 
+    /// The device number as stat(2) reports it (glibc's makedev encoding),
+    /// for comparing with identities recorded by other programs.
+    pub fn stDev(self: Identity) u64 {
+        const major: u64 = self.dev >> 32;
+        const minor: u64 = self.dev & 0xffffffff;
+        return ((major & 0xfffff000) << 32) | ((major & 0xfff) << 8) | ((minor & 0xffffff00) << 12) | (minor & 0xff);
+    }
+
     pub fn format(self: Identity, w: *std.Io.Writer) std.Io.Writer.Error!void {
         try w.print("{d}:{d}:{d}:{d}:{d}", .{ self.dev, self.ino, self.size, self.mtime_ns, self.ctime_ns });
     }
