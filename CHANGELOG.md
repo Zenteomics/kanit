@@ -2,6 +2,25 @@
 
 Every user-visible change to workz, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the record files under `.workz/` and the command line; each such change is listed under **Upgrading**.
 
+## 0.2.0 - 2026-10-21
+
+Containers: rules can run in local images through rootless Podman, a shared service can hold a large index in memory once for many rules, and `watch` becomes an interactive terminal view.
+
+### Added
+
+- `container = "IMAGE"` runs a rule's command with `/bin/sh` inside a local image through rootless Podman. Images are never pulled; each is resolved to its image ID, which is part of the rule key. The container runs in the attempt's cgroup, so the memory limit, the out-of-memory kill and the counters cover the tool. It has no network, no capabilities and a read-only root; the working directory and outside inputs are mounted read-only, output directories read-write.
+- Shared services: a `[shared.NAME]` entry with `container`, `command` and `memory` runs a container whose IPC namespace container rules join, for example a STAR genome loaded once into shared memory. Its memory counts once against the budget. It stays up while a rule that has yet to run needs it, and gives way when a waiting rule needs its memory.
+- On a terminal, `watch` is interactive: a table of rules with filters, the selected attempt's standard error or output as it grows, and a timeline of the launch.
+
+### Changed
+
+- Shell rules run in one user and network namespace created for the run, with only loopback. `systemd-run --scope` starts the engine directly; bubblewrap is not needed.
+
+### Fixed
+
+- If the engine is killed, every task, container and service of the run ends with it: the holder of the run's network namespace kills the run's cgroup when the engine's end of its pipe closes.
+- The container of every failed attempt is removed, including one stopped before it started.
+
 ## 0.1.1 - 2026-10-20
 
 Large prepared workflows: input manifests that skip rehashing, refused launches that leave a record, and inputs keyed on their content.

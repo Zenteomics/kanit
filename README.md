@@ -2,7 +2,7 @@
 
 workz runs a prepared graph of file-producing rules on one Linux workstation. It admits work by CPU, memory, named groups and shared inputs, reuses only work whose recorded identity still matches, enforces each task's memory request, and keeps a complete record of every attempt.
 
-Version 0.1.1. Linux x86-64 with cgroup v2 and a systemd user manager. Zig 0.16.0 builds it.
+Version 0.2.0. Linux x86-64 with cgroup v2 and a systemd user manager. Zig 0.16.0 builds it.
 
 ## Build
 
