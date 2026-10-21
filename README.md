@@ -122,7 +122,15 @@ Everything workz writes for itself lives in `.workz/` in the working directory:
 
 Every launch that takes the lock gets a directory, refused ones included: a changed output, a manifest mismatch, a missing input or a request larger than the budget ends the launch with a `summary.json` of status `refused` and its reason, which `status` shows. `events.jsonl` is an append-only stream of typed events; `inputs_checked` reports how many manifest files were read and how long the check took. Each attempt keeps its complete standard output and error, its request, its exit status, `wait4` resource usage and the cgroup's peak memory, OOM events and CPU time. `record.json` is written last. Nothing is deleted: a rerun moves earlier outputs into the attempt's `previous/`.
 
-`watch` reads these files from any terminal and shows each running task with its elapsed time, current and peak memory, and last line of output.
+`watch` reads these files from any terminal and shows each running task with its elapsed time, current and peak memory, and last line of output. On a terminal it is interactive, and it stays open after the launch ends:
+
+- The header gives the counts, the reserved threads and memory against the budget, and the CPU cores and memory the run uses. Below it is a table of rules, running ones first, then waiting (with the reason), failed (with the reason) and done.
+- `j`/`k` or the arrows move the selection. Page keys, `g` and `G` jump. `a`, `r`, `w`, `f` and `d` show all, running, waiting, failed or done rules.
+- `enter` follows the selected attempt's standard error as it grows; `o` switches to standard output.
+- `t` draws a timeline of the launch: waiting as `.`, running as `>`, done as `=` and failed as `!`.
+- `q` goes back, or leaves; `ctrl-c` leaves.
+
+Each refresh parses only the events added since the last one. `--interval MS` sets the refresh period (default 1000), and `--once` prints the plain view and exits.
 
 Events also say why a ready rule waited (`task_waiting`) and sample the run's reserved and used CPU and memory every 5 s (`sample`). `record.json` keeps each attempt's waiting time by reason and the kernel's CPU, memory and I/O pressure totals for its cgroup.
 

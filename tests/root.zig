@@ -444,3 +444,118 @@ test "a service runs in a shareable IPC namespace in its own /tmp and waits on i
     const script = try workz.container.serviceScript(a, "load");
     try testing.expect(std.mem.indexOf(u8, script, "{\nload\n} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n") != null);
 }
+
+const ev_start = "{\"v\":1,\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"selected\":3,\"max_threads\":8,\"max_memory_mib\":4096}\n";
+const ev_rules =
+    "{\"v\":1,\"time\":\"2026-01-01T00:00:01.000Z\",\"event\":\"task_started\",\"rule\":\"align_sample_with_a_long_name\",\"attempt\":1,\"directory\":\"\"}\n" ++
+    "{\"v\":1,\"time\":\"2026-01-01T00:00:01.000Z\",\"event\":\"task_waiting\",\"rule\":\"merge\",\"reason\":\"memory\"}\n" ++
+    "{\"v\":1,\"time\":\"2026-01-01T00:00:02.000Z\",\"event\":\"task_started\",\"rule\":\"trim\",\"attempt\":1,\"directory\":\"\"}\n" ++
+    "{\"v\":1,\"time\":\"2026-01-01T00:00:04.000Z\",\"event\":\"task_finished\",\"rule\":\"trim\",\"attempt\":1,\"status\":\"failed\",\"reason\":\"exited with status 3\"}\n";
+
+test "the watch tracker applies only complete lines and keeps reading where it stopped" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    // The last line is cut in the middle, as while the engine writes it.
+    const cut = ev_rules.len - 30;
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules[0..cut]);
+    var t = try workz.monitor.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    try testing.expect(try t.update());
+    try testing.expectEqual(@as(u32, 3), t.selected);
+    try testing.expectEqual(@as(usize, 3), t.rules.items.len);
+    try testing.expectEqual(workz.monitor.Status.running, t.rules.items[2].status);
+    try testing.expect(!try t.update());
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    try testing.expect(try t.update());
+    try testing.expectEqual(workz.monitor.Status.failed, t.rules.items[2].status);
+    try testing.expectEqualStrings("exited with status 3", t.rules.items[2].reason);
+    try testing.expectEqualStrings("memory", t.rules.items[1].reason);
+}
+
+test "watch keys decode from raw terminal input" {
+    const tui = workz.tui;
+    var used: usize = 0;
+    try testing.expectEqual(tui.Key.up, tui.decode("\x1b[A", &used).?);
+    try testing.expectEqual(@as(usize, 3), used);
+    try testing.expectEqual(tui.Key.page_down, tui.decode("\x1b[6~j", &used).?);
+    try testing.expectEqual(@as(usize, 4), used);
+    try testing.expectEqual(tui.Key.end, tui.decode("\x1bOF", &used).?);
+    try testing.expectEqual(tui.Key.interrupt, tui.decode("\x03", &used).?);
+    try testing.expectEqual(tui.Key.escape, tui.decode("\x1b", &used).?);
+    try testing.expectEqual(tui.Key{ .char = 'q' }, tui.decode("q", &used).?);
+    // An unused sequence is skipped whole; an incomplete one waits.
+    try testing.expectEqual(@as(?tui.Key, null), tui.decode("\x1b[1;5Pq", &used));
+    try testing.expectEqual(@as(usize, 6), used);
+    try testing.expectEqual(@as(?tui.Key, null), tui.decode("\x1b[1;", &used));
+    try testing.expectEqual(@as(usize, 0), used);
+}
+
+test "the watch selection moves, scrolls and survives filters" {
+    const tui = workz.tui;
+    var ui: tui.Ui = .{};
+    const rows = [_]usize{ 4, 0, 2, 7, 5 };
+    ui.key(.down, &rows, 2);
+    try testing.expectEqual(@as(?usize, 4), ui.selected);
+    ui.key(.{ .char = 'G' }, &rows, 2);
+    try testing.expectEqual(@as(?usize, 5), ui.selected);
+    ui.settle(&rows, 2);
+    try testing.expectEqual(@as(usize, 3), ui.top);
+    ui.key(.page_up, &rows, 2);
+    try testing.expectEqual(@as(?usize, 2), ui.selected);
+    ui.key(.enter, &rows, 2);
+    try testing.expectEqual(tui.Mode.log, ui.mode);
+    ui.key(.{ .char = 'q' }, &rows, 2);
+    try testing.expectEqual(tui.Mode.table, ui.mode);
+    try testing.expect(!ui.quit);
+    // A selected rule that left the view gives way to a visible one.
+    const fewer = [_]usize{ 4, 0 };
+    ui.settle(&fewer, 2);
+    try testing.expect(ui.selected.? == 4 or ui.selected.? == 0);
+    ui.key(.{ .char = 'q' }, &fewer, 2);
+    try testing.expect(ui.quit);
+}
+
+test "a watch frame fits the terminal width and lists running rules first" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.monitor.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var ui: workz.tui.Ui = .{};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const now = workz.monitor.parseTime("2026-01-01T00:00:05.000Z").?;
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 40, 10, now, false);
+    var lines = std.mem.splitSequence(u8, out.written(), "\r\n");
+    var n: usize = 0;
+    var order: [3]usize = undefined;
+    var found: usize = 0;
+    while (lines.next()) |line| : (n += 1) {
+        // Columns: everything outside escape sequences.
+        var cols: usize = 0;
+        var i: usize = 0;
+        while (i < line.len) : (i += 1) {
+            if (line[i] == 0x1b) {
+                i += 1;
+                while (i < line.len and (line[i] < 0x40 or line[i] > 0x7e or line[i] == '[')) i += 1;
+                continue;
+            }
+            cols += 1;
+        }
+        try testing.expect(cols <= 40);
+        for ([_][]const u8{ "align_sample", "merge", "trim" }, 0..) |name, k| if (std.mem.indexOf(u8, line, name) != null) {
+            order[found] = k;
+            found += 1;
+        };
+    }
+    try testing.expectEqual(@as(usize, 10), n);
+    try testing.expectEqual(@as(usize, 3), found);
+    try testing.expectEqualSlices(usize, &.{ 0, 1, 2 }, &order);
+
+    ui.mode = .timeline;
+    out.clearRetainingCapacity();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 60, 10, now, false);
+    // trim ran from 2 s to 4 s of a 5 s launch and failed.
+    try testing.expect(std.mem.indexOf(u8, out.written(), "!!!!") != null);
+}

@@ -546,6 +546,47 @@ check "watch shows the running task with its memory and last output" 'grep -q "^
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
 
+# Interactive watch on a terminal: a private tmux server gives it a real
+# terminal; the screen is read back with capture-pane.
+tm() { tmux -L "workz-check-$$" -f /dev/null "$@"; }
+screen() { tm capture-pane -p -t w; }
+# wait_for PATTERN: until the screen shows PATTERN, at most 5 s.
+wait_for() { for _ in $(seq 50); do screen | grep -q -- "$1" && return 0; sleep 0.1; done; return 1; }
+new watch-tty
+{ header watch-tty
+  rule slow '[]' '["s.txt"]' '"echo to-stdout; echo to-stderr >&2; sleep 4; touch s.txt"'
+  rule quick '[]' '["q.txt"]' '"touch q.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json &
+runner=$!
+for _ in $(seq 50); do [ -d .workz/launches ] && break; sleep 0.1; done
+tm new-session -d -s w -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+check "the interactive view lists the running rule first with its last output" 'wait_for "^running    slow .*to-stderr" && screen | grep -q "reserved 1/4 threads, 64/2048 MiB"'
+tm send-keys -t w Enter
+check "enter follows the selected attempt's standard error" 'wait_for "^slow  attempt 1  running  stderr" && screen | grep -q "^to-stderr"'
+tm send-keys -t w o
+check "o switches the log to standard output" 'wait_for "^to-stdout"'
+tm send-keys -t w q t
+check "t shows the timeline" 'wait_for "^slow  *>>>"'
+wait $runner
+check "the view follows the launch to its end and stays open" 'wait_for "completed" && wait_for "^slow  *===="'
+tm send-keys -t w q q
+for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
+check "q leaves the view with status 0 and the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt && grep -q " echo " stty.txt'
+rm -f exit.txt stty.txt
+tm new-session -d -s w -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+wait_for "workz watch" && tm send-keys -t w C-c
+for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
+check "an interrupt key leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
+rm -f exit.txt stty.txt
+tm new-session -d -s w -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+wait_for "workz watch"
+kill -TERM "$(pgrep -P "$(tm display-message -p -t w '#{pane_pid}')" -x workz)"
+for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
+check "SIGTERM leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
+tm kill-server 2> /dev/null
+rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"
+
 # ---------------------------------------------------------------- cases from the oxo-local acceptance programs
 new retry-evidence
 { header retry-evidence
