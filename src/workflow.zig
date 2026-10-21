@@ -32,12 +32,28 @@ pub const Rule = struct {
     timeout_s: ?u64,
     /// Hash outputs after success so consumers are reused when they repeat.
     cutoff: bool,
+    /// Image the shell command runs in, or null for the host shell.
+    container: ?[]const u8,
     groups: []const GroupUse,
     shared: []const []const u8,
 };
 
 pub const Group = struct { name: []const u8, max: u32 };
-pub const Shared = struct { name: []const u8, path: []const u8, path_abs: []const u8 };
+/// A shared input: files mapped once (`path`), or a service container that
+/// holds something in memory for its users (`container`, `command`,
+/// `memory`, with `path` mounted read-only).
+pub const Shared = struct {
+    name: []const u8,
+    path: ?[]const u8,
+    path_abs: ?[]const u8,
+    container: ?[]const u8 = null,
+    command: ?[]const u8 = null,
+    memory_mib: ?u64 = null,
+
+    pub fn isService(self: Shared) bool {
+        return self.container != null;
+    }
+};
 
 pub const Workflow = struct {
     arena: std.heap.ArenaAllocator,
@@ -85,8 +101,8 @@ const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_group
 const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
-const shared_keys = [_][]const u8{"path"};
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff" };
+const shared_keys = [_][]const u8{ "path", "container", "command", "memory" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -374,9 +390,27 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             };
             if (!validName(e.key_ptr.*)) return p.fail(&at, "invalid shared name '{s}'", .{e.key_ptr.*});
             try p.checkKeys(s, &shared_keys, &at, "a shared input");
-            const sp = (try p.str(s, "path", &at, "shared")) orelse return p.fail(&at, "shared.{s}.path is required", .{e.key_ptr.*});
-            if (!localPath(sp)) return p.failKey(&at, "path", "shared.{s}.path must be an explicit local path", .{e.key_ptr.*});
-            try shared.append(arena, .{ .name = try arena.dupe(u8, e.key_ptr.*), .path = sp, .path_abs = try sys.absolute(arena, root, sp) });
+            const sp = try p.str(s, "path", &at, "shared");
+            if (sp) |shared_path| if (!localPath(shared_path)) return p.failKey(&at, "path", "shared.{s}.path must be an explicit local path", .{e.key_ptr.*});
+            const image = try p.str(s, "container", &at, "shared");
+            const command = try p.str(s, "command", &at, "shared");
+            const memory = try p.str(s, "memory", &at, "shared");
+            if (image == null) {
+                if (sp == null) return p.fail(&at, "shared.{s} needs a path, or a container, command and memory for a service", .{e.key_ptr.*});
+                if (command != null or memory != null) return p.fail(&at, "shared.{s}: command and memory belong to a service, which needs a container", .{e.key_ptr.*});
+            } else {
+                if (command == null) return p.failKey(&at, "container", "shared.{s}: a service needs a command", .{e.key_ptr.*});
+                if (memory == null) return p.failKey(&at, "container", "shared.{s}: a service needs the memory it holds", .{e.key_ptr.*});
+            }
+            const mib: ?u64 = if (memory) |m| parseMemoryMib(m) orelse return p.failKey(&at, "memory", "shared.{s}: invalid memory '{s}'", .{ e.key_ptr.*, m }) else null;
+            try shared.append(arena, .{
+                .name = try arena.dupe(u8, e.key_ptr.*),
+                .path = sp,
+                .path_abs = if (sp) |shared_path| try sys.absolute(arena, root, shared_path) else null,
+                .container = image,
+                .command = command,
+                .memory_mib = mib,
+            });
         }
     }
     wf.shared = shared.items;
@@ -470,6 +504,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .retries = retries,
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
+            .container = try p.str(r, "container", &at, name),
             .groups = group_uses.items,
             .shared = shared_uses,
         };
@@ -593,6 +628,13 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             const max = wf.groupMax(g.name) orelse return problem.set(gpa, "rule {s} uses undeclared resource group '{s}'", .{ r.name, g.name });
             if (g.count < 1 or g.count > max) return problem.set(gpa, "rule {s}: group '{s}' request {d} cannot fit its capacity {d}", .{ r.name, g.name, g.count, max });
         }
+        var services: usize = 0;
+        for (r.shared) |s| if (wf.sharedIndex(s)) |si| if (wf.shared[si].isService()) {
+            services += 1;
+            if (r.container == null) return problem.set(gpa, "rule {s} uses the shared service '{s}'; only container rules can join a service", .{ r.name, s });
+        };
+        if (services > 1) return problem.set(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
+        if (r.container) |img| if (img.len == 0 or std.mem.indexOfAny(u8, img, " \t\n") != null) return problem.set(gpa, "rule {s}: invalid container image '{s}'", .{ r.name, img });
         for (r.shared) |s| {
             if (wf.sharedIndex(s) == null) {
                 var names_list: std.ArrayList([]const u8) = .empty;
@@ -631,9 +673,10 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         }
     }
     for (wf.shared) |s| {
+        const sp = s.path_abs orelse continue;
         var oit = outputs.iterator();
         while (oit.next()) |e| {
-            if (within(s.path_abs, e.key_ptr.*)) return problem.set(gpa, "shared input '{s}' contains the output of rule {s}", .{ s.name, e.value_ptr.* });
+            if (within(sp, e.key_ptr.*)) return problem.set(gpa, "shared input '{s}' contains the output of rule {s}", .{ s.name, e.value_ptr.* });
         }
     }
 }

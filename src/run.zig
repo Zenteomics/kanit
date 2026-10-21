@@ -14,6 +14,7 @@ const state = @import("state.zig");
 const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
+const container = @import("container.zig");
 const Allocator = std.mem.Allocator;
 
 pub const version = @import("root.zig").version;
@@ -63,6 +64,8 @@ const Task = struct {
     waits: std.ArrayList(Wait) = .empty,
     /// Seconds from ready to start of the current attempt.
     queued_s: f64 = 0,
+    /// Podman container name of the current attempt of a container rule.
+    container_name: ?[]const u8 = null,
 };
 
 /// Time a ready attempt spent waiting for one reason.
@@ -166,6 +169,7 @@ const Engine = struct {
     journal: *records.Journal,
     records: []const u8,
     launch_dir: []const u8,
+    launch_id: []const u8,
     /// Engine part of every rule key (state.engine_key_text).
     engine_id: []const u8,
     /// Environment part of rule keys (state.envText).
@@ -176,6 +180,13 @@ const Engine = struct {
     tree: ?cgroup.Tree,
     /// The run's network for shell rules, when isolated.
     network: ?Network,
+    /// Podman, when the selected rules use containers.
+    podman: ?[]const u8 = null,
+    /// cgroup of the podman clients and conmon processes, when isolated.
+    containers_cg: ?[]const u8 = null,
+    images: std.StringHashMapUnmanaged([]const u8) = .empty,
+    /// Per rule: key text beyond the command (image ID, joined service).
+    extras: []const []const u8 = &.{},
     sigfd: sys.Fd,
 
     stopping: bool = false,
@@ -244,7 +255,7 @@ const Engine = struct {
             try keys.append(self.a, self.cut.parentKey(p, pk));
         }
         var missing: ?[]const u8 = null;
-        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, self.cut, &missing);
+        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, self.cut, self.extras[i], &missing);
         if (key == null) {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
@@ -390,8 +401,10 @@ const Engine = struct {
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
 
         const script = try std.fmt.allocPrint(self.a, "{s}/command.sh", .{t.dir});
-        const body = try std.fmt.allocPrint(self.gpa, "#!/usr/bin/env bash\nset -euo pipefail\n{s}\n", .{r.shell});
-        defer self.gpa.free(body);
+        const body = if (r.container != null)
+            try container.script(self.a, r.shell)
+        else
+            try std.fmt.allocPrint(self.a, "#!/usr/bin/env bash\nset -euo pipefail\n{s}\n", .{r.shell});
         try sys.writeFile(self.gpa, script, body);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/request.json", .{t.dir}), .{
             .rule = r.name,
@@ -432,24 +445,58 @@ const Engine = struct {
         if (self.tree) |tree| {
             const name = try std.fmt.allocPrint(self.a, "task-{d}-{d}", .{ i, t.attempts });
             t.cg = try cgroup.create(self.gpa, self.a, tree, name, .{ .memory_bytes = r.memory_mib * 1024 * 1024, .threads = r.threads, .oom_group = true });
-            procs = try cgroup.openProcs(self.gpa, t.cg.?);
+            // A container rule's podman client and conmon run in the run's
+            // shared containers group; only the container joins the attempt's.
+            procs = try cgroup.openProcs(self.gpa, if (r.container != null) self.containers_cg.? else t.cg.?);
         }
         defer if (procs >= 0) sys.close(procs);
 
-        const env = try self.taskEnv(r, t.dir);
-        const argv = try process.Vec.init(self.a, &.{ "bash", "-euo", "pipefail", script });
-        const spec: process.Spec = .{
-            .path = self.bash.ptr,
-            .argv = argv.items.ptr,
-            .envp = env.items.ptr,
-            .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
-            .stdin = self.devnull,
-            .stdout = out_fd,
-            .stderr = err_fd,
-            .cgroup_procs = procs,
-            .userns = if (self.network) |n| n.userns else -1,
-            .netns = if (self.network) |n| n.netns else -1,
-        };
+        var spec: process.Spec = undefined;
+        t.container_name = null;
+        if (r.container) |img| {
+            // The attempt process is `podman run`, outside the run network;
+            // the container alone goes into the attempt's cgroup.
+            const name = try std.fmt.allocPrint(self.a, "workz-{s}-{d}-{d}", .{ self.launch_id, i, t.attempts });
+            var extra_ro: std.ArrayList([]const u8) = .empty;
+            for (r.shared) |sn| if (self.wf.shared[self.wf.sharedIndex(sn).?].path_abs) |p| try extra_ro.append(self.a, p);
+            const argv = try container.runArgv(self.a, .{
+                .podman = self.podman.?,
+                .name = name,
+                .image_id = self.images.get(img).?,
+                .root = self.wf.root,
+                .launch = self.launch_id,
+                .cgroup_parent = if (t.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
+                .mounts = try container.mounts(self.a, self.wf.root, r, extra_ro.items),
+                .env = try self.containerEnv(r, t.dir),
+                .script = script,
+            });
+            t.container_name = name;
+            spec = .{
+                .path = (try self.a.dupeZ(u8, self.podman.?)).ptr,
+                .argv = (try process.Vec.init(self.a, argv)).items.ptr,
+                .envp = self.envp.items.ptr,
+                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .stdin = self.devnull,
+                .stdout = out_fd,
+                .stderr = err_fd,
+                .cgroup_procs = procs,
+            };
+        } else {
+            const env = try self.taskEnv(r, t.dir);
+            const argv = try process.Vec.init(self.a, &.{ "bash", "-euo", "pipefail", script });
+            spec = .{
+                .path = self.bash.ptr,
+                .argv = argv.items.ptr,
+                .envp = env.items.ptr,
+                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .stdin = self.devnull,
+                .stdout = out_fd,
+                .stderr = err_fd,
+                .cgroup_procs = procs,
+                .userns = if (self.network) |n| n.userns else -1,
+                .netns = if (self.network) |n| n.netns else -1,
+            };
+        }
         t.pid = process.spawn(&spec) catch |err| {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() });
@@ -473,6 +520,28 @@ const Engine = struct {
         return r.timeout_s orelse self.opts.timeout_s;
     }
 
+    /// A container's environment: the image's own, plus locale, time zone,
+    /// passed names and the WORKZ_* variables; never the host PATH.
+    fn containerEnv(self: *Engine, r: *const workflow.Rule, dir: []const u8) ![]const []const u8 {
+        var list: std.ArrayList([]const u8) = .empty;
+        for (self.envp.items) |e| {
+            const kv = std.mem.span(e.?);
+            const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
+            const name = kv[0..eq];
+            const keep = for ([_][]const u8{ "TZ", "LANG", "LC_ALL" }) |k| {
+                if (std.mem.eql(u8, k, name)) break true;
+            } else for (self.opts.pass_env) |k| {
+                if (std.mem.eql(u8, k, name)) break true;
+            } else false;
+            if (keep) try list.append(self.a, kv);
+        }
+        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}));
+        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{dir}));
+        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}));
+        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}));
+        return list.items;
+    }
+
     fn taskEnv(self: *Engine, r: *const workflow.Rule, dir: []const u8) !process.Vec {
         var list: std.ArrayList([]const u8) = .empty;
         for (self.envp.items) |e| try list.append(self.a, std.mem.span(e.?));
@@ -493,7 +562,7 @@ const Engine = struct {
             for (files.items) |f| self.gpa.free(f);
             files.deinit(self.gpa);
         }
-        try state.listFiles(self.gpa, s.path_abs, &files);
+        try state.listFiles(self.gpa, s.path_abs.?, &files);
         var argv_list: std.ArrayList([]const u8) = .empty;
         try argv_list.append(self.a, "workz");
         try argv_list.append(self.a, "__hold");
@@ -640,10 +709,17 @@ const Engine = struct {
                         break;
                     }
                 }
+            } else if (r.container != null and c == 125) {
+                reason = try std.fmt.allocPrint(self.a, "status 125: the container engine failed, or the command exited 125: {s}", .{try self.lastLine(t.dir)});
+            } else if (r.container != null and (c == 126 or c == 127)) {
+                reason = try std.fmt.allocPrint(self.a, "the command could not run in the container (status {d}): {s}", .{ c, try self.lastLine(t.dir) });
             } else reason = try std.fmt.allocPrint(self.a, "exited with status {d}", .{c});
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
         }
+        // A container whose podman client did not finish by itself may remain.
+        if (t.container_name) |name| if (sig != null or code == null or code.? == 125)
+            container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
 
         var outputs: std.ArrayList(state.Output) = .empty;
         if (ok) for (r.output_abs) |o| {
@@ -669,6 +745,8 @@ const Engine = struct {
             .started = try records.timeText(self.a, t.started_real),
             .finished = finished_text,
             .wall_s = wall_s,
+            .cpu_s = taskCpu(counters, reaped),
+            .cpu_source = if (counters != null and counters.?.cpu_usage_usec != null) "cgroup" else "rusage",
             .rusage = .{
                 .cpu_s = reaped.cpuSeconds(),
                 .maxrss_kib = reaped.usage.maxrss,
@@ -701,7 +779,7 @@ const Engine = struct {
             self.dirty = true;
             try self.pending_done.append(self.gpa, r.name);
             self.finished += 1;
-            self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "completed", .wall_s = wall_s, .cpu_s = reaped.cpuSeconds(), .maxrss_kib = reaped.usage.maxrss, .memory_peak = if (counters) |c| c.memory_peak else null });
+            self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "completed", .wall_s = wall_s, .cpu_s = taskCpu(counters, reaped), .maxrss_kib = reaped.usage.maxrss, .memory_peak = if (counters) |c| c.memory_peak else null });
             self.progress("completed {s} ({d:.1} s)", .{ r.name, wall_s });
             return;
         }
@@ -749,13 +827,22 @@ const Engine = struct {
             try records.writeJson(self.gpa, b, .{
                 .rule = r.name,
                 .wall_time_secs = wall_s,
-                .cpu_seconds = reaped.cpuSeconds(),
+                .cpu_seconds = taskCpu(counters, reaped),
                 .max_rss_mb = @as(f64, @floatFromInt(reaped.usage.maxrss)) / 1024.0,
                 .memory_peak_mb = if (counters) |c| if (c.memory_peak) |p| @as(f64, @floatFromInt(p)) / 1048576.0 else null else null,
                 .memory_limit_mb = r.memory_mib,
                 .retries = t.attempts - 1,
             });
         };
+    }
+
+    /// The last non-empty line of an attempt's stderr, for failure reasons.
+    fn lastLine(self: *Engine, dir: []const u8) ![]const u8 {
+        const tail = try sys.readTail(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}), 2048);
+        defer self.gpa.free(tail);
+        const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
+        const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
+        return self.a.dupe(u8, trimmed[begin..]);
     }
 
     fn recordFiles(self: *Engine, r: *const workflow.Rule) !void {
@@ -777,8 +864,7 @@ const Engine = struct {
         for (self.tasks, 0..) |*t, i| switch (t.status) {
             .running => {
                 t.cancelled = true;
-                process.signalGroup(t.pid, .TERM);
-                t.kill_at = sys.monoNs() + grace;
+                self.terminate(t, grace);
                 self.events.emit("task_cancelling", .{ .rule = self.rule(i).name });
             },
             .staging => {
@@ -790,6 +876,18 @@ const Engine = struct {
             },
             else => {},
         };
+    }
+
+    /// Asks a running attempt to stop: SIGTERM to its process group, and for
+    /// a container `podman stop`, which kills every container process after
+    /// the grace period. The group is killed later if the attempt is still
+    /// running: after the grace period, or ten seconds more for a container.
+    fn terminate(self: *Engine, t: *Task, grace: i128) void {
+        process.signalGroup(t.pid, .TERM);
+        if (t.container_name) |name| {
+            container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull);
+            t.kill_at = sys.monoNs() + grace + 10 * std.time.ns_per_s;
+        } else t.kill_at = sys.monoNs() + grace;
     }
 
     fn checkTimers(self: *Engine) void {
@@ -805,8 +903,7 @@ const Engine = struct {
             };
             if (t.deadline_ns) |d| if (now >= d and !t.timed_out) {
                 t.timed_out = true;
-                process.signalGroup(t.pid, .TERM);
-                t.kill_at = now + grace;
+                self.terminate(t, grace);
                 t.deadline_ns = null;
                 self.events.emit("task_timeout", .{ .rule = self.rule(i).name, .attempt = t.attempts });
             };
@@ -955,6 +1052,14 @@ fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
     unreachable;
 }
 
+/// CPU seconds of an attempt: its cgroup's usage when it has one, which
+/// includes containers and processes that left the task; otherwise the
+/// `wait4` usage of the command and its waited children.
+fn taskCpu(counters: ?cgroup.Counters, reaped: process.Reaped) f64 {
+    if (counters) |c| if (c.cpu_usage_usec) |us| return @as(f64, @floatFromInt(us)) / 1e6;
+    return reaped.cpuSeconds();
+}
+
 /// The engine's own CPU time and peak memory, without its tasks.
 fn engineCost() struct { cpu_s: f64, max_rss_mib: f64 } {
     var ru: linux.rusage = undefined;
@@ -1064,8 +1169,13 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // Budget and input checks.
     var holders = try a.alloc(Holder, wf.shared.len);
     for (wf.shared, 0..) |s, i| {
-        const bytes = state.pageBytes(gpa, s.path_abs) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path, @errorName(err) }));
+        // A service holds its declared memory; mapped files hold their pages.
+        if (s.memory_mib) |mib| {
+            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib };
+            continue;
+        }
+        const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err|
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, @errorName(err) }));
         holders[i] = .{ .bytes = bytes, .mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable };
     }
     var produced: std.StringHashMapUnmanaged(void) = .empty;
@@ -1157,11 +1267,33 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
     };
 
-    const shared_info = try a.alloc(struct { name: []const u8, path: []const u8, bytes: u64 }, wf.shared.len);
-    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .bytes = h.bytes };
+    const shared_info = try a.alloc(struct { name: []const u8, path: ?[]const u8, container: ?[]const u8, bytes: u64 }, wf.shared.len);
+    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .container = s.container, .bytes = h.bytes };
 
     const devnull = try sys.openRead(gpa, "/dev/null");
     defer sys.close(devnull);
+    const host_envp = try process.Vec.init(a, env_list.items);
+
+    // Container rules: Podman, local images resolved to IDs, leftovers removed.
+    var podman: ?[]const u8 = null;
+    var images: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const refs = try container.imageRefs(a, wf, mask);
+    if (refs.len > 0) {
+        const tc = sys.monoNs();
+        podman = (try container.findPodman(gpa, a, environ.get("PATH") orelse "/usr/bin:/bin")) orelse
+            return refusal.refuse(.invalid, "the workflow has container rules but podman is not on PATH");
+        var missing: ?[]const u8 = null;
+        images = try container.resolveImages(gpa, a, podman.?, refs, &host_envp, devnull, &missing);
+        if (missing) |m| return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "container image {s} is not available locally; workz does not pull images", .{m}));
+        const removed = try container.removeLeftovers(gpa, a, podman.?, wf.root, &host_envp, devnull);
+        events.emit("containers_checked", .{ .images = images.count(), .leftovers_removed = removed, .seconds = @as(f64, @floatFromInt(sys.monoNs() - tc)) / 1e9 });
+    }
+    const extras = try container.ruleExtras(a, wf, &images);
+    var containers_cg: ?[]const u8 = null;
+    if (podman != null) if (tree) |t| {
+        containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch
+            return refusal.refuse(.invalid, "cannot create the cgroup for container clients");
+    };
     const sigfd = try process.setupSignals();
     defer sys.close(sigfd);
 
@@ -1190,9 +1322,14 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .journal = &journal,
         .records = rec,
         .launch_dir = launch.dir,
+        .launch_id = launch.id,
         .engine_id = state.engine_key_text,
         .env_text = env_text,
-        .envp = try process.Vec.init(a, env_list.items),
+        .envp = host_envp,
+        .podman = podman,
+        .containers_cg = containers_cg,
+        .images = images,
+        .extras = extras,
         .bash = findBash(gpa) orelse {
             std.debug.print("workz: bash not found\n", .{});
             return .invalid;
@@ -1251,7 +1388,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             try keys.append(a, post_cut.parentKey(p, if (engine.tasks[p].key) |pk| pk.key else "none"));
         }
         var missing: ?[]const u8 = null;
-        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &post_cut, &missing);
+        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &post_cut, engine.extras[i], &missing);
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
             _ = engine.st.data.rules.map.swapRemove(r.name);

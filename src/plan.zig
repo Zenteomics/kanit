@@ -5,6 +5,8 @@ const workflow = @import("workflow.zig");
 const graph = @import("graph.zig");
 const state = @import("state.zig");
 const records = @import("records.zig");
+const container = @import("container.zig");
+const process = @import("process.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Decision = struct {
@@ -25,9 +27,13 @@ pub const Context = struct {
     engine_id: []const u8,
     rerun: bool = false,
     cut: ?state.Cutoff = null,
+    environ: *const std.process.Environ.Map,
+    /// Per rule: key text beyond the command, as the run computes it.
+    extras: []const []const u8 = &.{},
 
-    pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8) !Context {
+    pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8, environ: *const std.process.Environ.Map) !Context {
         return .{
+            .environ = environ,
             .gpa = gpa,
             .a = a,
             .wf = wf,
@@ -43,6 +49,7 @@ pub const Context = struct {
     /// runs also runs: its inputs will change.
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
+        self.extras = try self.resolveExtras(mask);
         const out = try self.a.alloc(Decision, self.wf.rules.len);
         for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
         for (self.g.order) |i| {
@@ -50,6 +57,29 @@ pub const Context = struct {
             out[i] = try self.decide(i, out);
         }
         return out;
+    }
+
+    /// Image IDs of the selected container rules, resolved as the run does;
+    /// an image that cannot be resolved keeps its reference and is reported.
+    fn resolveExtras(self: *Context, mask: []const bool) ![]const []const u8 {
+        var images: std.StringHashMapUnmanaged([]const u8) = .empty;
+        const refs = try container.imageRefs(self.a, self.wf, mask);
+        if (refs.len > 0) {
+            const podman = (try container.findPodman(self.gpa, self.a, self.environ.get("PATH") orelse "/usr/bin:/bin")) orelse {
+                std.debug.print("workz: podman is not on PATH; container rules cannot be planned exactly\n", .{});
+                return container.ruleExtras(self.a, self.wf, &images);
+            };
+            var list: std.ArrayList([]const u8) = .empty;
+            var it = self.environ.iterator();
+            while (it.next()) |e| try list.append(self.a, try std.fmt.allocPrint(self.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
+            const envp = try process.Vec.init(self.a, list.items);
+            const devnull = try sys.openRead(self.gpa, "/dev/null");
+            defer sys.close(devnull);
+            var missing: ?[]const u8 = null;
+            images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &missing);
+            if (missing) |m| std.debug.print("workz: container image {s} is not available locally; a run would refuse\n", .{m});
+        }
+        return container.ruleExtras(self.a, self.wf, &images);
     }
 
     fn decide(self: *Context, i: usize, prior: []const Decision) !Decision {
@@ -70,7 +100,7 @@ pub const Context = struct {
             try keys.append(self.a, self.cut.?.parentKey(p, if (prior[p].key) |k| k.key else if (self.st.data.rules.map.get(self.wf.rules[p].name)) |pe| pe.key else "none"));
         }
         var missing: ?[]const u8 = null;
-        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, &missing)) orelse
+        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, self.extras[i], &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
         if (self.rerun) return .{ .run = true, .reason = "rerun requested", .key = k };
         if (state.firstDifference(&e, &k)) |what| return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };

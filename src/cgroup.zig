@@ -7,6 +7,7 @@
 //! requested threads.
 const std = @import("std");
 const sys = @import("sys.zig");
+const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 pub const Tree = struct {
@@ -201,7 +202,41 @@ pub fn kill(gpa: Allocator, path: []const u8) void {
     set(gpa, path, "cgroup.kill", "1") catch {};
 }
 
-/// Removes an empty group; error.Busy while processes remain.
+/// Removes an empty group and its empty child groups, deepest first (a
+/// container runtime may leave its own groups below a task's);
+/// error.Busy while processes remain.
 pub fn remove(gpa: Allocator, path: []const u8) !void {
-    try sys.rmdir(gpa, path);
+    sys.rmdir(gpa, path) catch |err| switch (err) {
+        error.Busy => {
+            try removeChildren(gpa, path, 0);
+            try sys.rmdir(gpa, path);
+        },
+        else => return err,
+    };
+}
+
+fn removeChildren(gpa: Allocator, path: []const u8, depth: usize) !void {
+    if (depth > 16) return error.Busy;
+    const p = try sys.z(gpa, path);
+    defer gpa.free(p);
+    const fd: sys.Fd = @intCast(try sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
+    defer sys.close(fd);
+    var buf: [8192]u8 align(8) = undefined;
+    while (true) {
+        const n = try sys.check(linux.getdents64(fd, &buf, buf.len));
+        if (n == 0) break;
+        var off: usize = 0;
+        while (off < n) {
+            const reclen = std.mem.readInt(u16, buf[off + 16 ..][0..2], .little);
+            const dtype = buf[off + 18];
+            const name = std.mem.sliceTo(buf[off + 19 .. off + reclen], 0);
+            off += reclen;
+            // DT_DIR entries are child groups; the rest are interface files.
+            if (dtype != 4 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            const child = try std.fs.path.join(gpa, &.{ path, name });
+            defer gpa.free(child);
+            try removeChildren(gpa, child, depth + 1);
+            try sys.rmdir(gpa, child);
+        }
+    }
 }

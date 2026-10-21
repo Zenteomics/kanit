@@ -339,10 +339,18 @@ pub fn computeKey(
     parent_keys: []const []const u8,
     engine: []const u8,
     cut: ?*const Cutoff,
+    /// What else decides the command's result: a container rule's image ID
+    /// and its shared service; empty for host rules.
+    extra: []const u8,
     missing: *?[]const u8,
 ) !?Key {
     var k: Key = undefined;
-    k.command = try hex(a, r.shell);
+    if (extra.len == 0) {
+        k.command = try hex(a, r.shell);
+    } else {
+        const text = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ r.shell, extra });
+        k.command = try hex(a, text);
+    }
     k.env = try hex(a, env_text);
     k.request = try requestText(a, r);
     {

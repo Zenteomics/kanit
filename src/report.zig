@@ -118,7 +118,7 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
             .status = str(v, "status"),
             .reason = str(v, "reason"),
             .wall_s = wall,
-            .cpu_s = if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
+            .cpu_s = num(get(v, "cpu_s")) orelse if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
             .threads = if (req) |q| num(get(q, "threads")) orelse 1 else 1,
             .request_mib = if (req) |q| num(get(q, "memory_mib")) orelse 0 else 0,
             .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,

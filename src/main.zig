@@ -237,7 +237,7 @@ const PlanExtra = struct {
 };
 
 fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
-    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass));
+    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass), c.env);
 }
 
 fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
@@ -485,7 +485,7 @@ fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
     const threads = opts.max_threads orelse run.defaultThreads();
     var memory = opts.max_memory_mib orelse run.defaultMemoryMib(c.gpa);
     var shared_mib: u64 = 0;
-    for (l.wf.shared) |s| shared_mib += std.math.divCeil(u64, state.pageBytes(c.gpa, s.path_abs) catch 0, 1 << 20) catch 0;
+    for (l.wf.shared) |s| shared_mib += s.memory_mib orelse std.math.divCeil(u64, state.pageBytes(c.gpa, s.path_abs.?) catch 0, 1 << 20) catch 0;
     // The engine and its network holder need a little memory beside the tasks.
     memory += 256;
     const exe = try sys.selfExe(c.a);

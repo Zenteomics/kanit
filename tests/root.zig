@@ -197,7 +197,7 @@ test "format 1 accepts every rule field and the oxo-local resource tables" {
 }
 
 test "format 1 rejects unknown keys, bad values and unsafe paths" {
-    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ncontainer = \"img\"\n", "unknown key 'container'");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\nimage = \"img\"\n", "unknown key 'image'");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemroy = \"1M\"\n", "did you mean 'memory'?");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\n", "must declare memory");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nmemory = \"1M\"\n", "needs a shell command");
@@ -232,30 +232,30 @@ test "the rule key changes with each of its parts" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
-    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings(base.key, same.key);
-    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_path.key));
-    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", null, &missing)).?;
+    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_engine.key));
-    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", null, &missing)).?;
+    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, with_parent.key));
     var changed = wf.rules[0];
     changed.threads = 2;
-    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings("threads=2 memory=1M", more_threads.request);
     try testing.expect(!std.mem.eql(u8, base.key, more_threads.key));
     changed = wf.rules[0];
     changed.shell = "cat in.txt in.txt > x";
-    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_cmd.key));
 
     // Rewriting the input changes its identity even with the same size.
     _ = try s.file("in.txt", "DATA");
     var fresh = state.Identities.init(testing.allocator);
     defer fresh.deinit();
-    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, &missing)).?;
+    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.inputs, rewritten.inputs));
     try testing.expectEqualStrings(base.command, rewritten.command);
 }
@@ -334,7 +334,7 @@ test "the key of a fixed rule matches its pinned value" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, &missing)).?;
+    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, "", &missing)).?;
     try testing.expectEqualStrings("workz-key 2", k.engine);
     try testing.expectEqualStrings("7d15b2e0e68740f40d5a9f9e3081ebc2563c64ef5783a077ec50bee62edf996e", k.key);
 }
@@ -380,4 +380,30 @@ test "an attempt that ran but used almost none of its requests is delegated" {
     var failed = client;
     failed.status = "failed";
     try testing.expect(!failed.delegated());
+}
+
+test "container mounts list each directory once with the access it needs" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var rule: workflow.Rule = undefined;
+    rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
+    rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
+    const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});
+    // /w must be writable for top.txt, which also covers /w/out.
+    try testing.expectEqual(@as(usize, 3), ms.len);
+    try testing.expectEqualStrings("/data/reads", ms[0].dir);
+    try testing.expect(!ms[0].write);
+    try testing.expectEqualStrings("/data/ref", ms[1].dir);
+    try testing.expect(!ms[1].write);
+    try testing.expectEqualStrings("/w", ms[2].dir);
+    try testing.expect(ms[2].write);
+
+    rule.output_abs = &.{ "/w/out/a.txt", "/w/out/sub/b.txt" };
+    const nested = try workz.container.mounts(a, "/w", &rule, &.{});
+    try testing.expectEqualStrings("/w", nested[2].dir);
+    try testing.expect(!nested[2].write);
+    try testing.expectEqualStrings("/w/out", nested[3].dir);
+    try testing.expect(nested[3].write);
+    try testing.expectEqual(@as(usize, 4), nested.len);
 }

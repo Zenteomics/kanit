@@ -124,6 +124,78 @@ cp up.txt up.copy && mv up.copy up.txt
 "$workz" run wf.toml "${iso[@]}" -q > c8.json
 check "a cutoff output copied back with the same bytes keeps everything reused" '[ "$(status_of c8.json reused)" = 4 ]'
 
+# ---------------------------------------------------------------- container rules
+img=community.wave.seqera.io/library/coreutils_grep_gzip_lbzip2_pruned:838ba80435a629f8
+img2=community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57
+leftovers() { podman ps --all --quiet --filter "label=workz.workdir=$PWD" | wc -l; }
+# Removes only the temporary name: `podman untag NAME` alone would remove
+# every name of the image NAME points to.
+drop_alias() {
+  local id
+  id=$(podman image inspect --format '{{.Id}}' localhost/workz-check:alias 2> /dev/null) || return 0
+  podman untag "$id" localhost/workz-check:alias
+}
+trap drop_alias EXIT
+crule() { rule "$1" "$2" "$3" "$4" "container = \"${5:-$img}\"
+${6:-}"; }
+
+new container
+mkdir out && echo hello > in.txt
+{ header container
+  crule up '["in.txt"]' '["out/up.txt"]' '"tr a-z A-Z < in.txt > out/up.txt; echo to-stdout; head -c 60000000 /dev/zero | gzip -1 > /dev/null; if touch rogue.txt 2>/dev/null; then echo writable; else echo read-only; fi; if (exec 3<>/dev/tcp/1.1.1.1/53) 2>/dev/null; then echo net; else echo no-net; fi"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+a="$(last_launch)/attempts/up/001"
+check "a container rule writes its output, owned by the user, and logs its stdout" '[ "$(cat out/up.txt)" = HELLO ] && [ "$(stat -c %u out/up.txt)" = "$(id -u)" ] && head -1 "$a/stdout.log" | grep -q to-stdout'
+check "a container sees a read-only working directory and no network" 'grep -q read-only "$a/stdout.log" && grep -q no-net "$a/stdout.log" && [ ! -e rogue.txt ]'
+check "the attempt counters cover the container, not only the podman client" 'jq -e ".cpu_source == \"cgroup\" and .cpu_s > .rusage.cpu_s and .cpu_s > 0.1" "$a/record.json" > /dev/null'
+check "a finished container is removed" '[ "$(leftovers)" = 0 ]'
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+check "a container rule is reused like any rule" '[ "$(status_of s2.json reused)" = 1 ]'
+podman tag "$img" localhost/workz-check:alias
+{ header container; crule up '["in.txt"]' '["out/up.txt"]' '"tr a-z A-Z < in.txt > out/up.txt; echo to-stdout; head -c 60000000 /dev/zero | gzip -1 > /dev/null; if touch rogue.txt 2>/dev/null; then echo writable; else echo read-only; fi; if (exec 3<>/dev/tcp/1.1.1.1/53) 2>/dev/null; then echo net; else echo no-net; fi"' localhost/workz-check:alias; } > alias.toml
+"$workz" run alias.toml "${iso[@]}" -q > s3.json
+check "a retagged image with the same ID keeps its rule reused" '[ "$(status_of s3.json reused)" = 1 ]'
+drop_alias
+podman tag "$img2" localhost/workz-check:alias
+"$workz" plan alias.toml > plan.txt
+check "a tag that now names another image reruns its rule" 'grep -q "run   up  (command changed)" plan.txt'
+drop_alias
+"$workz" run alias.toml "${iso[@]}" -q > s4.json 2> err4.txt
+rc=$?
+check "a missing image refuses the launch without pulling" '[ $rc = 2 ] && jq -e ".status == \"refused\" and (.error | test(\"not available locally\"))" s4.json > /dev/null'
+
+new container-failures
+{ header container-failures
+  crule hog '[]' '["h.txt"]' '"x=$(head -c 400000000 /dev/zero | tr \"\\\\0\" a); touch h.txt"'
+  crule slow '[]' '["s.txt"]' '"sleep 30; touch s.txt"' "" 'timeout = "1s"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -k --grace 2 -q > s.json 2> err.txt
+check "a container above its memory request is killed as out of memory" 'grep -q "hog: out of memory" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "a timed-out container is stopped" 'grep -q "slow: timed out after 1 s" err.txt'
+check "failed containers leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && ! ls -d /sys/fs/cgroup$(jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | sed "s|^/sys/fs/cgroup||")/task-* 2> /dev/null'
+
+new container-interrupt
+{ header container-interrupt; crule long '[]' '["l.txt"]' '"sleep 60; touch l.txt"'; } > wf.toml
+setsid "$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json 2> err.txt &
+launcher=$!
+for _ in $(seq 100); do [ "$(leftovers)" = 1 ] && break; sleep 0.1; done
+kill -INT -- -$launcher
+wait $launcher
+rc=$?
+check "an interrupt stops a running container and removes it" '[ $rc = 130 ] && [ "$(status_of s.json cancelled)" = 1 ] && [ "$(leftovers)" = 0 ]'
+
+new container-crash
+{ header container-crash; crule long '[]' '["l.txt"]' '"sleep 60; touch l.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json 2>/dev/null &
+engine=$!
+for _ in $(seq 100); do [ "$(leftovers)" = 1 ] && break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2>/dev/null
+{ header container-crash; crule long '[]' '["l.txt"]' '"touch l.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+check "a container left by a killed engine is removed by the next launch" 'jq -e "select(.event == \"containers_checked\") | select(.leftovers_removed >= 1)" "$(last_launch)/events.jsonl" > /dev/null && [ "$(leftovers)" = 0 ] && [ "$(status_of s2.json completed)" = 1 ]'
+
 # ---------------------------------------------------------------- failure policy
 new failure
 { header failure
