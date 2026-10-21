@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -477,37 +477,30 @@ fn findProgram(c: Ctx, name: []const u8) !?[]const u8 {
     return null;
 }
 
-/// Re-executes the run inside a delegated systemd user scope (cgroup limits
-/// for the whole run, swap off) and a bubblewrap network namespace. Interrupt
-/// signals are ignored by the launchers and handled by the engine itself.
+/// Re-executes the run inside a delegated systemd user scope: cgroup limits
+/// for the whole run, swap off. `systemd-run --scope` execs the engine in this
+/// same process, so interrupt signals reach the engine directly.
 fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
     const systemd_run = (try findProgram(c, "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
-    const bwrap = (try findProgram(c, "bwrap")) orelse return fail("bwrap not found; isolation needs bubblewrap (or use --no-isolation)", .{});
     const threads = opts.max_threads orelse run.defaultThreads();
     var memory = opts.max_memory_mib orelse run.defaultMemoryMib(c.gpa);
     var shared_mib: u64 = 0;
     for (l.wf.shared) |s| shared_mib += std.math.divCeil(u64, state.pageBytes(c.gpa, s.path_abs) catch 0, 1 << 20) catch 0;
-    // The engine and its launchers need a little memory beside the tasks.
+    // The engine and its network holder need a little memory beside the tasks.
     memory += 256;
     const exe = try sys.selfExe(c.a);
-    const here = try sys.cwd(c.a);
     var argv: std.ArrayList([]const u8) = .empty;
+    try argv.appendSlice(c.a, &.{ systemd_run, "--user", "--scope", "--quiet", "--expand-environment=no" });
+    // With --slice the scope becomes a child of the caller's slice, inside its limits.
+    if (opts.slice) |slice| try argv.append(c.a, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
     try argv.appendSlice(c.a, &.{
-        systemd_run,       "--user",       "--scope",                                                                "--quiet",                                                "--expand-environment=no",
-        "-p",              "Delegate=yes", "-p",                                                                     try std.fmt.allocPrint(c.a, "MemoryMax={d}M", .{memory}), "-p",
-        "MemorySwapMax=0", "-p",           try std.fmt.allocPrint(c.a, "CPUQuota={d}%", .{@as(u64, threads) * 100}), "-p",                                                     try std.fmt.allocPrint(c.a, "MemoryLow={d}M", .{shared_mib}),
-        "--",              bwrap,          "--unshare-net",                                                          "--die-with-parent",                                      "--dev-bind",
-        "/",               "/",            "--proc",                                                                 "/proc",                                                  "--chdir",
-        here,              "--",           exe,
+        "-p", "Delegate=yes",
+        "-p", try std.fmt.allocPrint(c.a, "MemoryMax={d}M", .{memory}),
+        "-p", "MemorySwapMax=0",
+        "-p", try std.fmt.allocPrint(c.a, "CPUQuota={d}%", .{@as(u64, threads) * 100}),
+        "-p", try std.fmt.allocPrint(c.a, "MemoryLow={d}M", .{shared_mib}),
+        "--", exe,
     });
-    if (opts.slice) |slice| {
-        // The scope becomes a child of the caller's slice, inside its limits.
-        var at: usize = 0;
-        for (argv.items, 0..) |arg, k| if (std.mem.eql(u8, arg, "--expand-environment=no")) {
-            at = k + 1;
-        };
-        try argv.insert(c.a, at, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
-    }
     for (c.argv[1..]) |arg| try argv.append(c.a, arg);
     var env: std.ArrayList([]const u8) = .empty;
     var it = c.env.iterator();
@@ -515,49 +508,46 @@ fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
     try env.append(c.a, "WORKZ_STAGE=inner");
     const argv_z = try workz.process.Vec.init(c.a, argv.items);
     const env_z = try workz.process.Vec.init(c.a, env.items);
-    const path_z = try c.a.dupeZ(u8, systemd_run);
-    const pid_file = try std.fs.path.join(c.a, &.{ l.wf.root, ".workz", "engine.pid" });
+    const rc = linux.execve(try c.a.dupeZ(u8, systemd_run), argv_z.items.ptr, env_z.items.ptr);
+    return fail("cannot start systemd-run: {s}", .{@tagName(linux.errno(rc))});
+}
 
-    // The launchers ignore interrupt signals; this process stays as a
-    // supervisor that forwards them to the engine and returns its status.
-    var set = linux.sigemptyset();
-    for ([_]linux.SIG{ .INT, .TERM, .HUP, .CHLD }) |s| linux.sigaddset(&set, s);
-    _ = linux.sigprocmask(linux.SIG.BLOCK, &set, null);
-    const sigfd: i32 = @intCast(try sys.check(linux.signalfd(-1, &set, linux.SFD.CLOEXEC)));
-    const rc = linux.fork();
-    if (linux.errno(rc) != .SUCCESS) return fail("cannot start systemd-run: {s}", .{@tagName(linux.errno(rc))});
-    if (rc == 0) {
-        var ign: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
-        for ([_]linux.SIG{ .INT, .TERM, .HUP }) |s| _ = linux.sigaction(s, &ign, null);
-        const empty = linux.sigemptyset();
-        _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);
-        _ = linux.execve(path_z, argv_z.items.ptr, env_z.items.ptr);
-        linux.exit_group(127);
-    }
-    const child: linux.pid_t = @intCast(rc);
-    while (true) {
-        var info: linux.signalfd_siginfo = undefined;
-        const n = linux.read(sigfd, @ptrCast(&info), @sizeOf(linux.signalfd_siginfo));
-        if (linux.errno(n) != .SUCCESS) continue;
-        const sig: linux.SIG = @enumFromInt(info.signo);
-        if (sig == .CHLD) {
-            var status: u32 = 0;
-            const w = linux.wait4(child, &status, linux.W.NOHANG, null);
-            if (linux.errno(w) != .SUCCESS or w == 0) continue;
-            if (linux.W.IFEXITED(status)) return @enumFromInt(linux.W.EXITSTATUS(status));
-            return .failed;
+/// Internal: creates the run's network: a new user namespace mapping the
+/// caller's own uid and gid, and a new network namespace with only loopback,
+/// brought up. Reports "ready" on stdout and waits; shell rules join both
+/// namespaces. It dies with the engine.
+fn netns() Exit {
+    const uid = linux.getuid();
+    const gid = linux.getgid();
+    _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
+    if (linux.errno(linux.unshare(linux.CLONE.NEWUSER | linux.CLONE.NEWNET)) != .SUCCESS) return fail("cannot create the run's network namespace", .{});
+    var buf: [64]u8 = undefined;
+    writeProc("/proc/self/setgroups", "deny") catch return fail("cannot deny setgroups", .{});
+    writeProc("/proc/self/uid_map", std.fmt.bufPrint(&buf, "{d} {d} 1", .{ uid, uid }) catch unreachable) catch return fail("cannot map the user id", .{});
+    writeProc("/proc/self/gid_map", std.fmt.bufPrint(&buf, "{d} {d} 1", .{ gid, gid }) catch unreachable) catch return fail("cannot map the group id", .{});
+    // Bring loopback up so rules can use 127.0.0.1 among themselves.
+    const IfReq = extern struct { name: [16]u8, flags: i16, pad: [22]u8 };
+    const sock = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
+    if (linux.errno(sock) == .SUCCESS) {
+        var req: IfReq = std.mem.zeroes(IfReq);
+        @memcpy(req.name[0..2], "lo");
+        const fd: i32 = @intCast(sock);
+        if (linux.errno(linux.ioctl(fd, linux.SIOCGIFFLAGS, @intFromPtr(&req))) == .SUCCESS) {
+            req.flags |= 1; // IFF_UP
+            _ = linux.ioctl(fd, linux.SIOCSIFFLAGS, @intFromPtr(&req));
         }
-        const text = sys.readFile(c.gpa, pid_file, 64) catch continue;
-        defer c.gpa.free(text);
-        const pid = std.fmt.parseInt(linux.pid_t, std.mem.trim(u8, text, " \n"), 10) catch continue;
-        // Forward only to a running workz engine, never to a reused process id.
-        var link: [64]u8 = undefined;
-        const proc = std.fmt.bufPrintZ(&link, "/proc/{d}/exe", .{pid}) catch continue;
-        var target: [4096]u8 = undefined;
-        const len = linux.readlinkat(linux.AT.FDCWD, proc, &target, target.len);
-        if (linux.errno(len) != .SUCCESS or !std.mem.eql(u8, target[0..len], exe)) continue;
-        _ = linux.kill(pid, sig);
+        _ = linux.close(fd);
     }
+    _ = linux.write(1, "ready\n", 6);
+    while (true) _ = linux.pause();
+}
+
+fn writeProc(path: [*:0]const u8, text: []const u8) !void {
+    const rc = linux.openat(linux.AT.FDCWD, path, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+    _ = try sys.check(rc);
+    const fd: i32 = @intCast(rc);
+    defer _ = linux.close(fd);
+    _ = try sys.check(linux.write(fd, text.ptr, text.len));
 }
 
 /// Internal: maps every file read-only, touches each page so the run's

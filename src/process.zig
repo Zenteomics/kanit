@@ -55,6 +55,9 @@ pub const Spec = struct {
     cgroup_procs: sys.Fd = -1,
     /// Run the child in a new process group led by itself.
     new_group: bool = true,
+    /// User and network namespaces to join before exec, or -1.
+    userns: sys.Fd = -1,
+    netns: sys.Fd = -1,
 };
 
 /// Starts a child. The child joins its process group and cgroup, restores
@@ -103,6 +106,8 @@ fn childEntry(arg: usize) callconv(.c) u8 {
 fn child(spec: *const Spec, err_pipe: i32) noreturn {
     if (spec.new_group) _ = linux.setpgid(0, 0);
     if (spec.cgroup_procs >= 0) step(err_pipe, linux.write(spec.cgroup_procs, "0", 1));
+    if (spec.userns >= 0) step(err_pipe, linux.setns(spec.userns, linux.CLONE.NEWUSER));
+    if (spec.netns >= 0) step(err_pipe, linux.setns(spec.netns, linux.CLONE.NEWNET));
     for ([_]linux.SIG{ .INT, .TERM, .HUP, .CHLD, .PIPE, .QUIT, .TSTP, .TTIN, .TTOU }) |s| defaultAction(s);
     const empty = linux.sigemptyset();
     _ = linux.sigprocmask(linux.SIG.SETMASK, &empty, null);

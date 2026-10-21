@@ -406,6 +406,9 @@ for _ in $(seq 50); do port=$(grep -o 'port [0-9]*' server.log | grep -o '[0-9]*
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 kill $server; wait $server 2>/dev/null
 check "a rule cannot reach a listener on the host's loopback" '[ "$(cat out.txt)" = blocked ]'
+{ header loopback; rule lo '[]' '["lo.txt"]' "\"id -u > lo.txt; python3 -I -c 'import socket; s = socket.socket(); s.bind((\\\"127.0.0.1\\\", 0)); s.listen(); socket.create_connection(s.getsockname()); print(\\\"ok\\\")' >> lo.txt\""; } > lo.toml
+"$workz" run lo.toml "${iso[@]}" -q > lo.json
+check "a rule runs as the user and has its own loopback" '[ "$(head -1 lo.txt)" = "$(id -u)" ] && [ "$(tail -1 lo.txt)" = ok ]'
 
 new terminate
 { header terminate; rule slow '[]' '["done.txt"]' '"sleep 8 & echo $! > child.pid; echo started > started.txt; wait; echo late > done.txt"'; } > wf.toml

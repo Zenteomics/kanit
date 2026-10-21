@@ -68,6 +68,46 @@ const Task = struct {
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
 
+/// The run's user and network namespaces, held by a `__netns` child.
+const Network = struct {
+    pid: linux.pid_t,
+    userns: sys.Fd,
+    netns: sys.Fd,
+
+    fn start(gpa: Allocator, a: Allocator, envp: *const process.Vec, devnull: sys.Fd) !Network {
+        var pipe: [2]i32 = undefined;
+        _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+        defer sys.close(pipe[0]);
+        const exe = try a.dupeZ(u8, try sys.selfExe(a));
+        const argv = try process.Vec.init(a, &.{ "workz", "__netns" });
+        const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = devnull, .stdout = pipe[1], .stderr = 2 };
+        const pid = process.spawn(&spec) catch |err| {
+            sys.close(pipe[1]);
+            return err;
+        };
+        sys.close(pipe[1]);
+        var buf: [16]u8 = undefined;
+        const n = sys.read(pipe[0], &buf) catch 0;
+        if (n < 5 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
+            process.signalPid(pid, .KILL);
+            return error.NetworkNotReady;
+        }
+        const user_path = try std.fmt.allocPrint(gpa, "/proc/{d}/ns/user", .{pid});
+        defer gpa.free(user_path);
+        const net_path = try std.fmt.allocPrint(gpa, "/proc/{d}/ns/net", .{pid});
+        defer gpa.free(net_path);
+        return .{ .pid = pid, .userns = try sys.openRead(gpa, user_path), .netns = try sys.openRead(gpa, net_path) };
+    }
+
+    fn stop(self: Network) void {
+        sys.close(self.userns);
+        sys.close(self.netns);
+        process.signalPid(self.pid, .KILL);
+        var status: u32 = 0;
+        _ = linux.wait4(self.pid, &status, 0, null);
+    }
+};
+
 const HolderState = enum { idle, loading, ready, stopping, failed };
 
 const Holder = struct {
@@ -134,6 +174,8 @@ const Engine = struct {
     bash: [:0]const u8,
     devnull: sys.Fd,
     tree: ?cgroup.Tree,
+    /// The run's network for shell rules, when isolated.
+    network: ?Network,
     sigfd: sys.Fd,
 
     stopping: bool = false,
@@ -405,6 +447,8 @@ const Engine = struct {
             .stdout = out_fd,
             .stderr = err_fd,
             .cgroup_procs = procs,
+            .userns = if (self.network) |n| n.userns else -1,
+            .netns = if (self.network) |n| n.netns else -1,
         };
         t.pid = process.spawn(&spec) catch |err| {
             t.status = .failed;
@@ -982,10 +1026,6 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         else => return err,
     };
     defer sys.close(lock_fd);
-    // The isolation launcher forwards interrupt signals to this process.
-    const pid_path = try std.fs.path.join(a, &.{ rec, "engine.pid" });
-    try sys.writeFile(gpa, pid_path, try std.fmt.allocPrint(a, "{d}\n", .{linux.getpid()}));
-    defer sys.writeFile(gpa, pid_path, "") catch {};
 
     // Every launch past the lock leaves a record, refused ones included.
     const t_open = sys.monoNs();
@@ -1159,9 +1199,15 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         },
         .devnull = devnull,
         .tree = tree,
+        .network = null,
         .sigfd = sigfd,
         .selected = selected,
     };
+    if (tree != null) {
+        engine.network = Network.start(gpa, a, &engine.envp, devnull) catch |err|
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
+    }
+    defer if (engine.network) |n| n.stop();
     defer engine.pending_done.deinit(gpa);
     defer engine.leftover_cgroups.deinit(gpa);
     @memset(engine.group_used, 0);
