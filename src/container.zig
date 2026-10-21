@@ -82,12 +82,12 @@ pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: [
     const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
     const out = capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status) catch return 0;
     var names: std.ArrayList([]const u8) = .empty;
-    try names.appendSlice(a, &.{ podman, "rm", "--force", "--ignore" });
+    try names.appendSlice(a, &.{ podman, "rm", "--force", "--ignore", "--depend", "--time", "0" });
     var it = std.mem.tokenizeAny(u8, out, " \n");
     while (it.next()) |id| try names.append(a, id);
-    if (names.items.len == 4) return 0;
+    if (names.items.len == 7) return 0;
     _ = capture(gpa, a, names.items, envp, devnull, &status) catch {};
-    return names.items.len - 4;
+    return names.items.len - 7;
 }
 
 /// Removes one container, whatever its state; used after an attempt that

@@ -70,7 +70,7 @@ Each rule names its input files, its output files, one shell command and a resou
 - `run` options: `--jobs`, `--max-threads`, `--max-memory`, `--keep-going`, `--retry`, `--timeout`, `--rerun`, `--input-manifest FILE`, `--pass-env NAME`, `--grace SECONDS`, `--slice NAME`, `--no-isolation`, `--quiet`.
 - Exit status: 0 success, 1 a rule or check failed, 2 invalid command line or workflow, 130 interrupted.
 
-`run` starts in a transient systemd user scope limited to the run's memory and CPU budget. Shell rules run in one user and network namespace created for the run, with only loopback: they have no network, and they can reach each other on 127.0.0.1. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--slice NAME.slice` places the run's scope inside a systemd slice of the caller, so its limits sit within the caller's. `--no-isolation` runs without the namespace and the cgroups. `summary.json` records the engine's own CPU time and peak memory beside the counts.
+`run` starts in a transient systemd user scope limited to the run's memory and CPU budget. Shell rules run in one user and network namespace created for the run, with only loopback: they have no network, and they can reach each other on 127.0.0.1. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--slice NAME.slice` places the run's scope inside a systemd slice of the caller, so its limits sit within the caller's. If the engine itself is killed, every task and container of the run ends with it. `--no-isolation` runs without the namespace and the cgroups; its tasks outlive a killed engine. `summary.json` records the engine's own CPU time and peak memory beside the counts.
 
 ## Container rules
 
@@ -79,7 +79,7 @@ A rule with `container = "IMAGE"` runs its command with `/bin/sh` inside a local
 - The container's processes live in the attempt's cgroup, so the memory request, the out-of-memory kill and the attempt's counters cover the tool itself. The Podman client and conmon run in a separate group of the run.
 - The container has no network, no capabilities, a read-only root and `/tmp` in memory. The working directory and the directories of inputs outside it are mounted read-only at their own paths, each output's directory read-write; the command runs in the working directory.
 - It sees the image's environment plus `TZ`, `LANG`, `LC_ALL`, `--pass-env` names and the `WORKZ_*` variables, not the host `PATH`.
-- A timeout or an interrupt stops the container with `podman stop`; a container left by a killed launch is removed by the next one. Status 125 means Podman failed or the command exited 125; 126 and 127 mean the command could not run.
+- A timeout or an interrupt stops the container with `podman stop`; a container record left by a killed launch is removed by the next one. Status 125 means Podman failed or the command exited 125; 126 and 127 mean the command could not run.
 - Starting a container costs Podman about 0.1 to 0.2 s, and Podman serializes much of it, so many short container rules start more slowly than host rules.
 
 Ready rules start in priority order, then by the time they became ready, then by file order; every rule that fits the free CPU, memory, group and job capacity starts, so a rule waiting for room never holds back a smaller one.

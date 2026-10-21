@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -514,12 +514,24 @@ fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
 
 /// Internal: creates the run's network: a new user namespace mapping the
 /// caller's own uid and gid, and a new network namespace with only loopback,
-/// brought up. Reports "ready" on stdout and waits; shell rules join both
-/// namespaces. It dies with the engine.
-fn netns() Exit {
+/// brought up. Reports "ready" on stdout and waits for end of file on stdin,
+/// a pipe whose only writer is the engine; shell rules join both namespaces.
+/// The engine stops it with SIGKILL. End of file means the engine died: the
+/// holder then kills the run's cgroup (`cgroup.kill` named by the argument),
+/// so no task, container or service outlives its engine.
+fn netns(args: []const [:0]const u8) Exit {
     const uid = linux.getuid();
     const gid = linux.getgid();
-    _ = linux.prctl(@intFromEnum(linux.PR.SET_PDEATHSIG), @intFromEnum(linux.SIG.KILL), 0, 0, 0);
+    var kill_fd: i32 = -1;
+    if (args.len == 1) {
+        const rc = linux.openat(linux.AT.FDCWD, args[0], .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0);
+        if (linux.errno(rc) != .SUCCESS) return fail("cannot open {s}", .{args[0]});
+        kill_fd = @intCast(rc);
+    }
+    // Stopping the run's scope signals every process in it; the engine
+    // handles that and stops this holder itself.
+    var ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    for ([_]linux.SIG{ .INT, .TERM, .HUP }) |sig| _ = linux.sigaction(sig, &ignore, null);
     if (linux.errno(linux.unshare(linux.CLONE.NEWUSER | linux.CLONE.NEWNET)) != .SUCCESS) return fail("cannot create the run's network namespace", .{});
     var buf: [64]u8 = undefined;
     writeProc("/proc/self/setgroups", "deny") catch return fail("cannot deny setgroups", .{});
@@ -539,7 +551,15 @@ fn netns() Exit {
         _ = linux.close(fd);
     }
     _ = linux.write(1, "ready\n", 6);
-    while (true) _ = linux.pause();
+    var byte: [1]u8 = undefined;
+    while (true) {
+        const rc = linux.read(0, &byte, 1);
+        if (linux.errno(rc) == .INTR) continue;
+        if (linux.errno(rc) == .SUCCESS and rc > 0) continue;
+        break;
+    }
+    if (kill_fd >= 0) _ = linux.write(kill_fd, "1", 1);
+    return .ok;
 }
 
 fn writeProc(path: [*:0]const u8, text: []const u8) !void {

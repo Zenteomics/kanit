@@ -71,19 +71,29 @@ const Task = struct {
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
 
-/// The run's user and network namespaces, held by a `__netns` child.
+/// The run's user and network namespaces, held by a `__netns` child that
+/// also kills the run's cgroup if the engine dies (see `netns` in main).
 const Network = struct {
     pid: linux.pid_t,
     userns: sys.Fd,
     netns: sys.Fd,
+    /// Write end of the holder's stdin, held only by the engine.
+    alive: sys.Fd,
 
-    fn start(gpa: Allocator, a: Allocator, envp: *const process.Vec, devnull: sys.Fd) !Network {
+    fn start(gpa: Allocator, a: Allocator, envp: *const process.Vec, run_cgroup: []const u8) !Network {
         var pipe: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
         defer sys.close(pipe[0]);
+        var alive: [2]i32 = undefined;
+        _ = sys.check(linux.pipe2(&alive, .{ .CLOEXEC = true })) catch |err| {
+            sys.close(pipe[1]);
+            return err;
+        };
+        defer sys.close(alive[0]);
+        errdefer sys.close(alive[1]);
         const exe = try a.dupeZ(u8, try sys.selfExe(a));
-        const argv = try process.Vec.init(a, &.{ "workz", "__netns" });
-        const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = devnull, .stdout = pipe[1], .stderr = 2 };
+        const argv = try process.Vec.init(a, &.{ "workz", "__netns", try std.fmt.allocPrint(a, "{s}/cgroup.kill", .{run_cgroup}) });
+        const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = alive[0], .stdout = pipe[1], .stderr = 2 };
         const pid = process.spawn(&spec) catch |err| {
             sys.close(pipe[1]);
             return err;
@@ -91,23 +101,29 @@ const Network = struct {
         sys.close(pipe[1]);
         var buf: [16]u8 = undefined;
         const n = sys.read(pipe[0], &buf) catch 0;
-        if (n < 5 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
+        errdefer {
             process.signalPid(pid, .KILL);
-            return error.NetworkNotReady;
+            var status: u32 = 0;
+            _ = linux.wait4(pid, &status, 0, null);
         }
+        if (n < 5 or !std.mem.startsWith(u8, buf[0..n], "ready")) return error.NetworkNotReady;
         const user_path = try std.fmt.allocPrint(gpa, "/proc/{d}/ns/user", .{pid});
         defer gpa.free(user_path);
         const net_path = try std.fmt.allocPrint(gpa, "/proc/{d}/ns/net", .{pid});
         defer gpa.free(net_path);
-        return .{ .pid = pid, .userns = try sys.openRead(gpa, user_path), .netns = try sys.openRead(gpa, net_path) };
+        const userns = try sys.openRead(gpa, user_path);
+        errdefer sys.close(userns);
+        return .{ .pid = pid, .userns = userns, .netns = try sys.openRead(gpa, net_path), .alive = alive[1] };
     }
 
+    /// Kills the holder before closing its stdin, so it never acts.
     fn stop(self: Network) void {
         sys.close(self.userns);
         sys.close(self.netns);
         process.signalPid(self.pid, .KILL);
         var status: u32 = 0;
         _ = linux.wait4(self.pid, &status, 0, null);
+        sys.close(self.alive);
     }
 };
 
@@ -1341,7 +1357,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .selected = selected,
     };
     if (tree != null) {
-        engine.network = Network.start(gpa, a, &engine.envp, devnull) catch |err|
+        engine.network = Network.start(gpa, a, &engine.envp, tree.?.root) catch |err|
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
     }
     defer if (engine.network) |n| n.stop();

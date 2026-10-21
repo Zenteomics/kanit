@@ -277,6 +277,16 @@ sleep 0.2
 "$workz" plan wf.toml > plan.txt
 check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
 
+new crash-isolated
+{ header crash-isolated; rule long '[]' '["l.txt"]' '"echo $$ > pid.txt; sleep 30; touch l.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json 2> /dev/null &
+engine=$!
+for _ in $(seq 50); do [ -s pid.txt ] && break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2> /dev/null
+for _ in $(seq 20); do [ -d /proc/"$(cat pid.txt)" ] || break; sleep 0.1; done
+check "an isolated task ends with a killed engine" '[ -s pid.txt ] && [ ! -d /proc/"$(cat pid.txt)" ]'
+
 # ---------------------------------------------------------------- admission
 new groups
 { printf '[workflow]\nname = "groups"\nversion = "1"\n\n[resource_groups.disk]\nmax = 1\n\n'
