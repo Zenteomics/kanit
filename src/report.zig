@@ -35,6 +35,8 @@ pub const Attempt = struct {
     /// The attempt mapped shared inputs, which count in its RSS but are
     /// charged to their holders.
     uses_shared: bool,
+    /// Ran in a container: its process is the Podman client.
+    in_container: bool = false,
 
     pub fn cpuEfficiency(self: Attempt) f64 {
         if (self.wall_s <= 0 or self.threads <= 0) return 0;
@@ -131,6 +133,7 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
             .memory_stall = stall(cg, "memory_some_us", wall),
             .io_stall = stall(cg, "io_some_us", wall),
             .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
+            .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
         });
     }
     return out.items;
@@ -257,7 +260,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     for (by_reason.keys(), by_reason.values()) |k, s| try w.print("  {s:<32} {d:>9.1} s\n", .{ k, s });
 
     // Sizing and character per kind of rule.
-    const Kind = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
+    const Kind = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, container: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
     var kinds: std.StringArrayHashMapUnmanaged(Kind) = .empty;
     for (rows) |r| {
         if (!std.mem.eql(u8, r.status, "completed") and r.oom_kill == 0) continue;
@@ -272,6 +275,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         k.oom += r.oom_kill;
         k.limit += r.limit_events;
         k.shared = k.shared or r.uses_shared;
+        k.container = k.container or r.in_container;
         k.threads = @max(k.threads, r.threads);
         k.eff += r.cpuEfficiency();
         k.wall += r.wall_s;
@@ -289,8 +293,9 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         const n: f64 = @floatFromInt(k.n);
         // Suggested request: the largest peak plus a fifth, in 64 MiB steps. The
         // process RSS counts mapped shared inputs, which their holders carry,
-        // so rules with shared inputs are sized by their cgroup peak.
-        const basis = if (k.shared and k.peak > 0) k.peak else k.rss;
+        // and in a container it is the Podman client's, so rules with shared
+        // inputs or a container are sized by their cgroup peak.
+        const basis = if ((k.shared or k.container) and k.peak > 0) k.peak else k.rss;
         const suggest = @ceil(basis * 1.2 / 64.0) * 64.0;
         const eff = k.eff / n;
         if (k.delegated * 2 > k.n) {

@@ -165,6 +165,14 @@ drop_alias
 rc=$?
 check "a missing image refuses the launch without pulling" '[ $rc = 2 ] && jq -e ".status == \"refused\" and (.error | test(\"not available locally\"))" s4.json > /dev/null'
 
+new container-sizing
+{ header container-sizing; crule big '[]' '["b.txt"]' '"x=$(head -c 200000000 /dev/zero | tr \"\\\\0\" a); touch b.txt"'; } > wf.toml
+sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+"$workz" report -d . --bottlenecks > report.txt
+# KIND N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
+check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
+
 new container-failures
 { header container-failures
   crule hog '[]' '["h.txt"]' '"x=$(head -c 400000000 /dev/zero | tr \"\\\\0\" a); touch h.txt"'

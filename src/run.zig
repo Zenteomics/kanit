@@ -1003,7 +1003,7 @@ const Engine = struct {
                 .maxrss_kib = reaped.usage.maxrss,
             },
             .cgroup = counters,
-            .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared },
+            .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
             .outputs = outputs.items,
             .queue = .{ .waited_s = t.queued_s, .reasons = t.waits.items },
             .key = if (t.key) |k| k.key else null,
