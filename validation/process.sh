@@ -455,7 +455,7 @@ mkdir ref && head -c $((64 * 1024 * 1024)) /dev/urandom > ref/index.bin
 sync ref/index.bin && dd if=ref/index.bin iflag=nocache count=0 status=none
 { printf '[workflow]\nname = "shared"\nversion = "1"\n\n[shared.ref]\npath = "ref"\n\n'
   for i in 1 2; do
-    printf '[[rules]]\nname = "use%s"\ninput = ["ref/index.bin"]\noutput = ["u%s.txt"]\nshell = "cksum ref/index.bin > u%s.txt; sleep 0.5"\n[rules.resources]\nthreads = 1\nmemory = "100M"\nshared = ["ref"]\n\n' $i $i $i
+    printf '[[rules]]\nname = "use%s"\ninput = ["ref/index.bin"]\noutput = ["u%s.txt"]\nshell = "cksum ref/index.bin > u%s.txt; cg=$(sed -n \\"s/^0:://p\\" /proc/self/cgroup); cat /sys/fs/cgroup${cg%%/*}/memory.low > u%s.low; sleep 0.5"\n[rules.resources]\nthreads = 1\nmemory = "100M"\nshared = ["ref"]\n\n' $i $i $i $i
   done
 } > wf.toml
 "$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s.json
@@ -466,6 +466,8 @@ held=$(jq -r 'select(.event == "shared_loaded") | .holder_file_bytes' "$ev")
 check "the holder group carries the shared page cache" '[ "$held" -ge $((60 * 1024 * 1024)) ]'
 peak=$(jq -r '.cgroup.file' "$(last_launch)/attempts/use1/001/record.json")
 check "a user task is not charged for the shared pages" '[ "$peak" -lt $((8 * 1024 * 1024)) ]'
+# The run's scope protects the shared pages: memory.low of their size.
+check "the run's scope protects the shared input's size from reclaim" 'jq -e "select(.event == \"memory_protected\") | select(.ok and .memory_low_mib == 64)" "$ev" > /dev/null && [ "$(cat u1.low)" = $((64 * 1024 * 1024)) ]'
 
 new samples
 { header samples; rule busy '[]' '["b.txt"]' '"timeout 6 sh -c \"while :; do :; done\" || true; touch b.txt"'; } > wf.toml

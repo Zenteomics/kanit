@@ -1324,6 +1324,18 @@ fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
     unreachable;
 }
 
+/// Sets memory.low on the run's scope through systemd, which owns the
+/// scope's own control files; false when that fails. The protection is
+/// advisory, so a failure does not stop the run.
+fn protectScope(gpa: Allocator, a: Allocator, tree: cgroup.Tree, mib: u64, path_env: []const u8, envp: *const process.Vec, devnull: sys.Fd) bool {
+    const systemctl = (process.findProgram(gpa, a, path_env, "systemctl") catch return false) orelse return false;
+    const unit = std.fs.path.basename(tree.root);
+    const prop = std.fmt.allocPrint(a, "MemoryLow={d}M", .{mib}) catch return false;
+    var status: u32 = 0;
+    _ = process.capture(gpa, a, &.{ systemctl, "--user", "set-property", "--runtime", unit, prop }, envp, devnull, &status) catch return false;
+    return true;
+}
+
 /// CPU seconds of an attempt: its cgroup's usage when it has one, which
 /// includes containers and processes that left the task; otherwise the
 /// `wait4` usage of the command and its waited children.
@@ -1545,6 +1557,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const devnull = try sys.openRead(gpa, "/dev/null");
     defer sys.close(devnull);
     const host_envp = try process.Vec.init(a, env_list.items);
+
+    // Shared inputs are protected from reclaim by other work on the machine:
+    // the run's scope gets a memory.low of their size.
+    if (tree) |t| {
+        var shared_mib: u64 = 0;
+        for (holders) |h| shared_mib += h.mib;
+        if (shared_mib > 0) {
+            const ok = protectScope(gpa, a, t, shared_mib, environ.get("PATH") orelse "/usr/bin:/bin", &host_envp, devnull);
+            events.emit("memory_protected", .{ .memory_low_mib = shared_mib, .ok = ok });
+        }
+    }
 
     // Container rules: Podman, local images resolved to IDs, leftovers removed.
     var podman: ?[]const u8 = null;

@@ -189,3 +189,44 @@ pub const Vec = struct {
         return .{ .items = items };
     }
 };
+
+/// The executable `name` on PATH, or null.
+pub fn findProgram(gpa: Allocator, a: Allocator, path_env: []const u8, name: []const u8) !?[]const u8 {
+    var it = std.mem.tokenizeScalar(u8, path_env, ':');
+    while (it.next()) |dir| {
+        const p = try std.fs.path.join(a, &.{ dir, name });
+        if (try sys.stat(gpa, p)) |id| if (id.isReg()) return p;
+    }
+    return null;
+}
+
+/// Runs a short command and returns its standard output; error.CommandFailed
+/// with `status` set when it does not exit 0.
+pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *const Vec, devnull: sys.Fd, status: *u32) ![]u8 {
+    var pipe: [2]i32 = undefined;
+    _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+    defer sys.close(pipe[0]);
+    const v = try Vec.init(a, argv);
+    const spec: Spec = .{ .path = (try a.dupeZ(u8, argv[0])).ptr, .argv = v.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = devnull, .stdout = pipe[1], .stderr = devnull, .new_group = false };
+    const pid = spawn(&spec) catch |err| {
+        sys.close(pipe[1]);
+        return err;
+    };
+    sys.close(pipe[1]);
+    var out: std.ArrayList(u8) = .empty;
+    var buf: [4096]u8 = undefined;
+    while (true) {
+        const n = sys.read(pipe[0], &buf) catch break;
+        if (n == 0) break;
+        try out.appendSlice(a, buf[0..n]);
+    }
+    status.* = 0;
+    while (true) {
+        const rc = linux.wait4(pid, status, 0, null);
+        if (linux.errno(rc) == .INTR) continue;
+        break;
+    }
+    _ = gpa;
+    if (!linux.W.IFEXITED(status.*) or linux.W.EXITSTATUS(status.*) != 0) return error.CommandFailed;
+    return out.items;
+}

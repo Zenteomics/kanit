@@ -454,10 +454,11 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     if (try parseArgs(c.a, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .a = c.a })) |e| return e;
     opts.pass_env = pass.items;
     if (opts.input_manifest) |m| opts.input_manifest = try sys.absolute(c.a, try sys.cwd(c.a), m);
+    // The launcher only starts the scope; the engine inside reads the workflow.
+    const inner = if (c.env.get("WORKZ_STAGE")) |s| std.mem.eql(u8, s, "inner") else false;
+    if (opts.isolation and !inner) return isolate(c, opts);
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
-    const inner = if (c.env.get("WORKZ_STAGE")) |s| std.mem.eql(u8, s, "inner") else false;
-    if (opts.isolation and !inner) return isolate(c, &l, opts);
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
         .ok => .ok,
@@ -480,12 +481,10 @@ fn findProgram(c: Ctx, name: []const u8) !?[]const u8 {
 /// Re-executes the run inside a delegated systemd user scope: cgroup limits
 /// for the whole run, swap off. `systemd-run --scope` execs the engine in this
 /// same process, so interrupt signals reach the engine directly.
-fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
+fn isolate(c: Ctx, opts: run.Options) !Exit {
     const systemd_run = (try findProgram(c, "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
     const threads = opts.max_threads orelse run.defaultThreads();
     var memory = opts.max_memory_mib orelse run.defaultMemoryMib(c.gpa);
-    var shared_mib: u64 = 0;
-    for (l.wf.shared) |s| shared_mib += s.memory_mib orelse std.math.divCeil(u64, state.pageBytes(c.gpa, s.path_abs.?) catch 0, 1 << 20) catch 0;
     // The engine and its network holder need a little memory beside the tasks.
     memory += 256;
     const exe = try sys.selfExe(c.a);
@@ -498,7 +497,6 @@ fn isolate(c: Ctx, l: *Loaded, opts: run.Options) !Exit {
         "-p", try std.fmt.allocPrint(c.a, "MemoryMax={d}M", .{memory}),
         "-p", "MemorySwapMax=0",
         "-p", try std.fmt.allocPrint(c.a, "CPUQuota={d}%", .{@as(u64, threads) * 100}),
-        "-p", try std.fmt.allocPrint(c.a, "MemoryLow={d}M", .{shared_mib}),
         "--", exe,
     });
     for (c.argv[1..]) |arg| try argv.append(c.a, arg);
