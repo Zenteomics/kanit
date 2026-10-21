@@ -672,8 +672,11 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             }
         }
     }
+    // Mapped files are measured at launch, so they cannot be produced by the
+    // run; a service's files can (the graph checks its users' order).
     for (wf.shared) |s| {
         const sp = s.path_abs orelse continue;
+        if (s.isService()) continue;
         var oit = outputs.iterator();
         while (oit.next()) |e| {
             if (within(sp, e.key_ptr.*)) return problem.set(gpa, "shared input '{s}' contains the output of rule {s}", .{ s.name, e.value_ptr.* });

@@ -48,7 +48,7 @@ Each rule names its input files, its output files, one shell command and a resou
 
 - `threads` and `memory` (`K`, `M`, `G` or `T`) are reserved while the rule runs and enforced through the task's cgroup: private memory above the request ends every process of the attempt as out of memory. Page cache from the files a task reads and writes is not reserved; the kernel reclaims it at the limit, which can slow large writes under a small request.
 - `groups` limits how many rules of a kind run together; `resource_groups.NAME.max` is the capacity.
-- `shared` names large read-only inputs. Before their first user starts, a holder maps each file once, and memory admission counts its size once however many rules use it.
+- `shared` names large read-only inputs. Before their first user starts, a holder maps each file once, and memory admission counts its size once however many rules use it. A shared entry can instead be a service that holds something in memory for container rules (see below).
 - `retries` (0-3) and `timeout` (`90s`, `30m`, `2h`, `1h30m`) apply to each attempt.
 - `container = "IMAGE"` runs the rule's `shell` in that local image with rootless Podman (see below).
 - `cutoff = true` hashes the rule's outputs after it succeeds. When the rule runs again and writes the same bytes, its consumers are reused instead of run again. Use it on rules whose outputs repeat byte for byte (trimmed reads, sorted alignments, call tables); reports with dates gain nothing from it.
@@ -70,7 +70,7 @@ Each rule names its input files, its output files, one shell command and a resou
 - `run` options: `--jobs`, `--max-threads`, `--max-memory`, `--keep-going`, `--retry`, `--timeout`, `--rerun`, `--input-manifest FILE`, `--pass-env NAME`, `--grace SECONDS`, `--slice NAME`, `--no-isolation`, `--quiet`.
 - Exit status: 0 success, 1 a rule or check failed, 2 invalid command line or workflow, 130 interrupted.
 
-`run` starts in a transient systemd user scope limited to the run's memory and CPU budget. Shell rules run in one user and network namespace created for the run, with only loopback: they have no network, and they can reach each other on 127.0.0.1. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--slice NAME.slice` places the run's scope inside a systemd slice of the caller, so its limits sit within the caller's. If the engine itself is killed, every task and container of the run ends with it. `--no-isolation` runs without the namespace and the cgroups; its tasks outlive a killed engine. `summary.json` records the engine's own CPU time and peak memory beside the counts.
+`run` starts in a transient systemd user scope limited to the run's memory and CPU budget. Shell rules run in one user and network namespace created for the run, with only loopback: they have no network, and they can reach each other on 127.0.0.1. Each attempt runs in its own process group and cgroup; a timeout, a failure elsewhere or an interrupt stops the whole group, and processes that left the group end with the cgroup. `--slice NAME.slice` places the run's scope inside a systemd slice of the caller, so its limits sit within the caller's. If the engine itself is killed, every task, container and service of the run ends with it. `--no-isolation` runs without the namespace and the cgroups; its tasks outlive a killed engine. `summary.json` records the engine's own CPU time and peak memory beside the counts.
 
 ## Container rules
 
@@ -81,6 +81,24 @@ A rule with `container = "IMAGE"` runs its command with `/bin/sh` inside a local
 - It sees the image's environment plus `TZ`, `LANG`, `LC_ALL`, `--pass-env` names and the `WORKZ_*` variables, not the host `PATH`.
 - A timeout or an interrupt stops the container with `podman stop`; a container record left by a killed launch is removed by the next one. Status 125 means Podman failed or the command exited 125; 126 and 127 mean the command could not run.
 - Starting a container costs Podman about 0.1 to 0.2 s, and Podman serializes much of it, so many short container rules start more slowly than host rules.
+
+### Shared services
+
+```toml
+[shared.genome]
+path = "ref/star"
+container = "STAR_IMAGE"
+command = "STAR --genomeDir /abs/ref/star --genomeLoad LoadAndExit --outFileNamePrefix /tmp/"
+memory = "30G"
+```
+
+A shared entry with `container`, `command` and `memory` is a service. Before its first user starts, workz runs `command` in a container of the image with a shareable IPC namespace, its own cgroup limited to `memory`, `/tmp` as its working directory, and the working directory and `path` mounted read-only. Container rules that list the service in `shared` join its IPC namespace, so they attach to the System V shared memory it created: STAR with `--genomeLoad LoadAndKeep` aligns against a genome loaded once.
+
+- Memory admission counts the service's `memory` once while it runs, as with mapped files; the memory it holds is charged to its cgroup, not to its users.
+- Users start when the command has exited 0. If it fails, or runs out of its memory, the rules that need it fail with the service's last line of standard error; its output is kept in the launch's `shared/` directory.
+- The service stays up while a rule that has yet to run needs it, so later users do not load it again. It gives way when a waiting rule needs its memory, and stops after its last user.
+- `path` may hold files that rules of the workflow produce, such as an index; each rule that joins the service must then depend on those rules. The service's image, command and path are part of its users' keys.
+- A rule can join one service; shell rules cannot join services.
 
 Ready rules start in priority order, then by the time they became ready, then by file order; every rule that fits the free CPU, memory, group and job capacity starts, so a rule waiting for room never holds back a smaller one.
 

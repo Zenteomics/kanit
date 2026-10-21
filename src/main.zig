@@ -179,7 +179,7 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     };
     errdefer wf.deinit();
     var g = graph.build(c.gpa, &wf, &problem) catch |err| switch (err) {
-        error.Cycle => {
+        error.Cycle, error.Invalid => {
             std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
             c.gpa.free(problem.message);
             wf.deinit();

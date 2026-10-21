@@ -63,6 +63,16 @@ pub fn openRead(gpa: Allocator, path: []const u8) !Fd {
     return @intCast(try check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)));
 }
 
+/// Creates a FIFO and opens it for reading and writing, which does not wait
+/// for a reader. Its readers see end of file once every such descriptor is
+/// closed, also when the process holding it dies.
+pub fn openFifo(gpa: Allocator, path: []const u8) !Fd {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    _ = try check(linux.mknodat(linux.AT.FDCWD, p, linux.S.IFIFO | 0o600, 0));
+    return @intCast(try check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDWR, .CLOEXEC = true }, 0)));
+}
+
 pub const WriteMode = enum { truncate, append, exclusive };
 
 pub fn openWrite(gpa: Allocator, path: []const u8, mode: WriteMode) !Fd {

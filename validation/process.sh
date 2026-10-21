@@ -196,6 +196,127 @@ wait $engine 2>/dev/null
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "a container left by a killed engine is removed by the next launch" 'jq -e "select(.event == \"containers_checked\") | select(.leftovers_removed >= 1)" "$(last_launch)/events.jsonl" > /dev/null && [ "$(leftovers)" = 0 ] && [ "$(status_of s2.json completed)" = 1 ]'
 
+# ---------------------------------------------------------------- shared services
+# srule NAME INPUTS OUTPUTS SHELL SERVICE: a container rule that joins SERVICE.
+srule() { crule "$1" "$2" "$3" "$4"; printf 'shared = ["%s"]\n\n' "$5"; }
+# service NAME COMMAND MEMORY
+service() { printf '[shared.%s]\ncontainer = "%s"\ncommand = %s\nmemory = "%s"\n\n' "$1" "$img" "$2" "$3"; }
+loads() { jq -c 'select(.event == "shared_loading")' "$(last_launch)/events.jsonl" | wc -l; }
+no_cgroups() { ! ls -d /sys/fs/cgroup$(jq -r 'select(.event == "launch_started") | .cgroup' "$(last_launch)/events.jsonl" | sed 's|^/sys/fs/cgroup||')/{task,shared}-* 2> /dev/null; }
+
+new service
+{ header service
+  service seg '"ipcmk -M 67108864; echo loaded"' 128M
+  srule u1 '[]' '["u1.txt"]' '"ipcs -m > u1.txt"' seg
+  srule u2 '[]' '["u2.txt"]' '"ipcs -m > u2.txt"' seg
+  srule u3 '["u1.txt", "u2.txt"]' '["u3.txt"]' '"ipcs -m > u3.txt"' seg
+} > wf.toml
+"$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s1.json
+log=$(ls "$(last_launch)"/shared/seg-1.stderr.log)
+check "rules joining a service see the System V segment it created" '[ "$(status_of s1.json completed)" = 3 ] && grep -q " 67108864 " u1.txt && grep -q " 67108864 " u2.txt && grep -q " 67108864 " u3.txt'
+check "a service is loaded once for users that start at different times" '[ "$(loads)" = 1 ]'
+check "a service counts its memory once, so two users fit beside it" '! grep -q "\"reason\":\"memory\"" "$(last_launch)/events.jsonl"'
+check "the service command's output goes to its log, not the readiness line" 'grep -q "Shared memory id" "$log" && grep -q loaded "$log"'
+check "a released service leaves no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
+"$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s2.json
+check "rules joining a service are reused without starting it" '[ "$(status_of s2.json reused)" = 3 ] && [ "$(loads)" = 0 ]'
+sed -i 's/echo loaded/echo loaded again/' wf.toml
+"$workz" plan wf.toml > plan.txt
+check "a changed service command reruns the rules that join it" 'grep -q "run   u1  (command changed)" plan.txt && grep -q "run   u2  (command changed)" plan.txt'
+
+new service-star
+star=community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4
+awk 'BEGIN { srand(7); printf ">chr1\n"; for (i = 0; i < 2000000; i++) { g = g substr("ACGT", int(rand() * 4) + 1, 1); if (i % 80 == 79) { print g; s = s g; g = "" } }
+  for (r = 0; r < 2; r++) { f = "r" r ".fq"; for (k = 0; k < 20000; k++) { p = int(rand() * (length(s) - 100)) + 1; printf "@r%d\n%s\n+\n%s\n", k, substr(s, p, 100), sprintf("%100s", "") > f } } }' > genome.fa
+sed -i '/^+$/{n;s/ /I/g}' r0.fq r1.fq
+star_rule() {  # NAME SAMPLE LOAD DIR [SHARED]
+  printf '[[rules]]\nname = "%s"\ninput = ["genome/SA", "r%s.fq"]\noutput = ["%s/%s/Aligned.out.sam"]\ncontainer = "%s"\nshell = "STAR --genomeDir genome --genomeLoad %s --readFilesIn r%s.fq --outFileNamePrefix %s/%s/ --outSAMtype SAM"\n[rules.resources]\nmemory = "400M"\n%s\n' \
+    "$1" "$2" "$4" "$2" "$star" "$3" "$2" "$4" "$2" "${5:-}"
+}
+{ header service-star
+  printf '[shared.genome]\npath = "genome"\ncontainer = "%s"\ncommand = "STAR --genomeDir %s/genome --genomeLoad LoadAndExit --outFileNamePrefix /tmp/"\nmemory = "200M"\n\n' "$star" "$PWD"
+  printf '[[rules]]\nname = "index"\ninput = ["genome.fa"]\noutput = ["genome/SA"]\ncontainer = "%s"\nshell = "STAR --runMode genomeGenerate --genomeDir genome --genomeFastaFiles genome.fa --genomeSAindexNbases 9 --outFileNamePrefix genome/"\n[rules.resources]\nmemory = "1G"\n\n' "$star"
+  star_rule shared0 0 LoadAndKeep shared 'shared = ["genome"]'
+  star_rule shared1 1 LoadAndKeep shared 'shared = ["genome"]'
+  star_rule own0 0 NoSharedMemory own
+  star_rule own1 1 NoSharedMemory own
+} > wf.toml
+mkdir -p genome shared/0 shared/1 own/0 own/1
+timeout 120 "$workz" run wf.toml "${iso[@]}" -q > s.json
+check "STAR aligns against a genome its service loaded once, with the same alignments" '[ "$(status_of s.json completed)" = 5 ] && [ "$(loads)" = 1 ] && grep -q "Found genome in shared memory" shared/0/Log.out && cmp -s <(grep -v "^@" shared/0/Aligned.out.sam) <(grep -v "^@" own/0/Aligned.out.sam) && cmp -s <(grep -v "^@" shared/1/Aligned.out.sam) <(grep -v "^@" own/1/Aligned.out.sam)'
+svc_peak=$(jq -r 'select(.event == "shared_released") | .memory_peak' "$(last_launch)/events.jsonl")
+check "the genome is charged to the service's cgroup" '[ "$svc_peak" -ge "$(stat -c %s genome/SA)" ] && [ "$(leftovers)" = 0 ]'
+
+new service-gap
+{ header service-gap
+  service seg '"ipcmk -M 1048576"' 128M
+  srule u1 '[]' '["u1.txt"]' '"touch u1.txt"' seg
+  rule big '["u1.txt"]' '["big.txt"]' '"touch big.txt"'
+  srule u2 '["big.txt"]' '["u2.txt"]' '"touch u2.txt"' seg
+} > wf.toml
+sed -i '/name = "big"/,/memory/ s/memory = "64M"/memory = "128M"/' wf.toml
+timeout 60 "$workz" run wf.toml --max-threads 4 --max-memory 220M -q > s.json
+check "an idle service gives its memory to a rule that needs it, and starts again later" '[ "$(status_of s.json completed)" = 3 ] && [ "$(loads)" = 2 ] && [ "$(leftovers)" = 0 ]'
+
+new service-retry
+{ header service-retry
+  service seg '"ipcmk -M 1048576"' 64M
+  srule flaky '[]' '["r.txt"]' '"if [ -f tried ]; then touch r.txt; else touch tried; exit 1; fi"' seg
+} > wf.toml
+sed -i 's/^name = "flaky"/&\nretries = 1/' wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "a retried rule keeps its service instead of loading it again" '[ "$(status_of s.json completed)" = 1 ] && [ -f tried ] && [ "$(loads)" = 1 ]'
+
+new service-failures
+{ header service-failures
+  service broken '"echo cannot load >&2; exit 3"' 64M
+  service fat '"x=$(head -c 200000000 /dev/zero | tr \"\\\\0\" a)"' 32M
+  srule b1 '[]' '["b1.txt"]' '"touch b1.txt"' broken
+  rule p '[]' '["p.txt"]' '"sleep 0.5; touch p.txt"'
+  srule b2 '["p.txt"]' '["b2.txt"]' '"touch b2.txt"' broken
+  srule f1 '[]' '["f1.txt"]' '"touch f1.txt"' fat
+} > wf.toml
+timeout 60 "$workz" run wf.toml "${iso[@]}" -k -q > s.json
+rc=$?
+reason() { jq -r "select(.event == \"task_failed\") | select(.rule == \"$1\") | .reason" "$(last_launch)/events.jsonl"; }
+check "a service that fails before it is ready fails its rule with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ]'
+check "a rule admitted after its service failed fails at once" '[ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ]'
+check "a service above its memory is reported as out of memory" 'reason f1 | grep -q "^shared input fat could not be loaded: out of memory"'
+check "failed services leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
+
+new service-interrupt
+{ header service-interrupt
+  service slow '"sleep 60"' 64M
+  srule u '[]' '["u.txt"]' '"touch u.txt"' slow
+} > wf.toml
+setsid "$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json 2> err.txt &
+launcher=$!
+for _ in $(seq 100); do [ "$(leftovers)" = 1 ] && break; sleep 0.1; done
+t0=$(date +%s%N)
+kill -INT -- -$launcher
+wait $launcher
+rc=$?
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "an interrupt stops a loading service and removes it within the grace period ($ms ms)" '[ $rc = 130 ] && [ "$(status_of s.json cancelled)" = 1 ] && [ "$(leftovers)" = 0 ] && [ $ms -lt 5000 ]'
+
+new service-crash
+{ header service-crash
+  service seg '"true"' 64M
+  srule u '[]' '["u.txt"]' '"sleep 60; touch u.txt"' seg
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json 2> /dev/null &
+engine=$!
+for _ in $(seq 100); do [ "$(leftovers)" = 2 ] && break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2> /dev/null
+# Podman keeps listing them as running: their conmon died with them.
+run_cg=$(jq -r 'select(.event == "launch_started") | .cgroup' "$(last_launch)/events.jsonl")
+for _ in $(seq 50); do [ -d "$run_cg" ] || break; sleep 0.1; done
+check "a killed engine's service and container rules end with it" '[ ! -d "$run_cg" ]'
+sed -i 's/sleep 60; //' wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+check "the next launch removes their containers and runs" '[ "$(status_of s2.json completed)" = 1 ] && [ "$(leftovers)" = 0 ]'
+
 # ---------------------------------------------------------------- failure policy
 new failure
 { header failure

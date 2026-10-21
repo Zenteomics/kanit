@@ -137,6 +137,19 @@ const Holder = struct {
     pid: linux.pid_t = 0,
     pipe: sys.Fd = -1,
     cg: ?[]const u8 = null,
+    /// A service's container name and the engine's end of its stop FIFO,
+    /// which the engine closes to stop it.
+    container_name: ?[]const u8 = null,
+    stop_fd: sys.Fd = -1,
+    /// Starts of this holder in the launch, which name its containers.
+    starts: u32 = 0,
+    /// When a stopping holder is killed.
+    kill_at: ?i128 = null,
+    /// Why the holder failed; rules that need it fail with this reason.
+    failure: ?[]const u8 = null,
+    /// Its memory is counted against the budget: from its first user's
+    /// admission until no rule left to run needs it.
+    held: bool = false,
 };
 
 /// Default budget: every online CPU and three quarters of physical memory.
@@ -309,15 +322,20 @@ const Engine = struct {
     /// The first resource that keeps a ready rule from starting, or null
     /// when it fits: "jobs", "threads", "memory" or "group:NAME".
     fn blocker(self: *Engine, i: usize) ?[]const u8 {
+        return self.blockerFreeing(i, 0);
+    }
+
+    /// `blocker` as if `freed_mib` of reserved memory were returned.
+    fn blockerFreeing(self: *Engine, i: usize, freed_mib: u64) ?[]const u8 {
         const r = self.rule(i);
         if (self.jobs_used + 1 > self.max_jobs) return "jobs";
         if (self.threads_used + r.threads > self.max_threads) return "threads";
         var mem = r.memory_mib;
         for (r.shared) |s| {
             const h = &self.holders[self.wf.sharedIndex(s).?];
-            if (h.users == 0) mem += h.mib;
+            if (!h.held) mem += h.mib;
         }
-        if (self.memory_used + mem > self.max_memory) return "memory";
+        if (self.memory_used - freed_mib + mem > self.max_memory) return "memory";
         for (r.groups) |gu| {
             const gi = groupIndex(self.wf, gu.name);
             if (self.group_used[gi] + gu.count > self.wf.groups[gi].max) return self.group_reasons[gi];
@@ -370,23 +388,38 @@ const Engine = struct {
         for (self.tasks, 0..) |t, i| if (t.status == .ready) try ready.append(self.gpa, i);
         std.mem.sort(usize, ready.items, self, readyBefore);
         for (ready.items) |i| {
+            if (self.stopping) break;
             if (self.blocker(i)) |why| {
+                // Idle holders kept for later rules give way to a rule that
+                // fits once their memory is returned, which happens when
+                // they have exited; the rule waits until then.
+                const idle = self.idleMib(i);
+                if (std.mem.eql(u8, why, "memory") and idle > 0 and self.blockerFreeing(i, idle) == null) _ = self.releaseIdle(i);
                 try self.setWait(i, why);
                 continue;
             }
             self.reserve(i, true);
+            // Staged from here, so a stop releases what it holds even if
+            // starting a holder or the attempt fails.
+            self.tasks[i].status = .staging;
             const r = self.rule(i);
             var waiting = false;
+            var failure: ?[]const u8 = null;
             for (r.shared) |s| {
                 const hi = self.wf.sharedIndex(s).?;
                 const h = &self.holders[hi];
-                if (h.users == 0) self.memory_used += h.mib;
+                if (!h.held) self.memory_used += h.mib;
+                h.held = true;
                 h.users += 1;
+                if (h.st == .failed and h.failure != null) failure = h.failure;
                 if (h.st == .idle) try self.startHolder(hi);
                 if (h.st != .ready) waiting = true;
             }
-            if (waiting) {
-                self.tasks[i].status = .staging;
+            if (failure) |why| {
+                // A shared input that failed in this launch is not retried.
+                try self.setWait(i, null);
+                self.failStaged(i, why);
+            } else if (waiting) {
                 try self.setWait(i, "loading shared inputs");
             } else try self.start(i);
         }
@@ -483,7 +516,13 @@ const Engine = struct {
                 .launch = self.launch_id,
                 .cgroup_parent = if (t.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
                 .mounts = try container.mounts(self.a, self.wf.root, r, extra_ro.items),
-                .env = try self.containerEnv(r, t.dir),
+                .env = try self.containerEnv(&.{
+                    try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}),
+                    try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{t.dir}),
+                    try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}),
+                    try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}),
+                }),
+                .ipc_service = self.serviceOf(r),
                 .script = script,
             });
             t.container_name = name;
@@ -516,6 +555,8 @@ const Engine = struct {
         t.pid = process.spawn(&spec) catch |err| {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() });
+            if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            t.cg = null;
             self.reserve(i, false);
             self.releaseShared(i);
             self.finished += 1;
@@ -538,7 +579,9 @@ const Engine = struct {
 
     /// A container's environment: the image's own, plus locale, time zone,
     /// passed names and the WORKZ_* variables; never the host PATH.
-    fn containerEnv(self: *Engine, r: *const workflow.Rule, dir: []const u8) ![]const []const u8 {
+    /// A container's environment: TZ, LANG, LC_ALL and --pass-env names from
+    /// the engine's, then `extra`.
+    fn containerEnv(self: *Engine, extra: []const []const u8) ![]const []const u8 {
         var list: std.ArrayList([]const u8) = .empty;
         for (self.envp.items) |e| {
             const kv = std.mem.span(e.?);
@@ -551,10 +594,7 @@ const Engine = struct {
             } else false;
             if (keep) try list.append(self.a, kv);
         }
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{dir}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}));
+        try list.appendSlice(self.a, extra);
         return list.items;
     }
 
@@ -571,6 +611,8 @@ const Engine = struct {
     // ---- shared input holders ----
 
     fn startHolder(self: *Engine, hi: usize) !void {
+        self.holders[hi].starts += 1;
+        if (self.wf.shared[hi].isService()) return self.startService(hi);
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
         var files: std.ArrayList([]u8) = .empty;
@@ -591,7 +633,7 @@ const Engine = struct {
         defer sys.close(pipe[1]);
         var procs: sys.Fd = -1;
         if (self.tree) |tree| {
-            h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}", .{s.name}), .{});
+            h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{});
             procs = try cgroup.openProcs(self.gpa, h.cg.?);
         }
         defer if (procs >= 0) sys.close(procs);
@@ -612,6 +654,90 @@ const Engine = struct {
         self.progress("loading shared input {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
+    /// Starts a service container: the client in the containers group, the
+    /// container in the service's own group, limited to its declared memory.
+    fn startService(self: *Engine, hi: usize) !void {
+        const h = &self.holders[hi];
+        const s = self.wf.shared[hi];
+        const dir = try std.fmt.allocPrint(self.a, "{s}/shared", .{self.launch_dir});
+        try sys.mkdirAll(self.gpa, dir);
+        const script = try std.fmt.allocPrint(self.a, "{s}/{s}-{d}.sh", .{ dir, s.name, h.starts });
+        try sys.writeFile(self.gpa, script, try container.serviceScript(self.a, s.command.?));
+        const log_fd = try sys.openWrite(self.gpa, try std.fmt.allocPrint(self.a, "{s}/{s}-{d}.stderr.log", .{ dir, s.name, h.starts }), .truncate);
+        defer sys.close(log_fd);
+        const fifo = try std.fmt.allocPrint(self.a, "{s}/{s}-{d}.stop", .{ dir, s.name, h.starts });
+        const stop_fd = try sys.openFifo(self.gpa, fifo);
+        errdefer sys.close(stop_fd);
+
+        var procs: sys.Fd = -1;
+        if (self.tree) |tree| {
+            h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{ .memory_bytes = h.mib * 1024 * 1024, .oom_group = true });
+            procs = try cgroup.openProcs(self.gpa, self.containers_cg.?);
+        }
+        defer if (procs >= 0) sys.close(procs);
+        const name = try std.fmt.allocPrint(self.a, "workz-{s}-shared-{s}-{d}", .{ self.launch_id, s.name, h.starts });
+        var ro: std.ArrayList(container.Mount) = .empty;
+        try ro.append(self.a, .{ .dir = self.wf.root, .write = false });
+        if (s.path_abs) |pth| if (!workflow.within(self.wf.root, pth)) try ro.append(self.a, .{ .dir = pth, .write = false });
+        const argv = try container.runArgv(self.a, .{
+            .podman = self.podman.?,
+            .name = name,
+            .image_id = self.images.get(s.container.?).?,
+            .root = self.wf.root,
+            .launch = self.launch_id,
+            .cgroup_parent = if (h.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
+            .mounts = ro.items,
+            .env = try self.containerEnv(&.{
+                try std.fmt.allocPrint(self.a, "WORKZ_SHARED={s}", .{s.name}),
+                try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{h.mib}),
+                try std.fmt.allocPrint(self.a, "WORKZ_SERVICE_STOP={s}", .{fifo}),
+            }),
+            .service = true,
+            .script = script,
+        });
+
+        var out: [2]i32 = undefined;
+        _ = try sys.check(linux.pipe2(&out, .{ .CLOEXEC = true }));
+        defer sys.close(out[1]);
+        const spec: process.Spec = .{
+            .path = (try self.a.dupeZ(u8, self.podman.?)).ptr,
+            .argv = (try process.Vec.init(self.a, argv)).items.ptr,
+            .envp = self.envp.items.ptr,
+            .cwd = "/",
+            .stdin = self.devnull,
+            .stdout = out[1],
+            .stderr = log_fd,
+            .cgroup_procs = procs,
+        };
+        h.pid = process.spawn(&spec) catch |err| {
+            sys.close(out[0]);
+            if (h.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            h.cg = null;
+            return err;
+        };
+        h.pipe = out[0];
+        h.stop_fd = stop_fd;
+        h.container_name = name;
+        h.st = .loading;
+        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid });
+        self.progress("starting shared service {s} ({d} MiB)", .{ s.name, h.mib });
+    }
+
+    /// Asks a holder to end: a service by closing its stop FIFO, and
+    /// with `podman stop` while it still loads; a file holder by SIGTERM. It
+    /// is killed if it has not ended after the grace period and ten seconds.
+    fn stopHolder(self: *Engine, h: *Holder) void {
+        h.st = .stopping;
+        if (h.stop_fd >= 0) {
+            sys.close(h.stop_fd);
+            h.stop_fd = -1;
+        }
+        if (h.container_name) |name| {
+            if (h.pipe >= 0) container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull);
+        } else process.signalPid(h.pid, .TERM);
+        h.kill_at = sys.monoNs() + (@as(i128, self.opts.grace_s) + 10) * std.time.ns_per_s;
+    }
+
     fn holderReady(self: *Engine, hi: usize) !void {
         const h = &self.holders[hi];
         var buf: [128]u8 = undefined;
@@ -619,6 +745,8 @@ const Engine = struct {
         sys.close(h.pipe);
         h.pipe = -1;
         if (n == 0 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
+            // The holder ends; its exit fails the rules waiting for it.
+            if (h.pid > 0) self.stopHolder(h);
             h.st = .failed;
             return;
         }
@@ -631,6 +759,15 @@ const Engine = struct {
         }
     }
 
+    /// Container name of the service a rule joins, if any.
+    fn serviceOf(self: *Engine, r: *const workflow.Rule) ?[]const u8 {
+        for (r.shared) |s| {
+            const h = self.holders[self.wf.sharedIndex(s).?];
+            if (h.container_name) |name| return name;
+        }
+        return null;
+    }
+
     fn sharedReady(self: *Engine, i: usize) bool {
         for (self.rule(i).shared) |s| if (self.holders[self.wf.sharedIndex(s).?].st != .ready) return false;
         return true;
@@ -641,49 +778,135 @@ const Engine = struct {
             const hi = self.wf.sharedIndex(s).?;
             const h = &self.holders[hi];
             h.users -= 1;
-            if (h.users > 0) continue;
-            self.memory_used -= h.mib;
-            if (h.pid > 0 and (h.st == .loading or h.st == .ready)) {
-                process.signalPid(h.pid, .TERM);
-                h.st = .stopping;
-            }
+            // A holder outlives a gap between its users, so it is not
+            // loaded again for rules that become ready later.
+            if (h.users == 0 and (self.stopping or !self.holderNeeded(hi))) self.releaseHolder(hi);
         }
     }
 
-    fn holderExited(self: *Engine, hi: usize) void {
+    /// Whether a rule that has yet to start needs a shared input.
+    fn holderNeeded(self: *Engine, hi: usize) bool {
+        for (self.tasks, 0..) |t, i| {
+            if (t.status != .pending and t.status != .ready) continue;
+            for (self.rule(i).shared) |s| if (self.wf.sharedIndex(s).? == hi) return true;
+        }
+        return false;
+    }
+
+    /// Stops a holder. Its memory returns to the budget when it has exited,
+    /// not when it is asked to stop.
+    fn releaseHolder(self: *Engine, hi: usize) void {
         const h = &self.holders[hi];
+        if (h.pid > 0 and (h.st == .loading or h.st == .ready)) {
+            self.stopHolder(h);
+        } else if (h.pid == 0 and h.held) {
+            self.memory_used -= h.mib;
+            h.held = false;
+        }
+    }
+
+    /// Memory of the holders without users that rule `i` does not use.
+    fn idleMib(self: *Engine, i: usize) u64 {
+        var mib: u64 = 0;
+        for (self.holders, 0..) |h, hi| {
+            if (h.users > 0 or !h.held or h.st == .stopping) continue;
+            const uses = for (self.rule(i).shared) |s| {
+                if (self.wf.sharedIndex(s).? == hi) break true;
+            } else false;
+            if (!uses) mib += h.mib;
+        }
+        return mib;
+    }
+
+    /// Releases holders without users that rule `i` does not use, or every
+    /// one without users when `i` is null and none is needed any longer.
+    /// True when one was released.
+    fn releaseIdle(self: *Engine, i: ?usize) bool {
+        var any = false;
+        for (self.holders, 0..) |h, hi| {
+            if (h.users > 0 or !h.held or h.st == .stopping) continue;
+            if (i) |ri| {
+                const uses = for (self.rule(ri).shared) |s| {
+                    if (self.wf.sharedIndex(s).? == hi) break true;
+                } else false;
+                if (uses) continue;
+            } else if (!self.stopping and self.holderNeeded(hi)) continue;
+            self.releaseHolder(hi);
+            any = true;
+        }
+        return any;
+    }
+
+    fn holderExited(self: *Engine, hi: usize, reaped: process.Reaped) !void {
+        const h = &self.holders[hi];
+        const s = self.wf.shared[hi];
         const was = h.st;
         h.pid = 0;
-        if (h.pipe >= 0) {
-            sys.close(h.pipe);
-            h.pipe = -1;
-        }
+        h.kill_at = null;
+        for ([_]*sys.Fd{ &h.pipe, &h.stop_fd }) |fd| if (fd.* >= 0) {
+            sys.close(fd.*);
+            fd.* = -1;
+        };
+        var counters: ?cgroup.Counters = null;
         if (h.cg) |cg| {
+            counters = cgroup.read(self.gpa, cg);
             cgroup.kill(self.gpa, cg);
             cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
             h.cg = null;
         }
+        const code = reaped.exitCode();
+        if (h.container_name) |name| {
+            // A client that did not finish by itself may leave its container.
+            if (code == null or code.? == 125) container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
+            h.container_name = null;
+        }
+        const peak = if (counters) |c| c.memory_peak else null;
+        if (h.held and h.users == 0) {
+            self.memory_used -= h.mib;
+            h.held = false;
+        }
         if (was == .stopping) {
             h.st = .idle;
-            self.events.emit("shared_released", .{ .name = self.wf.shared[hi].name });
+            self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped) });
+            // A rule admitted while the holder stopped needs it again.
+            if (h.users > 0) try self.startHolder(hi);
             return;
         }
         h.st = .failed;
-        self.events.emit("shared_failed", .{ .name = self.wf.shared[hi].name });
+        var why: []const u8 = "the holder ended";
+        if (counters != null and counters.?.oom_kill > 0) {
+            why = try std.fmt.allocPrint(self.a, "out of memory: could not stay within its {d} MiB", .{h.mib});
+        } else if (s.isService()) {
+            const log = try std.fmt.allocPrint(self.a, "{s}/shared/{s}-{d}.stderr.log", .{ self.launch_dir, s.name, h.starts });
+            const last = try self.lastLineOf(log);
+            const when = if (was == .ready) "after it was ready" else "before it was ready";
+            why = if (code) |c|
+                try std.fmt.allocPrint(self.a, "exited with status {d} {s}: {s}", .{ c, when, last })
+            else
+                try std.fmt.allocPrint(self.a, "killed by signal {d} {s}: {s}", .{ reaped.signal() orelse 0, when, last });
+        }
+        h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
+        self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });
         // Rules waiting on this input cannot start.
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .staging) continue;
-            for (self.rule(i).shared) |s| if (self.wf.sharedIndex(s).? == hi) {
-                t.status = .failed;
-                t.reason = "shared input could not be loaded";
-                self.reserve(i, false);
-                self.releaseShared(i);
-                self.finished += 1;
-                self.events.emit("task_failed", .{ .rule = self.rule(i).name, .reason = t.reason });
-                if (!self.opts.keep_going) self.beginStop();
+            for (self.rule(i).shared) |sn| if (self.wf.sharedIndex(sn).? == hi) {
+                self.failStaged(i, h.failure.?);
                 break;
             };
         }
+    }
+
+    /// Fails an admitted rule that cannot start because a shared input failed.
+    fn failStaged(self: *Engine, i: usize, reason: []const u8) void {
+        const t = &self.tasks[i];
+        t.status = .failed;
+        t.reason = reason;
+        self.reserve(i, false);
+        self.releaseShared(i);
+        self.finished += 1;
+        self.events.emit("task_failed", .{ .rule = self.rule(i).name, .reason = reason });
+        if (!self.opts.keep_going) self.beginStop();
     }
 
     // ---- finishing attempts ----
@@ -701,7 +924,16 @@ const Engine = struct {
             cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
         } else process.signalGroup(t.pid, .KILL);
         self.reserve(i, false);
-        self.releaseShared(i);
+        // Shared inputs are released once the attempt's fate is known, so
+        // a retry keeps its holder. An error while recording still ends the
+        // task, so the engine does not wait for it.
+        var released = false;
+        errdefer if (!released) {
+            t.status = .failed;
+            t.reason = "the engine could not record the attempt";
+            self.releaseShared(i);
+            self.finished += 1;
+        };
 
         var ok = false;
         var reason: []const u8 = "";
@@ -776,6 +1008,8 @@ const Engine = struct {
 
         if (ok) {
             t.status = .completed;
+            self.releaseShared(i);
+            released = true;
             const k = t.key.?;
             const sa = self.st.allocator();
             try self.st.data.rules.map.put(sa, try sa.dupe(u8, r.name), .{
@@ -803,6 +1037,8 @@ const Engine = struct {
         self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = status, .reason = reason, .exit_code = code, .signal = sig, .wall_s = wall_s });
         if (!t.cancelled and !self.stopping and t.attempts < t.max_attempts) {
             t.status = .ready;
+            self.releaseShared(i);
+            released = true;
             self.ready_counter += 1;
             t.ready_seq = self.ready_counter;
             t.ready_ns = sys.monoNs();
@@ -813,6 +1049,8 @@ const Engine = struct {
             return;
         }
         t.status = if (t.cancelled) .cancelled else .failed;
+        self.releaseShared(i);
+        released = true;
         self.finished += 1;
         self.alert("{s} {s}: {s} (see {s}/stderr.log)", .{ status, r.name, reason, t.dir });
         if (!t.cancelled and !self.opts.keep_going) self.beginStop();
@@ -854,7 +1092,11 @@ const Engine = struct {
 
     /// The last non-empty line of an attempt's stderr, for failure reasons.
     fn lastLine(self: *Engine, dir: []const u8) ![]const u8 {
-        const tail = try sys.readTail(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}), 2048);
+        return self.lastLineOf(try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}));
+    }
+
+    fn lastLineOf(self: *Engine, path: []const u8) ![]const u8 {
+        const tail = sys.readTail(self.gpa, path, 2048) catch return "";
         defer self.gpa.free(tail);
         const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
         const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
@@ -892,6 +1134,7 @@ const Engine = struct {
             },
             else => {},
         };
+        _ = self.releaseIdle(null);
     }
 
     /// Asks a running attempt to stop: SIGTERM to its process group, and for
@@ -909,6 +1152,11 @@ const Engine = struct {
     fn checkTimers(self: *Engine) void {
         const now = sys.monoNs();
         const grace = @as(i128, self.opts.grace_s) * std.time.ns_per_s;
+        for (self.holders) |*h| if (h.kill_at) |k| if (now >= k) {
+            process.signalPid(h.pid, .KILL);
+            if (h.cg) |cg| cgroup.kill(self.gpa, cg);
+            h.kill_at = null;
+        };
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .running) continue;
             if (t.kill_at) |k| if (now >= k) {
@@ -928,6 +1176,9 @@ const Engine = struct {
 
     fn nextDeadline(self: *Engine) ?i128 {
         var best: ?i128 = null;
+        for (self.holders) |h| if (h.kill_at) |v| {
+            best = if (best) |b| @min(b, v) else v;
+        };
         for (self.tasks) |t| {
             if (t.status != .running) continue;
             for ([_]?i128{ t.deadline_ns, t.kill_at }) |d| if (d) |v| {
@@ -1002,7 +1253,7 @@ const Engine = struct {
                 }
             } else for (self.holders, 0..) |*h, hi| {
                 if (h.pid == rp.pid) {
-                    self.holderExited(hi);
+                    try self.holderExited(hi, rp);
                     break;
                 }
             }
@@ -1012,6 +1263,8 @@ const Engine = struct {
     fn loop(self: *Engine) !void {
         while (true) {
             try self.updateReadiness();
+            // Holders kept for rules that can no longer run are released.
+            _ = self.releaseIdle(null);
             try self.admit();
             try self.saveState(false);
             if (self.running() == 0) {

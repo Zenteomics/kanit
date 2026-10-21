@@ -156,6 +156,10 @@ pub const RunSpec = struct {
     env: []const []const u8,
     /// IPC namespace of a shared service to join, by container name.
     ipc_service: ?[]const u8 = null,
+    /// A shared service: its IPC namespace can be joined and it works in its
+    /// private /tmp.
+    service: bool = false,
+    /// Path of the script `/bin/sh` runs.
     script: []const u8,
 };
 
@@ -172,9 +176,10 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
         "--security-opt=no-new-privileges", "--security-opt=label=disable",
         "--read-only",                      "--log-driver=none",
         "--init",                           "--workdir",
-        s.root,                             "--entrypoint",
+        if (s.service) "/tmp" else s.root,  "--entrypoint",
         "/bin/sh",
     });
+    if (s.service) try v.append(a, "--ipc=shareable");
     // The container's processes go into the attempt's group, which holds
     // only them: its limit, OOM group and counters describe the tool.
     if (s.cgroup_parent) |cg| try v.appendSlice(a, &.{ "--cgroup-manager=cgroupfs", try std.fmt.allocPrint(a, "--cgroup-parent={s}", .{cg}) });
@@ -189,6 +194,14 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
 /// and pipefail where the shell has it.
 pub fn script(a: Allocator, shell: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{s}\n", .{shell});
+}
+
+/// Script of a shared service: the command with its standard output sent to
+/// standard error, then `ready` on standard output, then a wait for end of
+/// file on the FIFO `$WORKZ_SERVICE_STOP`, whose only writer is the engine:
+/// the service ends when the engine stops it or dies.
+pub fn serviceScript(a: Allocator, command: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{{\n{s}\n}} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n", .{command});
 }
 
 /// Image references used by the selected rules and the services they join.

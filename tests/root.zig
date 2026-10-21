@@ -407,3 +407,40 @@ test "container mounts list each directory once with the access it needs" {
     try testing.expect(nested[3].write);
     try testing.expectEqual(@as(usize, 4), nested.len);
 }
+
+test "a service may load produced files only for rules that depend on their producer" {
+    const svc = "[shared.idx]\npath = \"idx\"\ncontainer = \"img\"\ncommand = \"load idx\"\nmemory = \"1G\"\n\n" ++
+        "[[rules]]\nname = \"build\"\noutput = [\"idx/SA\"]\nshell = \"true\"\nmemory = \"1M\"\n";
+    const user = "[[rules]]\nname = \"use\"\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ svc ++ user, &problem);
+    defer wf.deinit();
+    try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf, &problem));
+    defer testing.allocator.free(problem.message);
+    try testing.expectEqualStrings("rule use joins service 'idx', which loads idx/SA from rule build; make an output of build an input of use", problem.message);
+
+    var s2 = try Scratch.init();
+    defer s2.deinit();
+    const ordered = "[[rules]]\nname = \"use\"\ninput = [\"idx/SA\"]\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
+    var wf2 = try loadText(&s2, head ++ svc ++ ordered, &problem);
+    defer wf2.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf2, &problem);
+    g.deinit();
+}
+
+test "a service runs in a shareable IPC namespace in its own /tmp and waits on its stop FIFO" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const argv = try workz.container.runArgv(a, .{ .podman = "podman", .name = "n", .image_id = "id", .root = "/w", .launch = "l", .cgroup_parent = null, .mounts = &.{}, .env = &.{}, .service = true, .script = "/w/s.sh" });
+    var ipc = false;
+    for (argv, 0..) |arg, i| {
+        ipc = ipc or std.mem.eql(u8, arg, "--ipc=shareable");
+        if (std.mem.eql(u8, arg, "--workdir")) try testing.expectEqualStrings("/tmp", argv[i + 1]);
+    }
+    try testing.expect(ipc);
+    const script = try workz.container.serviceScript(a, "load");
+    try testing.expect(std.mem.indexOf(u8, script, "{\nload\n} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n") != null);
+}

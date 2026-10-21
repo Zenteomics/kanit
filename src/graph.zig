@@ -18,7 +18,7 @@ pub const Graph = struct {
     }
 };
 
-pub const Error = error{ Cycle, OutOfMemory };
+pub const Error = error{ Cycle, Invalid, OutOfMemory };
 
 pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workflow.Problem) !Graph {
     var g: Graph = undefined;
@@ -70,7 +70,40 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
         return error.Cycle;
     }
     g.order = order.items;
+    try checkServiceInputs(gpa, a, wf, &g, cycle_message);
     return g;
+}
+
+/// A service may load files that rules of the workflow produce; each rule
+/// that joins it must then depend on those rules, so the service starts
+/// after them.
+fn checkServiceInputs(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const Graph, problem: *workflow.Problem) !void {
+    const seen = try a.alloc(bool, wf.rules.len);
+    for (wf.shared) |s| {
+        const sp = s.path_abs orelse continue;
+        if (!s.isService()) continue;
+        for (wf.rules, 0..) |r, u| {
+            const joins = for (r.shared) |name| {
+                if (std.mem.eql(u8, name, s.name)) break true;
+            } else false;
+            if (!joins) continue;
+            @memset(seen, false);
+            markAncestors(g, u, seen);
+            var it = g.producer.iterator();
+            while (it.next()) |e| {
+                if (!workflow.within(sp, e.key_ptr.*) or seen[e.value_ptr.*]) continue;
+                const out = std.mem.trimStart(u8, e.key_ptr.*[wf.root.len..], "/");
+                return problem.set(gpa, "rule {s} joins service '{s}', which loads {s} from rule {s}; make an output of {s} an input of {s}", .{ r.name, s.name, out, wf.rules[e.value_ptr.*].name, wf.rules[e.value_ptr.*].name, r.name });
+            }
+        }
+    }
+}
+
+fn markAncestors(g: *const Graph, i: usize, seen: []bool) void {
+    for (g.parents[i]) |p| if (!seen[p]) {
+        seen[p] = true;
+        markAncestors(g, p, seen);
+    };
 }
 
 fn lessIndex(_: void, x: usize, y: usize) std.math.Order {
