@@ -856,8 +856,9 @@ const Engine = struct {
         }
         const code = reaped.exitCode();
         if (h.container_name) |name| {
-            // A client that did not finish by itself may leave its container.
-            if (code == null or code.? == 125) container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
+            // A service ends with status 0 when stopped; otherwise its
+            // container may remain.
+            if (code == null or code.? != 0) container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
             h.container_name = null;
         }
         const peak = if (counters) |c| c.memory_peak else null;
@@ -965,8 +966,10 @@ const Engine = struct {
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
         }
-        // A container whose podman client did not finish by itself may remain.
-        if (t.container_name) |name| if (sig != null or code == null or code.? == 125)
+        // `--rm` removes a container that ran to its end; one whose client
+        // failed, was stopped or was killed, possibly before the container
+        // started, may remain.
+        if (t.container_name) |name| if (!ok)
             container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
 
         var outputs: std.ArrayList(state.Output) = .empty;
