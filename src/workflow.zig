@@ -112,10 +112,20 @@ const Parser = struct {
     spans: *toml.EntrySpanMap,
     headers: *toml.HeaderSpanMap,
     problem: *Problem,
+    /// Line lookups mostly move forward through the file: the last offset
+    /// and its line number, so each lookup counts only from there.
+    cursor_offset: usize = 0,
+    cursor_line: u32 = 1,
 
     fn lineAt(self: *Parser, offset: usize) u32 {
         const end = @min(offset, self.source.len);
-        return @intCast(std.mem.count(u8, self.source[0..end], "\n") + 1);
+        if (end < self.cursor_offset) {
+            self.cursor_offset = 0;
+            self.cursor_line = 1;
+        }
+        self.cursor_line += @intCast(std.mem.count(u8, self.source[self.cursor_offset..end], "\n"));
+        self.cursor_offset = end;
+        return self.cursor_line;
     }
 
     /// Line of the entry or header at `path`, or 0 when the source has none.
@@ -288,7 +298,10 @@ fn validName(name: []const u8) bool {
 fn localPath(p: []const u8) bool {
     if (p.len == 0) return false;
     if (std.mem.indexOf(u8, p, "://") != null or std.mem.startsWith(u8, p, "gh:")) return false;
-    for (p) |c| if (c < 0x20 or c == 0x7f or std.mem.indexOfScalar(u8, "{}*?[]", c) != null) return false;
+    for (p) |c| switch (c) {
+        0...0x1f, 0x7f, '{', '}', '*', '?', '[', ']' => return false,
+        else => {},
+    };
     return true;
 }
 
@@ -529,7 +542,7 @@ pub fn within(root: []const u8, path: []const u8) bool {
 /// Writable paths (outputs, logs, benchmarks) must stay inside the working
 /// directory, outside the engine's record directory, and must not resolve
 /// through a symlinked parent to somewhere else.
-fn checkWritable(gpa: Allocator, wf: *const Workflow, rule: []const u8, written: []const u8, abs: []const u8, problem: *Problem) !void {
+fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: []const u8, written: []const u8, abs: []const u8, problem: *Problem) !void {
     if (!localPath(written) or std.fs.path.isAbsolute(written) or hasParentComponent(written))
         return problem.set(gpa, "rule {s}: '{s}' must be a relative path inside the working directory", .{ rule, written });
     if (!within(wf.root, abs)) return problem.set(gpa, "rule {s}: '{s}' leaves the working directory", .{ rule, written });
@@ -541,11 +554,11 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, rule: []const u8, written:
     }
     // The nearest existing parent must resolve inside the working directory.
     var parent = std.fs.path.dirname(abs) orelse return;
-    while (!sys.exists(gpa, parent)) parent = std.fs.path.dirname(parent) orelse return;
-    const real = (try sys.realpath(gpa, parent)) orelse return;
-    defer gpa.free(real);
-    const real_root = (try sys.realpath(gpa, wf.root)) orelse return;
-    defer gpa.free(real_root);
+    const real = while (true) {
+        if (try cache.real(parent)) |r| break r;
+        parent = std.fs.path.dirname(parent) orelse return;
+    };
+    const real_root = (try cache.real(wf.root)) orelse return;
     if (!within(real_root, real)) return problem.set(gpa, "rule {s}: the parent of '{s}' resolves outside the working directory", .{ rule, written });
 }
 
@@ -577,9 +590,21 @@ const PathCache = struct {
         return id;
     }
 
+    /// The resolved path of an absolute, normalized `path`, or null when it
+    /// does not exist. A path whose last component is not a symlink resolves
+    /// through its directory, so each directory is resolved once and each
+    /// file costs one `statx`.
     fn real(self: *PathCache, path: []const u8) !?[]const u8 {
         if (self.reals.get(path)) |v| return v;
-        const r = try sys.realpath(self.gpa, path);
+        const r: ?[]u8 = blk: {
+            const dir = std.fs.path.dirname(path) orelse break :blk try sys.realpath(self.gpa, path);
+            const id = (try sys.lstat(self.gpa, path)) orelse break :blk null;
+            if (id.mode & 0o170000 == 0o120000) break :blk try sys.realpath(self.gpa, path);
+            // Not a symlink: its identity is also what stat would return.
+            if (!self.ids.contains(path)) try self.ids.put(self.gpa, path, id);
+            const real_dir = (try self.real(dir)) orelse break :blk null;
+            break :blk try std.fs.path.join(self.gpa, &.{ real_dir, std.fs.path.basename(path) });
+        };
         try self.reals.put(self.gpa, path, r);
         return r;
     }
@@ -601,7 +626,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         if ((try names.fetchPut(gpa, r.name, {})) != null) return problem.set(gpa, "line {d}: duplicate rule name '{s}'", .{ r.line, r.name });
         for (r.input) |in| if (!localPath(in)) return problem.set(gpa, "rule {s}: input '{s}' must be an explicit local path", .{ r.name, in });
         for (r.output, r.output_abs) |out, abs| {
-            try checkWritable(gpa, wf, r.name, out, abs, problem);
+            try checkWritable(gpa, wf, &cache, r.name, out, abs, problem);
             if (outputs.get(abs)) |other| return problem.set(gpa, "rules {s} and {s} both produce '{s}'", .{ other, r.name, out });
             try outputs.put(gpa, abs, r.name);
             const out_id = try cache.stat(abs);
@@ -620,7 +645,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         for ([_]?[]const u8{ r.log, r.benchmark }, [_]?[]const u8{ r.log_abs, r.benchmark_abs }) |w, a| {
             const written = w orelse continue;
             const abs = a.?;
-            try checkWritable(gpa, wf, r.name, written, abs, problem);
+            try checkWritable(gpa, wf, &cache, r.name, written, abs, problem);
             if (side.get(abs)) |other| return problem.set(gpa, "rules {s} and {s} write the same log or benchmark '{s}'", .{ other, r.name, written });
             try side.put(gpa, abs, r.name);
         }

@@ -101,6 +101,25 @@ const Scratch = struct {
         return p;
     }
 
+    fn dir(self: *Scratch, name: []const u8) ![]const u8 {
+        const p = try std.fs.path.join(testing.allocator, &.{ self.path, name });
+        try sys.mkdir(testing.allocator, p);
+        try self.dirs.append(testing.allocator, p);
+        return p;
+    }
+
+    /// A symlink `name` pointing at `target`.
+    fn link(self: *Scratch, name: []const u8, target: []const u8) !void {
+        const linux = std.os.linux;
+        const p = try std.fs.path.join(testing.allocator, &.{ self.path, name });
+        try self.files.append(testing.allocator, p);
+        const pz = try testing.allocator.dupeZ(u8, p);
+        defer testing.allocator.free(pz);
+        const tz = try testing.allocator.dupeZ(u8, target);
+        defer testing.allocator.free(tz);
+        _ = try sys.check(linux.symlinkat(tz, linux.AT.FDCWD, pz));
+    }
+
     fn deinit(self: *Scratch) void {
         const linux = std.os.linux;
         for (self.files.items) |f| {
@@ -110,6 +129,12 @@ const Scratch = struct {
             testing.allocator.free(f);
         }
         self.files.deinit(testing.allocator);
+        var i = self.dirs.items.len;
+        while (i > 0) {
+            i -= 1;
+            sys.rmdir(testing.allocator, self.dirs.items[i]) catch {};
+            testing.allocator.free(self.dirs.items[i]);
+        }
         self.dirs.deinit(testing.allocator);
         sys.rmdir(testing.allocator, self.path) catch {};
         testing.allocator.free(self.path);
@@ -558,4 +583,25 @@ test "a watch frame fits the terminal width and lists running rules first" {
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 60, 10, now, false);
     // trim ran from 2 s to 4 s of a 5 s launch and failed.
     try testing.expect(std.mem.indexOf(u8, out.written(), "!!!!") != null);
+}
+
+test "rule line numbers stay right across many rules" {
+    const rule = "[[rules]]\nname = \"r\"\noutput = [\"o\"]\nshell = \"true\"\nmemory = \"1M\"\n";
+    // head is lines 1-4; each rule is 5 lines, so the fourth starts at line 20.
+    try expectInvalid(head ++ rule ++ "[[rules]]\nname = \"s\"\noutput = [\"p\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"t\"\noutput = [\"q\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++ rule, "line 20: duplicate rule name 'r'");
+}
+
+test "an input reaching a declared output through a symlinked directory is refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("real");
+    _ = try s.file("real/x", "x");
+    try s.link("alias", "real");
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    const text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"real/x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"b\"\ninput = [\"alias/x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n";
+    try testing.expectError(error.Invalid, loadText(&s, text, &problem));
+    try testing.expectEqualStrings("rule b: declare the producer path instead of the symlink 'alias/x'", problem.message);
 }
