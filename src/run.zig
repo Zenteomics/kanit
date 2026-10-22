@@ -1287,6 +1287,7 @@ const Engine = struct {
     }
 
     fn loop(self: *Engine) !void {
+        var idle_passes: u32 = 0;
         while (true) {
             try self.updateReadiness();
             // Holders kept for rules that can no longer run are released.
@@ -1297,17 +1298,20 @@ const Engine = struct {
                 var any_ready = false;
                 for (self.tasks) |t| any_ready = any_ready or t.status == .ready or t.status == .pending;
                 if (!any_ready or self.stopping) break;
-                // Ready work that cannot fit any longer would wait forever.
-                var stuck = true;
-                for (self.tasks) |t| if (t.status == .pending) {
-                    stuck = false;
-                };
-                if (stuck) {
+                // With nothing running, readiness settles in one pass; a
+                // second pass that still starts nothing would wait forever.
+                idle_passes += 1;
+                if (idle_passes >= 2) {
                     self.fatal = "ready rules cannot fit the budget";
+                    for (self.tasks, 0..) |t, i| if (t.status == .ready) if (self.blocker(i)) |why| {
+                        self.fatal = try std.fmt.allocPrint(self.a, "rule {s} cannot start: it waits for {s} with nothing running", .{ self.rule(i).name, why });
+                        break;
+                    };
                     break;
                 }
                 continue;
             }
+            idle_passes = 0;
             var fds: std.ArrayList(linux.pollfd) = .empty;
             defer fds.deinit(self.gpa);
             try fds.append(self.gpa, .{ .fd = self.sigfd, .events = linux.POLL.IN, .revents = 0 });
