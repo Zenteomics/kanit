@@ -341,6 +341,21 @@ test "state round-trips through its file and refuses other versions" {
     try testing.expectEqualStrings("k", e.key);
     try testing.expectEqualStrings("1:2:3:4:5", e.outputs[0].id);
 
+    // Environments no recorded rule refers to are dropped on save.
+    try again.data.envs.map.put(again.allocator(), "e", "PATH=/bin\n");
+    try again.data.envs.map.put(again.allocator(), "unused", "PATH=/x\n");
+    try again.save(testing.allocator);
+    var third = try state.load(testing.allocator, s.path);
+    defer third.deinit();
+    try testing.expectEqual(@as(usize, 1), third.data.envs.map.count());
+    try testing.expectEqualStrings("PATH=/bin\n", third.data.envs.map.get("e").?);
+
+    // A format 1 file has no recorded environments and is still read.
+    _ = try s.file("state.json", "{\"format_version\": 1, \"rules\": {}, \"files\": {}, \"manifest\": {}}");
+    var old = try state.load(testing.allocator, s.path);
+    defer old.deinit();
+    try testing.expectEqual(@as(usize, 0), old.data.envs.map.count());
+
     _ = try s.file("state.json", "{\"format_version\": 9}");
     try testing.expectError(error.UnsupportedState, state.load(testing.allocator, s.path));
     _ = try s.file("state.json", "not json");
@@ -604,4 +619,27 @@ test "an input reaching a declared output through a symlinked directory is refus
         "[[rules]]\nname = \"b\"\ninput = [\"alias/x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     try testing.expectError(error.Invalid, loadText(&s, text, &problem));
     try testing.expectEqualStrings("rule b: declare the producer path instead of the symlink 'alias/x'", problem.message);
+}
+
+test "environment changes name each variable and describe list entries" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const changes = try state.envChanges(a, "PATH=/a:/b:/c\nLANG=C\nTZ unset\n", "PATH=/z:/a:/c\nLANG=C\nTZ=UTC\n");
+    try testing.expectEqual(@as(usize, 2), changes.len);
+    var w: std.Io.Writer.Allocating = .init(a);
+    try state.describeEnvChange(&w.writer, changes[0]);
+    try testing.expectEqualStrings("added /z, removed /b", w.written());
+    w.clearRetainingCapacity();
+    try state.describeEnvChange(&w.writer, changes[1]);
+    try testing.expectEqualStrings("TZ", changes[1].name);
+    try testing.expectEqualStrings("was unset, now 'UTC'", w.written());
+    const reordered = try state.envChanges(a, "PATH=/a:/b\n", "PATH=/b:/a\n");
+    w.clearRetainingCapacity();
+    try state.describeEnvChange(&w.writer, reordered[0]);
+    try testing.expectEqualStrings("same entries in another order", w.written());
+    const passed = try state.envChanges(a, "PATH=/a\n", "PATH=/a\nNEWVAR unset\n");
+    w.clearRetainingCapacity();
+    try state.describeEnvChange(&w.writer, passed[0]);
+    try testing.expectEqualStrings("now passed, unset", w.written());
 }

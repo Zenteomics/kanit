@@ -103,7 +103,14 @@ pub const Context = struct {
         const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, self.extras[i], &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
         if (self.rerun) return .{ .run = true, .reason = "rerun requested", .key = k };
-        if (state.firstDifference(&e, &k)) |what| return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };
+        if (state.firstDifference(&e, &k)) |what| {
+            if (std.mem.eql(u8, what, "environment")) if (self.st.data.envs.map.get(e.env)) |was| {
+                var changed: std.Io.Writer.Allocating = .init(self.a);
+                for (try state.envChanges(self.a, was, self.env_text), 0..) |c, n| try changed.writer.print("{s}{s}", .{ if (n > 0) ", " else "", c.name });
+                return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "environment changed: {s}", .{changed.written()}), .key = k };
+            };
+            return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };
+        }
         for (e.outputs) |o| {
             const id = (try self.ids.get(o.path)) orelse return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "output missing: {s}", .{o.path}), .key = k };
             if (!std.mem.eql(u8, id, o.id)) return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "output changed: {s} (run refuses without --rerun)", .{o.path}), .key = k };
@@ -146,6 +153,13 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
             .{ "engine key", e.engine, k.engine },
         };
         for (parts) |p| try w.print("  {s:<10} {s}\n", .{ p[0], if (std.mem.eql(u8, p[1], p[2])) "same" else "changed" });
+        if (!std.mem.eql(u8, e.env, k.env)) if (ctx.st.data.envs.map.get(e.env)) |was| {
+            for (try state.envChanges(ctx.a, was, ctx.env_text)) |c| {
+                try w.print("    {s}: ", .{c.name});
+                try state.describeEnvChange(w, c);
+                try w.writeAll("\n");
+            }
+        };
         if (!std.mem.eql(u8, e.request, k.request)) try w.print("    was: {s}\n    now: {s}\n", .{ e.request, k.request });
         if (!std.mem.eql(u8, e.engine, k.engine)) try w.print("    was: {s}\n    now: {s}\n", .{ e.engine, k.engine });
     }

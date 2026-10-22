@@ -1028,6 +1028,8 @@ const Engine = struct {
                 .attempt = try sa.dupe(u8, t.dir),
                 .finished = try sa.dupe(u8, finished_text),
             });
+            if (!self.st.data.envs.map.contains(k.env))
+                try self.st.data.envs.map.put(sa, try sa.dupe(u8, k.env), try sa.dupe(u8, self.env_text));
             try self.recordFiles(r);
             self.dirty = true;
             try self.pending_done.append(self.gpa, r.name);

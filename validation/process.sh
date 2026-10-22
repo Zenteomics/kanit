@@ -73,9 +73,13 @@ TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > tz2.json
 TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > tz3.json
 check "a time zone change reruns every rule and an unchanged one reuses them" '[ "$(status_of tz1.json reused)" = 3 ] && [ "$(status_of tz2.json completed)" = 3 ] && [ "$(status_of tz3.json reused)" = 3 ]'
 TZ=Asia/Tokyo LANG=C "$workz" plan wf.toml > plan-lang.txt
-check "plan names the environment when the locale changes" 'grep -q "run   a  (environment changed)" plan-lang.txt && grep -q "run   c  (environment changed)" plan-lang.txt'
+check "plan names the variable when the locale changes" 'grep -q "run   a  (environment changed: LANG)" plan-lang.txt && grep -q "run   c  (environment changed: LANG)" plan-lang.txt'
+TZ=Asia/Tokyo LANG=C "$workz" explain wf.toml a > explain-lang.txt
+check "explain gives the old and new value" "grep -q \"    LANG: was '\$LANG', now 'C'\" explain-lang.txt"
+TZ=Asia/Tokyo PATH="/opt/workz-check/bin:$PATH" "$workz" explain wf.toml a > explain-path.txt
+check "explain lists entries added to PATH" 'grep -q "    PATH: added /opt/workz-check/bin$" explain-path.txt'
 TZ=Asia/Tokyo "$workz" plan wf.toml --pass-env NEWVAR > plan-pass.txt
-check "a passed variable is part of the key" 'grep -q "run   a  (environment changed)" plan-pass.txt'
+check "a passed variable is part of the key" 'grep -q "run   a  (environment changed: NEWVAR)" plan-pass.txt'
 TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > /dev/null
 TZ=Asia/Tokyo "$workz" verify wf.toml --content > /dev/null
 cp a.txt a.copy && mv a.copy a.txt

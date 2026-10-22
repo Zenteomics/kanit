@@ -10,7 +10,9 @@ const sys = @import("sys.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
-pub const format_version: i64 = 1;
+/// Format 2 adds the recorded environments; format 1 files are read as
+/// format 2 without them.
+pub const format_version: i64 = 2;
 
 /// Version of what a rule key covers. Raise it when the key parts or their
 /// encoding change, when what a command starts with changes (shell, flags,
@@ -50,6 +52,9 @@ pub const Data = struct {
     files: std.json.ArrayHashMap([]const u8) = .{},
     /// Digest cache for input-manifest files, keyed by path.
     manifest: std.json.ArrayHashMap(ManifestEntry) = .{},
+    /// Keyed environment text (`envText`) by its key part, for each
+    /// environment a recorded rule ran in, so `explain` can name what changed.
+    envs: std.json.ArrayHashMap([]const u8) = .{},
 };
 
 pub const State = struct {
@@ -66,6 +71,15 @@ pub const State = struct {
     }
 
     pub fn save(self: *State, gpa: Allocator) !void {
+        // Only environments some recorded rule still refers to are kept.
+        var i: usize = 0;
+        while (i < self.data.envs.map.count()) {
+            const key = self.data.envs.map.keys()[i];
+            const used = for (self.data.rules.map.values()) |e| {
+                if (std.mem.eql(u8, e.env, key)) break true;
+            } else false;
+            if (used) i += 1 else self.data.envs.map.swapRemoveAt(i);
+        }
         var w: std.Io.Writer.Allocating = .init(gpa);
         defer w.deinit();
         try w.writer.print("{f}\n", .{std.json.fmt(self.data, .{})});
@@ -89,7 +103,7 @@ pub fn load(gpa: Allocator, records: []const u8) !State {
     var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return error.CorruptState;
     const v = probe.value.format_version;
     probe.deinit();
-    if (v != format_version) return error.UnsupportedState;
+    if (v != 1 and v != format_version) return error.UnsupportedState;
     s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
     return s;
 }
@@ -229,6 +243,66 @@ pub fn envText(a: Allocator, environ: *const std.process.Environ.Map, pass_env: 
         if (environ.get(name)) |v| try w.writer.print("{s}={s}\n", .{ name, v }) else try w.writer.print("{s} unset\n", .{name});
     };
     return w.toOwnedSlice();
+}
+
+/// One variable of the keyed environment that differs between two
+/// `envText` texts: `was` or `now` is null when the variable is unset;
+/// `keyed` says whether it was and is part of the key (a passed name).
+pub const EnvChange = struct { name: []const u8, was: ?[]const u8, now: ?[]const u8, keyed: enum { both, added, dropped } = .both };
+
+pub fn envChanges(a: Allocator, was_text: []const u8, now_text: []const u8) ![]EnvChange {
+    var was: std.StringArrayHashMapUnmanaged(?[]const u8) = .empty;
+    var now: std.StringArrayHashMapUnmanaged(?[]const u8) = .empty;
+    for ([_]struct { []const u8, *std.StringArrayHashMapUnmanaged(?[]const u8) }{ .{ was_text, &was }, .{ now_text, &now } }) |pair| {
+        var it = std.mem.splitScalar(u8, pair[0], '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            if (std.mem.indexOfScalar(u8, line, '=')) |eq| {
+                try pair[1].put(a, line[0..eq], line[eq + 1 ..]);
+            } else if (std.mem.endsWith(u8, line, " unset")) try pair[1].put(a, line[0 .. line.len - 6], null);
+        }
+    }
+    var out: std.ArrayList(EnvChange) = .empty;
+    for (now.keys(), now.values()) |name, v| {
+        const w = was.get(name) orelse {
+            try out.append(a, .{ .name = name, .was = null, .now = v, .keyed = .added });
+            continue;
+        };
+        const same = if (w == null and v == null) true else if (w == null or v == null) false else std.mem.eql(u8, w.?, v.?);
+        if (!same) try out.append(a, .{ .name = name, .was = w, .now = v });
+    }
+    for (was.keys(), was.values()) |name, w| if (!now.contains(name)) try out.append(a, .{ .name = name, .was = w, .now = null, .keyed = .dropped });
+    return out.items;
+}
+
+/// Describes one change: entries added to or removed from a colon list
+/// such as PATH, or the old and new values.
+pub fn describeEnvChange(w: *std.Io.Writer, c: EnvChange) !void {
+    switch (c.keyed) {
+        .added => return if (c.now) |v| w.print("now passed, '{s}'", .{v}) else w.writeAll("now passed, unset"),
+        .dropped => return w.writeAll("no longer passed"),
+        .both => {},
+    }
+    if (c.was != null and c.now != null and std.mem.indexOfScalar(u8, c.was.?, ':') != null) {
+        var any = false;
+        for ([_]struct { []const u8, []const u8, []const u8 }{ .{ c.now.?, c.was.?, "added" }, .{ c.was.?, c.now.?, "removed" } }) |dir| {
+            var it = std.mem.splitScalar(u8, dir[0], ':');
+            while (it.next()) |entry| {
+                var other = std.mem.splitScalar(u8, dir[1], ':');
+                const present = while (other.next()) |o| {
+                    if (std.mem.eql(u8, o, entry)) break true;
+                } else false;
+                if (!present) {
+                    try w.print("{s}{s} {s}", .{ if (any) ", " else "", dir[2], entry });
+                    any = true;
+                }
+            }
+        }
+        if (!any) try w.writeAll("same entries in another order");
+        return;
+    }
+    if (c.was) |v| try w.print("was '{s}'", .{v}) else try w.writeAll("was unset");
+    if (c.now) |v| try w.print(", now '{s}'", .{v}) else try w.writeAll(", now unset");
 }
 
 fn lessConst(_: void, x: []const u8, y: []const u8) bool {
