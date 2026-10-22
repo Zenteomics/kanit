@@ -135,6 +135,8 @@ pub const RunSpec = struct {
     /// A shared service: its IPC namespace can be joined and it works in its
     /// private /tmp.
     service: bool = false,
+    /// Host paths mounted read-only over paths in the image.
+    image_mounts: []const workflow.ImageMount = &.{},
     /// Path of the script `/bin/sh` runs.
     script: []const u8,
 };
@@ -161,6 +163,7 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
     if (s.cgroup_parent) |cg| try v.appendSlice(a, &.{ "--cgroup-manager=cgroupfs", try std.fmt.allocPrint(a, "--cgroup-parent={s}", .{cg}) });
     if (s.ipc_service) |svc| try v.append(a, try std.fmt.allocPrint(a, "--ipc=container:{s}", .{svc}));
     for (s.mounts) |m| try v.appendSlice(a, &.{ "--volume", try std.fmt.allocPrint(a, "{s}:{s}:{s}", .{ m.dir, m.dir, if (m.write) "rw" else "ro" }) });
+    for (s.image_mounts) |m| try v.appendSlice(a, &.{ "--volume", try std.fmt.allocPrint(a, "{s}:{s}:ro", .{ m.source_abs, m.target }) });
     for (s.env) |e| try v.appendSlice(a, &.{ "--env", e });
     try v.appendSlice(a, &.{ s.image_id, s.script });
     return v.items;
@@ -202,6 +205,7 @@ pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std
         };
         var w: std.Io.Writer.Allocating = .init(a);
         try w.writer.print("image {s}", .{images.get(img) orelse img});
+        for (r.mounts) |m| try w.writer.print(" mount {s} {s}", .{ m.target, m.source_abs });
         for (r.shared) |s| if (wf.sharedIndex(s)) |si| {
             const svc = wf.shared[si];
             const simg = svc.container orelse continue;

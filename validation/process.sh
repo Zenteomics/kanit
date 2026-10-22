@@ -177,6 +177,20 @@ sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
 # KIND N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
 check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
 
+new container-mounts
+echo "workz-check release" > os-release
+{ header container-mounts; crule m '[]' '["m.txt"]' '"cat /etc/os-release > m.txt"' "" 'mounts = { "os-release" = "/etc/os-release" }'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+check "a mount places a host file over a path in the image" '[ "$(cat m.txt)" = "workz-check release" ]'
+echo "changed" > os-release
+"$workz" plan wf.toml > plan.txt
+check "a changed mount source reruns its rule" 'grep -q "^run   m  (inputs changed)" plan.txt'
+{ header container-mounts; rule h '[]' '["h.txt"]' '"touch h.txt"' 'mounts = { "os-release" = "/etc/os-release" }'; } > host.toml
+"$workz" validate host.toml > /dev/null 2> err-host.txt
+{ header container-mounts; crule m '[]' '["m.txt"]' '"true"' "" 'mounts = { "os-release" = "etc/os-release" }'; } > rel.toml
+"$workz" validate rel.toml > /dev/null 2> err-rel.txt
+check "mounts need a container rule and an absolute target" 'grep -q "has mounts but no container" err-host.txt && grep -q "must be an absolute path in the image" err-rel.txt'
+
 new container-failures
 { header container-failures
   crule hog '[]' '["h.txt"]' '"x=$(head -c 400000000 /dev/zero | tr \"\\\\0\" a); touch h.txt"'

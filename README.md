@@ -79,6 +79,7 @@ A rule with `container = "IMAGE"` runs its command with `/bin/sh` inside a local
 - The container's processes live in the attempt's cgroup, so the memory request, the out-of-memory kill and the attempt's counters cover the tool itself. The Podman client and conmon run in a separate group of the run.
 - The container has no network, no capabilities, a read-only root and `/tmp` in memory. The working directory and the directories of inputs outside it are mounted read-only at their own paths, each output's directory read-write; the command runs in the working directory.
 - It sees the image's environment plus `TZ`, `LANG`, `LC_ALL`, `--pass-env` names and the `WORKZ_*` variables, not the host `PATH`.
+- `mounts = { "patches/report.py" = "/opt/conda/lib/python3.14/site-packages/multiqc/report.py" }` mounts host files or directories read-only over paths inside the image, for example a patched module. Each source is also an input of the rule, so editing it reruns the rule. Targets are absolute and cannot contain `:` or `,`.
 - A timeout or an interrupt stops the container with `podman stop`; a container record left by a killed launch is removed by the next one. Status 125 means Podman failed or the command exited 125; 126 and 127 mean the command could not run.
 - Starting a container costs Podman about 0.1 to 0.2 s, and Podman serializes much of it, so many short container rules start more slowly than host rules.
 

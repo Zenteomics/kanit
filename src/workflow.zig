@@ -34,9 +34,14 @@ pub const Rule = struct {
     cutoff: bool,
     /// Image the shell command runs in, or null for the host shell.
     container: ?[]const u8,
+    /// Host files or directories mounted read-only over paths in the image.
+    /// Their sources are also inputs of the rule.
+    mounts: []const ImageMount = &.{},
     groups: []const GroupUse,
     shared: []const []const u8,
 };
+
+pub const ImageMount = struct { source: []const u8, source_abs: []const u8, target: []const u8 };
 
 pub const Group = struct { name: []const u8, max: u32 };
 /// A shared input: files mapped once (`path`), or a service container that
@@ -102,7 +107,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -445,8 +450,37 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         const name = (try p.str(r, "name", &at, "rule")) orelse return p.fail(&at, "rule {d} has no name", .{i + 1});
         if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
         const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
-        const input = try p.strings(r, "input", &at, name);
+        var input = try p.strings(r, "input", &at, name);
         const output = try p.strings(r, "output", &at, name);
+        var mounts: std.ArrayList(ImageMount) = .empty;
+        if (r.get("mounts")) |mv| {
+            const mt = switch (mv) {
+                .table => |tb| tb,
+                else => return p.failKey(&at, "mounts", "rule {s}: mounts must be a table of host path = path in the image", .{name}),
+            };
+            var extra: std.ArrayList([]const u8) = .empty;
+            try extra.appendSlice(arena, input);
+            var mit = mt.iterator();
+            while (mit.next()) |me| {
+                const src = me.key_ptr.*;
+                const target = switch (me.value_ptr.*) {
+                    .string => |s| s,
+                    else => return p.failKey(&at, "mounts", "rule {s}: the image path for '{s}' must be a string", .{ name, src }),
+                };
+                // Podman's --volume syntax cannot carry ':' or ','.
+                if (!localPath(src) or std.mem.indexOfAny(u8, src, ":,") != null)
+                    return p.failKey(&at, "mounts", "rule {s}: invalid mount source '{s}'", .{ name, src });
+                if (!std.fs.path.isAbsolute(target) or std.mem.eql(u8, target, "/") or std.mem.indexOfAny(u8, target, ":,") != null or hasParentComponent(target))
+                    return p.failKey(&at, "mounts", "rule {s}: mount target '{s}' must be an absolute path in the image other than /, without ':' or ','", .{ name, target });
+                const s_abs = try sys.absolute(arena, root, src);
+                try mounts.append(arena, .{ .source = try arena.dupe(u8, src), .source_abs = s_abs, .target = try arena.dupe(u8, target) });
+                const listed = for (extra.items) |in| {
+                    if (std.mem.eql(u8, in, src)) break true;
+                } else false;
+                if (!listed) try extra.append(arena, try arena.dupe(u8, src));
+            }
+            input = extra.items;
+        }
         if (output.len == 0) return p.fail(&at, "rule {s} must declare output files", .{name});
 
         var threads: ?i64 = try p.int(r, "threads", &at, name);
@@ -518,6 +552,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
             .container = try p.str(r, "container", &at, name),
+            .mounts = mounts.items,
             .groups = group_uses.items,
             .shared = shared_uses,
         };
@@ -659,6 +694,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             if (r.container == null) return problem.set(gpa, "rule {s} uses the shared service '{s}'; only container rules can join a service", .{ r.name, s });
         };
         if (services > 1) return problem.set(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
+        if (r.mounts.len > 0 and r.container == null) return problem.set(gpa, "rule {s} has mounts but no container; mounts place host files inside an image", .{r.name});
         if (r.container) |img| if (img.len == 0 or std.mem.indexOfAny(u8, img, " \t\n") != null) return problem.set(gpa, "rule {s}: invalid container image '{s}'", .{ r.name, img });
         for (r.shared) |s| {
             if (wf.sharedIndex(s) == null) {

@@ -643,3 +643,14 @@ test "environment changes name each variable and describe list entries" {
     try state.describeEnvChange(&w.writer, passed[0]);
     try testing.expectEqualStrings("now passed, unset", w.written());
 }
+
+test "an image mount becomes a read-only volume at its target" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const m = [_]workflow.ImageMount{.{ .source = "p/report.py", .source_abs = "/w/p/report.py", .target = "/opt/lib/report.py" }};
+    const argv = try workz.container.runArgv(a, .{ .podman = "podman", .name = "n", .image_id = "id", .root = "/w", .launch = "l", .cgroup_parent = null, .mounts = &.{}, .env = &.{}, .image_mounts = &m, .script = "/w/s.sh" });
+    var found = false;
+    for (argv) |arg| found = found or std.mem.eql(u8, arg, "/w/p/report.py:/opt/lib/report.py:ro");
+    try testing.expect(found);
+}

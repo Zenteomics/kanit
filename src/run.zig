@@ -523,6 +523,7 @@ const Engine = struct {
                     try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}),
                 }),
                 .ipc_service = self.serviceOf(r),
+                .image_mounts = r.mounts,
                 .script = script,
             });
             t.container_name = name;
