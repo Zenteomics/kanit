@@ -659,3 +659,10 @@ test "a shared timeout belongs to a service" {
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\ntimeout = \"1m\"\n", "timeout limits a service's loading");
     try expectInvalid(head ++ "[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\ntimeout = \"soon\"\n", "invalid timeout 'soon'");
 }
+
+test "html report text is escaped" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.escape(&out.writer, "a<b> & \"c\" 'd'");
+    try testing.expectEqualStrings("a&lt;b&gt; &amp; &quot;c&quot; &#39;d&#39;", out.written());
+}

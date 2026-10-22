@@ -37,6 +37,10 @@ pub const Attempt = struct {
     uses_shared: bool,
     /// Ran in a container: its process is the Podman client.
     in_container: bool = false,
+    /// Start time, nanoseconds since the epoch; 0 when not recorded.
+    started_ns: i128 = 0,
+    /// Directory of the attempt's files.
+    dir: []const u8 = "",
 
     pub fn cpuEfficiency(self: Attempt) f64 {
         if (self.wall_s <= 0 or self.threads <= 0) return 0;
@@ -134,6 +138,8 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
             .io_stall = stall(cg, "io_some_us", wall),
             .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
             .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
+            .started_ns = monitor.parseTime(str(v, "started")) orelse 0,
+            .dir = try a.dupe(u8, std.fs.path.dirname(f).?),
         });
     }
     return out.items;

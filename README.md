@@ -141,6 +141,8 @@ Events also say why a ready rule waited (`task_waiting`) and sample the run's re
 
 `workz report --bottlenecks` reads the same records and says what limited the run: the critical path from the last task back to the start, with each step's run and waiting time; total waiting per reason (`threads`, `memory`, `jobs`, `group:NAME`, `loading shared inputs`); for each kind of rule (its name without the sample part), the request against the largest peak, a suggested request, CPU efficiency and whether it was CPU-, memory- or I/O-bound; the shared inputs with their starts, load time, declared memory and peak, and a suggested `memory` for services; and the reserved and used CPU and memory from the run samples. An attempt that ran for at least half a second while using under a tenth of its CPU request and a twentieth of its memory request is marked delegated: its command most likely handed the work to another supervisor (a systemd service, a container runtime), so the report gives no sizing advice for it.
 
+`workz report --format html > report.html` writes the launch as one self-contained page, with no scripts and nothing fetched from elsewhere: the summary, a timeline of every attempt with its waiting before it, the threads, cores and memory over the run, the bottleneck report, the failures with the end of their standard error, and the attempt table.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE) and [third-party notices](THIRD_PARTY.md).

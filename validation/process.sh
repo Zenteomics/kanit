@@ -586,6 +586,15 @@ check "watch shows the running task with its memory and last output" 'grep -q "^
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
 
+new report-html
+{ header report-html
+  rule ok '[]' '["ok.txt"]' '"touch ok.txt"'
+  rule bad '[]' '["bad.txt"]' '"echo \"<boom & stuff>\" >&2; exit 4"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -k -q > s.json
+"$workz" report -d . --format html > r.html
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html'
+
 # Interactive watch on a terminal: a private tmux server gives it a real
 # terminal; the screen is read back with capture-pane.
 tm() { tmux -L "workz-check-$$" -f /dev/null "$@"; }

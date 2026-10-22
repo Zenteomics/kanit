@@ -47,7 +47,7 @@ const usage =
     \\
     \\report options:
     \\  --launch ID              a launch other than the newest
-    \\  --format tsv|json        attempt table format (default tsv)
+    \\  --format tsv|json|html   attempt table, or a self-contained HTML page (default tsv)
     \\  --bottlenecks            critical path, waiting, request sizing, utilization
     \\
     \\watch options:
@@ -349,9 +349,11 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     return if (ok) .ok else .failed;
 }
 
+const ReportFormat = enum { tsv, json, html };
+
 const ReportExtra = struct {
     launch: *?[]const u8,
-    json: *bool,
+    format: *ReportFormat,
     bottlenecks: *bool,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
         if (std.mem.eql(u8, arg, "--bottlenecks")) {
@@ -364,7 +366,7 @@ const ReportExtra = struct {
         }
         if (std.mem.eql(u8, arg, "--format")) {
             const v = value orelse return badValue(arg);
-            if (std.mem.eql(u8, v, "json")) self.json.* = true else if (!std.mem.eql(u8, v, "tsv")) return badValue(arg);
+            self.format.* = std.meta.stringToEnum(ReportFormat, v) orelse return badValue(arg);
             return 2;
         }
         return 0;
@@ -374,9 +376,9 @@ const ReportExtra = struct {
 fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var launch: ?[]const u8 = null;
-    var json = false;
+    var format: ReportFormat = .tsv;
     var bottlenecks = false;
-    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .json = &json, .bottlenecks = &bottlenecks })) |e| return e;
+    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
@@ -385,9 +387,10 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var w = std.Io.File.stdout().writer(c.io, &buf);
     if (bottlenecks) {
         try report.writeBottlenecks(c.gpa, c.a, &w.interface, dir);
-    } else {
-        const rows = try report.attempts(c.gpa, c.a, dir);
-        if (json) try report.writeJson(&w.interface, rows) else try report.writeTsv(&w.interface, rows);
+    } else switch (format) {
+        .html => try workz.html.write(c.gpa, c.a, &w.interface, dir),
+        .json => try report.writeJson(&w.interface, try report.attempts(c.gpa, c.a, dir)),
+        .tsv => try report.writeTsv(&w.interface, try report.attempts(c.gpa, c.a, dir)),
     }
     try w.interface.flush();
     return .ok;
