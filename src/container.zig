@@ -41,17 +41,29 @@ pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []c
 }
 
 /// Removes containers left by an earlier launch in this working directory.
+/// Right after a crash Podman can still hold a container whose processes
+/// are gone, and one removal may not take; the list is checked again, up to
+/// three times. Returns the number of containers found.
 pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) !usize {
     var status: u32 = 0;
     const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
-    const out = process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status) catch return 0;
-    var names: std.ArrayList([]const u8) = .empty;
-    try names.appendSlice(a, &.{ podman, "rm", "--force", "--ignore", "--depend", "--time", "0" });
-    var it = std.mem.tokenizeAny(u8, out, " \n");
-    while (it.next()) |id| try names.append(a, id);
-    if (names.items.len == 7) return 0;
-    _ = process.capture(gpa, a, names.items, envp, devnull, &status) catch {};
-    return names.items.len - 7;
+    var found: usize = 0;
+    for (0..3) |round| {
+        const out = process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status) catch return found;
+        var argv: std.ArrayList([]const u8) = .empty;
+        try argv.appendSlice(a, &.{ podman, "rm", "--force", "--ignore", "--depend", "--time", "0" });
+        const fixed = argv.items.len;
+        var it = std.mem.tokenizeAny(u8, out, " \n");
+        while (it.next()) |id| try argv.append(a, id);
+        if (argv.items.len == fixed) break;
+        if (round == 0) found = argv.items.len - fixed;
+        if (round > 0) {
+            const pause: linux.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+            _ = linux.nanosleep(&pause, null);
+        }
+        _ = process.capture(gpa, a, argv.items, envp, devnull, &status) catch {};
+    }
+    return found;
 }
 
 /// Removes one container, whatever its state; used after an attempt that
