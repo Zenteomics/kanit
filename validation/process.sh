@@ -244,6 +244,8 @@ check "a service is loaded once for users that start at different times" '[ "$(l
 check "a service counts its memory once, so two users fit beside it" '! grep -q "\"reason\":\"memory\"" "$(last_launch)/events.jsonl"'
 check "the service command's output goes to its log, not the readiness line" 'grep -q "Shared memory id" "$log" && grep -q loaded "$log"'
 check "a released service leaves no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
+"$workz" report -d . --bottlenecks > report.txt
+check "the report sizes a service by what it held" 'awk '"'"'$1 == "seg" && $2 == "service" && $3 == 1 { found = 1 } END { exit !found }'"'"' report.txt'
 "$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s2.json
 check "rules joining a service are reused without starting it" '[ "$(status_of s2.json reused)" = 3 ] && [ "$(loads)" = 0 ]'
 sed -i 's/echo loaded/echo loaded again/' wf.toml

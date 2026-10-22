@@ -200,6 +200,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     var threads_reserved_sum: f64 = 0;
     var memory_reserved_sum: f64 = 0;
     var memory_current_max: f64 = 0;
+    var shared: std.StringArrayHashMapUnmanaged(SharedUse) = .empty;
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
         if (line.len == 0) continue;
@@ -221,6 +222,25 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
             threads_reserved_sum += num(get(v, "threads_reserved")) orelse 0;
             memory_reserved_sum += num(get(v, "memory_reserved_mib")) orelse 0;
             memory_current_max = @max(memory_current_max, (num(get(v, "memory_current")) orelse 0) / 1048576.0);
+        } else if (std.mem.startsWith(u8, ev, "shared_")) {
+            const gop = try shared.getOrPut(a, str(v, "name"));
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            const s = gop.value_ptr;
+            if (std.mem.eql(u8, ev, "shared_loading")) {
+                s.starts += 1;
+                s.loading_at = at;
+                if (num(get(v, "memory_mib"))) |m| {
+                    s.service = true;
+                    s.declared_mib = m;
+                } else if (num(get(v, "bytes"))) |b| s.declared_mib = b / 1048576.0;
+            } else if (std.mem.eql(u8, ev, "shared_loaded")) {
+                if (s.loading_at) |l| if (at) |now| {
+                    s.load_s += @as(f64, @floatFromInt(now - l)) / 1e9;
+                };
+            } else if (std.mem.eql(u8, ev, "shared_released") or std.mem.eql(u8, ev, "shared_failed")) {
+                s.peak_mib = @max(s.peak_mib, (num(get(v, "memory_peak")) orelse 0) / 1048576.0);
+                if (std.mem.eql(u8, ev, "shared_failed")) s.failed = true;
+            }
         } else if (std.mem.eql(u8, ev, "task_started") or std.mem.eql(u8, ev, "task_finished") or std.mem.eql(u8, ev, "task_reused")) {
             const gop = try timing.getOrPut(a, str(v, "rule"));
             if (!gop.found_existing) gop.value_ptr.* = .{};
@@ -313,6 +333,24 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         try w.writeAll("\n");
     }
 
+    if (shared.count() > 0) {
+        try w.writeAll("\nshared inputs\n");
+        try w.writeAll("  NAME                           KIND     STARTS   LOAD S   MEMORY     PEAK  SUGGEST\n");
+        for (shared.keys(), shared.values()) |name, s| {
+            try w.print("  {s:<30} {s:<8} {d:>6} {d:>8.1} {d:>7.0}M {d:>7.0}M", .{ name[0..@min(name.len, 30)], if (s.service) "service" else "mapped", s.starts, s.load_s, s.declared_mib, s.peak_mib });
+            // A service holds mostly what it loaded: its peak plus a twentieth.
+            if (s.service and s.peak_mib > 0) {
+                const suggest = @ceil(s.peak_mib * 1.05 / 64.0) * 64.0;
+                try w.print(" {d:>7.0}M", .{suggest});
+                if (s.declared_mib > suggest * 1.5 and s.declared_mib - suggest >= 256) try w.print("  declares {d:.0}M more than it held", .{s.declared_mib - suggest});
+                if (s.peak_mib >= s.declared_mib * 0.95) try w.writeAll("  held almost all of its memory");
+            } else try w.print(" {s:>8}", .{"-"});
+            if (s.starts > 1) try w.print("  loaded {d} times", .{s.starts});
+            if (s.failed) try w.writeAll("  failed");
+            try w.writeAll("\n");
+        }
+    }
+
     try w.writeAll("\nutilization (run samples every 5 s)\n");
     if (samples == 0) {
         try w.writeAll("  no samples: the run was shorter than one interval, or its engine did not record them\n");
@@ -325,6 +363,16 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         try w.writeAll("\n");
     }
 }
+
+const SharedUse = struct {
+    service: bool = false,
+    starts: usize = 0,
+    loading_at: ?i128 = null,
+    load_s: f64 = 0,
+    declared_mib: f64 = 0,
+    peak_mib: f64 = 0,
+    failed: bool = false,
+};
 
 fn character(stall_n: usize, cpu: f64, mem: f64, io: f64, eff: f64) []const u8 {
     if (stall_n == 0) return if (eff >= 0.7) "CPU-bound" else "-";
