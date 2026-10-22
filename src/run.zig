@@ -1465,6 +1465,10 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var produced: std.StringHashMapUnmanaged(void) = .empty;
     defer produced.deinit(gpa);
     for (wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try produced.put(gpa, o, {});
+    // One identity memo for the launch: the input check below fills it for
+    // the key computation.
+    var ids = state.Identities.init(gpa);
+    defer ids.deinit();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
         var need = r.memory_mib;
@@ -1475,7 +1479,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB", .{ r.name, need, max_memory }));
         for (r.input_abs, r.input) |in, written| {
             if (produced.contains(in)) continue;
-            if (!sys.exists(gpa, in)) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s}", .{ r.name, written }));
+            if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s}", .{ r.name, written }));
         }
     }
 
@@ -1488,8 +1492,6 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // Rules dispatched by an interrupted launch without a saved result run again.
     for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
 
-    var ids = state.Identities.init(gpa);
-    defer ids.deinit();
     // A recorded output that changed outside the engine is refused unless
     // --rerun, except when it has a stored digest and its bytes still match:
     // then its identity is refreshed and it stays reusable.
@@ -1668,13 +1670,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         }
     };
 
-    // Inputs of finished rules must not have changed while the run went on.
+    // Inputs of rules that ran must not have changed while the run went on:
+    // their outputs would not match the inputs recorded in their key. A
+    // reused rule keeps its earlier record, which the next launch checks.
+    var ran = false;
+    for (engine.tasks) |t| ran = ran or t.status == .completed;
     var post = state.Identities.init(gpa);
     defer post.deinit();
-    var post_cut = try state.Cutoff.init(a, gpa, wf, engine.st, &post, false);
-    for (wf.rules, 0..) |*r, i| {
+    var post_cut = if (ran) try state.Cutoff.init(a, gpa, wf, engine.st, &post, false) else undefined;
+    if (ran) for (wf.rules, 0..) |*r, i| {
         const t = &engine.tasks[i];
-        if (t.status != .completed and t.status != .reused) continue;
+        if (t.status != .completed) continue;
         const k = t.key orelse continue;
         var names: std.ArrayList([]const u8) = .empty;
         var keys: std.ArrayList([]const u8) = .empty;
@@ -1689,7 +1695,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             _ = engine.st.data.rules.map.swapRemove(r.name);
             engine.dirty = true;
         }
-    }
+    };
 
     for (engine.tasks) |*t| if (t.status == .pending or t.status == .ready) {
         t.status = if (engine.interrupted) .cancelled else .not_started;
