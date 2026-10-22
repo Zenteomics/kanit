@@ -310,6 +310,16 @@ check "a rule admitted after its service failed fails at once" '[ "$(reason b2)"
 check "a service above its memory is reported as out of memory" 'reason f1 | grep -q "^shared input fat could not be loaded: out of memory"'
 check "failed services leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
 
+new service-timeout
+{ header service-timeout
+  service slow '"sleep 30"' 64M | sed 's/^memory = "64M"$/&\ntimeout = "1s"/'
+  srule u '[]' '["u.txt"]' '"touch u.txt"' slow
+} > wf.toml
+t0=$(date +%s%N)
+timeout 60 "$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json
+ms=$(( ($(date +%s%N) - t0) / 1000000 ))
+check "a service that is not ready within its timeout fails its users ($ms ms)" '[ "$(jq -r "select(.event == \"task_failed\") | .reason" "$(last_launch)/events.jsonl")" = "shared input slow could not be loaded: did not become ready within 1 s" ] && [ $ms -lt 8000 ] && [ "$(leftovers)" = 0 ]'
+
 new service-interrupt
 { header service-interrupt
   service slow '"sleep 60"' 64M

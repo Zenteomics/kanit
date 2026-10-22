@@ -654,3 +654,8 @@ test "an image mount becomes a read-only volume at its target" {
     for (argv) |arg| found = found or std.mem.eql(u8, arg, "/w/p/report.py:/opt/lib/report.py:ro");
     try testing.expect(found);
 }
+
+test "a shared timeout belongs to a service" {
+    try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\ntimeout = \"1m\"\n", "timeout limits a service's loading");
+    try expectInvalid(head ++ "[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\ntimeout = \"soon\"\n", "invalid timeout 'soon'");
+}

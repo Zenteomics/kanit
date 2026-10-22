@@ -96,7 +96,7 @@ memory = "30G"
 A shared entry with `container`, `command` and `memory` is a service. Before its first user starts, workz runs `command` in a container of the image with a shareable IPC namespace, its own cgroup limited to `memory`, `/tmp` as its working directory, and the working directory and `path` mounted read-only. Container rules that list the service in `shared` join its IPC namespace, so they attach to the System V shared memory it created: STAR with `--genomeLoad LoadAndKeep` aligns against a genome loaded once.
 
 - Memory admission counts the service's `memory` once while it runs, as with mapped files; the memory it holds is charged to its cgroup, not to its users.
-- Users start when the command has exited 0. If it fails, or runs out of its memory, the rules that need it fail with the service's last line of standard error; its output is kept in the launch's `shared/` directory.
+- Users start when the command has exited 0. `timeout = "30m"` on the service limits how long that may take; a service not ready in time is stopped and its users fail. If it fails, or runs out of its memory, the rules that need it fail with the service's last line of standard error; its output is kept in the launch's `shared/` directory.
 - The service stays up while a rule that has yet to run needs it, so later users do not load it again. It gives way when a waiting rule needs its memory, and stops after its last user.
 - `path` may hold files that rules of the workflow produce, such as an index; each rule that joins the service must then depend on those rules. The service's image, command and path are part of its users' keys.
 - A rule can join one service; shell rules cannot join services.

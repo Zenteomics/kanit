@@ -54,6 +54,8 @@ pub const Shared = struct {
     container: ?[]const u8 = null,
     command: ?[]const u8 = null,
     memory_mib: ?u64 = null,
+    /// Longest a service may take to become ready.
+    timeout_s: ?u64 = null,
 
     pub fn isService(self: Shared) bool {
         return self.container != null;
@@ -106,7 +108,7 @@ const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_group
 const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
-const shared_keys = [_][]const u8{ "path", "container", "command", "memory" };
+const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout" };
 const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
@@ -421,6 +423,10 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 if (memory == null) return p.failKey(&at, "container", "shared.{s}: a service needs the memory it holds", .{e.key_ptr.*});
             }
             const mib: ?u64 = if (memory) |m| parseMemoryMib(m) orelse return p.failKey(&at, "memory", "shared.{s}: invalid memory '{s}'", .{ e.key_ptr.*, m }) else null;
+            const timeout_s: ?u64 = if (try p.str(s, "timeout", &at, "shared")) |text| blk: {
+                if (image == null) return p.failKey(&at, "timeout", "shared.{s}: timeout limits a service's loading, which needs a container", .{e.key_ptr.*});
+                break :blk parseDuration(text) orelse return p.failKey(&at, "timeout", "shared.{s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ e.key_ptr.*, text });
+            } else null;
             try shared.append(arena, .{
                 .name = try arena.dupe(u8, e.key_ptr.*),
                 .path = sp,
@@ -428,6 +434,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 .container = image,
                 .command = command,
                 .memory_mib = mib,
+                .timeout_s = timeout_s,
             });
         }
     }

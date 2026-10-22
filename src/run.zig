@@ -150,6 +150,9 @@ const Holder = struct {
     /// Its memory is counted against the budget: from its first user's
     /// admission until no rule left to run needs it.
     held: bool = false,
+    /// When a loading service is given up on, and whether it was.
+    ready_deadline: ?i128 = null,
+    timed_out: bool = false,
 };
 
 /// Default budget: every online CPU and three quarters of physical memory.
@@ -720,6 +723,8 @@ const Engine = struct {
         h.stop_fd = stop_fd;
         h.container_name = name;
         h.st = .loading;
+        h.timed_out = false;
+        h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
         self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid });
         self.progress("starting shared service {s} ({d} MiB)", .{ s.name, h.mib });
     }
@@ -745,6 +750,9 @@ const Engine = struct {
         const n = sys.read(h.pipe, &buf) catch 0;
         sys.close(h.pipe);
         h.pipe = -1;
+        // A service given up on stays failed even if it reports ready late.
+        if (h.timed_out) return;
+        h.ready_deadline = null;
         if (n == 0 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
             // The holder ends; its exit fails the rules waiting for it.
             if (h.pid > 0) self.stopHolder(h);
@@ -876,7 +884,9 @@ const Engine = struct {
         }
         h.st = .failed;
         var why: []const u8 = "the holder ended";
-        if (counters != null and counters.?.oom_kill > 0) {
+        if (h.timed_out) {
+            why = try std.fmt.allocPrint(self.a, "did not become ready within {d} s", .{s.timeout_s.?});
+        } else if (counters != null and counters.?.oom_kill > 0) {
             why = try std.fmt.allocPrint(self.a, "out of memory: could not stay within its {d} MiB", .{h.mib});
         } else if (s.isService()) {
             const log = try std.fmt.allocPrint(self.a, "{s}/shared/{s}-{d}.stderr.log", .{ self.launch_dir, s.name, h.starts });
@@ -1158,6 +1168,16 @@ const Engine = struct {
     fn checkTimers(self: *Engine) void {
         const now = sys.monoNs();
         const grace = @as(i128, self.opts.grace_s) * std.time.ns_per_s;
+        for (self.holders, 0..) |*h, hi| if (h.ready_deadline) |d| if (now >= d) {
+            h.ready_deadline = null;
+            if (h.st == .loading) {
+                h.timed_out = true;
+                self.events.emit("shared_timeout", .{ .name = self.wf.shared[hi].name });
+                self.stopHolder(h);
+                // It ends as failed, not released: its users cannot start.
+                h.st = .loading;
+            }
+        };
         for (self.holders) |*h| if (h.kill_at) |k| if (now >= k) {
             process.signalPid(h.pid, .KILL);
             if (h.cg) |cg| cgroup.kill(self.gpa, cg);
@@ -1182,7 +1202,7 @@ const Engine = struct {
 
     fn nextDeadline(self: *Engine) ?i128 {
         var best: ?i128 = null;
-        for (self.holders) |h| if (h.kill_at) |v| {
+        for (self.holders) |h| for ([_]?i128{ h.kill_at, h.ready_deadline }) |d| if (d) |v| {
             best = if (best) |b| @min(b, v) else v;
         };
         for (self.tasks) |t| {
