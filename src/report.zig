@@ -262,7 +262,9 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         }
     }
     const t0 = launch_start orelse 0;
-    const elapsed = if (launch_end != null and launch_start != null) @as(f64, @floatFromInt(launch_end.? - t0)) / 1e9 else 0;
+    // The summary's elapsed time starts with the engine, before the checks
+    // that precede launch_started; events give it while a launch runs.
+    const elapsed = summaryElapsed(gpa, a, launch_dir) orelse if (launch_end != null and launch_start != null) @as(f64, @floatFromInt(launch_end.? - t0)) / 1e9 else 0;
     var ran: usize = 0;
     var task_s: f64 = 0;
     var delegated: usize = 0;
@@ -368,6 +370,14 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         if (memory_current_max > 0) try w.print("; run cgroup peaked at {d:.0} MiB", .{memory_current_max});
         try w.writeAll("\n");
     }
+}
+
+fn summaryElapsed(gpa: Allocator, a: Allocator, launch_dir: []const u8) ?f64 {
+    const path = std.fs.path.join(a, &.{ launch_dir, "summary.json" }) catch return null;
+    const bytes = sys.readFile(gpa, path, 1 << 20) catch return null;
+    defer gpa.free(bytes);
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch return null;
+    return num(get(v, "elapsed_s"));
 }
 
 const SharedUse = struct {
