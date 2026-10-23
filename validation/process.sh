@@ -447,8 +447,8 @@ engine=$!
 sleep 2
 kill -KILL $engine
 wait $engine 2>/dev/null
-sleep 0.2
-[ -f ../crash-task.pid ] && kill -KILL -- -"$(cat ../crash-task.pid)" 2>/dev/null
+for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
+check "without isolation, a task ends with a killed engine" '[ -s ../crash-task.pid ] && [ ! -d /proc/"$(cat ../crash-task.pid)" ]'
 "$workz" plan wf.toml > plan.txt
 check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
 

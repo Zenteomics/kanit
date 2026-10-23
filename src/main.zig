@@ -91,7 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -560,6 +560,37 @@ fn netns(args: []const [:0]const u8) Exit {
         break;
     }
     if (kill_fd >= 0) _ = linux.write(kill_fd, "1", 1);
+    return .ok;
+}
+
+/// Internal: guards a run without isolation. It reads "+PGID" and "-PGID"
+/// lines on stdin, a pipe whose only writer is the engine, as tasks start
+/// and end. At end of file, also when the engine died, it kills the process
+/// groups still listed, so no task outlives its engine.
+fn guard() Exit {
+    var ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
+    for ([_]linux.SIG{ .INT, .TERM, .HUP }) |sig| _ = linux.sigaction(sig, &ignore, null);
+    var live: std.AutoArrayHashMapUnmanaged(i32, void) = .empty;
+    var buf: [4096]u8 = undefined;
+    var line: [32]u8 = undefined;
+    var len: usize = 0;
+    while (true) {
+        const rc = linux.read(0, &buf, buf.len);
+        if (linux.errno(rc) == .INTR) continue;
+        if (linux.errno(rc) != .SUCCESS or rc == 0) break;
+        for (buf[0..rc]) |c| {
+            if (c != '\n') {
+                if (len < line.len) line[len] = c;
+                len += 1;
+                continue;
+            }
+            defer len = 0;
+            if (len < 2 or len > line.len) continue;
+            const pgid = std.fmt.parseInt(i32, line[1..len], 10) catch continue;
+            if (line[0] == '+') live.put(std.heap.page_allocator, pgid, {}) catch {} else _ = live.swapRemove(pgid);
+        }
+    }
+    for (live.keys()) |pgid| _ = linux.kill(-pgid, .KILL);
     return .ok;
 }
 

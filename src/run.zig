@@ -71,6 +71,37 @@ const Task = struct {
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
 
+/// Without isolation: the `__guard` child that kills the process groups of
+/// running tasks if the engine dies (see `guard` in main).
+const Guard = struct {
+    pid: linux.pid_t,
+    fd: sys.Fd,
+
+    fn start(a: Allocator, envp: *const process.Vec, devnull: sys.Fd) !Guard {
+        var pipe: [2]i32 = undefined;
+        _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
+        defer sys.close(pipe[0]);
+        errdefer sys.close(pipe[1]);
+        const exe = try a.dupeZ(u8, try sys.selfExe(a));
+        const argv = try process.Vec.init(a, &.{ "workz", "__guard" });
+        const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = pipe[0], .stdout = devnull, .stderr = 2 };
+        return .{ .pid = try process.spawn(&spec), .fd = pipe[1] };
+    }
+
+    fn note(self: Guard, sign: u8, pgid: linux.pid_t) void {
+        var buf: [24]u8 = undefined;
+        const text = std.fmt.bufPrint(&buf, "{c}{d}\n", .{ sign, pgid }) catch return;
+        sys.writeAll(self.fd, text) catch {};
+    }
+
+    /// Ends the guard; its list is empty when every task was reaped.
+    fn stop(self: Guard) void {
+        sys.close(self.fd);
+        var status: u32 = 0;
+        _ = linux.wait4(self.pid, &status, 0, null);
+    }
+};
+
 /// The run's user and network namespaces, held by a `__netns` child that
 /// also kills the run's cgroup if the engine dies (see `netns` in main).
 const Network = struct {
@@ -212,6 +243,8 @@ const Engine = struct {
     tree: ?cgroup.Tree,
     /// The run's network for shell rules, when isolated.
     network: ?Network,
+    /// The guard of a run without isolation.
+    guard: ?Guard = null,
     /// Podman, when the selected rules use containers.
     podman: ?[]const u8 = null,
     /// cgroup of the podman clients and conmon processes, when isolated.
@@ -570,6 +603,7 @@ const Engine = struct {
             return;
         };
         t.status = .running;
+        if (self.guard) |gd| gd.note('+', t.pid);
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
@@ -925,6 +959,7 @@ const Engine = struct {
 
     fn finish(self: *Engine, i: usize, reaped: process.Reaped) !void {
         const t = &self.tasks[i];
+        if (self.guard) |gd| gd.note('-', t.pid);
         const r = self.rule(i);
         const now_real = sys.realNs();
         const wall_s = @as(f64, @floatFromInt(sys.monoNs() - t.started_ns)) / 1e9;
@@ -1669,6 +1704,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
     }
     defer if (engine.network) |n| n.stop();
+    if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch null;
+    defer if (engine.guard) |gd| gd.stop();
     defer engine.pending_done.deinit(gpa);
     defer engine.leftover_cgroups.deinit(gpa);
     @memset(engine.group_used, 0);
