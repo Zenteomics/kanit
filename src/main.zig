@@ -39,6 +39,8 @@ const usage =
     \\  -r, --retry N            retry failed attempts up to N times (0-3)
     \\  --timeout DURATION       per-attempt time limit, e.g. 2h (rules may set their own)
     \\  --rerun                  run the selected rules even when reusable
+    \\  --rerun-rule RULE        run RULE even when reusable; its consumers follow (repeatable;
+    \\                           plan and explain accept it too)
     \\  --input-manifest FILE    JSON of absolute paths to "sha256:<hex>" to check
     \\  --pass-env NAME          pass an extra environment variable to rules
     \\  --grace SECONDS          wait before killing a stopped task (default 10)
@@ -227,8 +229,13 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
 const PlanExtra = struct {
     rerun: *bool,
     pass: *std.ArrayList([]const u8),
+    reruns: *std.ArrayList([]const u8),
     a: std.mem.Allocator,
     fn option(self: PlanExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--rerun-rule")) {
+            try self.reruns.append(self.a, value orelse return badValue(arg));
+            return 2;
+        }
         if (std.mem.eql(u8, arg, "--rerun")) {
             self.rerun.* = true;
             return 1;
@@ -249,7 +256,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var common: Common = .{};
     var rerun = false;
     var pass: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .a = c.a })) |e| return e;
+    var reruns: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     var st = try plan.loadState(c.gpa, l.wf.root, c.a);
@@ -258,6 +266,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     defer ids.deinit();
     var ctx = try planContext(c, &l, &st, &ids, pass.items);
     ctx.rerun = rerun;
+    ctx.rerun_rules = reruns.items;
+    if (!try knownRules(&l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
     try plan.printPlan(&w.interface, &ctx, l.mask);
@@ -269,7 +279,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var rerun = false;
     var pass: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .a = c.a })) |e| return e;
+    var reruns: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
     if (common.positional.items.len != 1) return fail("explain needs a workflow file and one rule name", .{});
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
@@ -279,6 +290,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     defer ids.deinit();
     var ctx = try planContext(c, &l, &st, &ids, pass.items);
     ctx.rerun = rerun;
+    ctx.rerun_rules = reruns.items;
+    if (!try knownRules(&l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
     const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);
@@ -439,6 +452,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
 const RunExtra = struct {
     opts: *run.Options,
     pass: *std.ArrayList([]const u8),
+    reruns: *std.ArrayList([]const u8),
     a: std.mem.Allocator,
 
     fn option(self: RunExtra, arg: []const u8, value: ?[]const u8) !usize {
@@ -447,6 +461,10 @@ const RunExtra = struct {
         if (eq(u8, arg, "-k") or eq(u8, arg, "--keep-going")) {
             o.keep_going = true;
             return 1;
+        }
+        if (eq(u8, arg, "--rerun-rule")) {
+            try self.reruns.append(self.a, value orelse return badValue(arg));
+            return 2;
         }
         if (eq(u8, arg, "--rerun")) {
             o.rerun = true;
@@ -494,7 +512,9 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var opts: run.Options = .{};
     var pass: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c.a, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .a = c.a })) |e| return e;
+    var reruns: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c.a, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
+    opts.rerun_rules = reruns.items;
     opts.pass_env = pass.items;
     if (opts.input_manifest) |m| opts.input_manifest = try sys.absolute(c.a, try sys.cwd(c.a), m);
     // The launcher only starts the scope; the engine inside reads the workflow.
@@ -502,6 +522,7 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     if (opts.isolation and !inner) return isolate(c, opts);
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
+    if (!try knownRules(&l.wf, opts.rerun_rules)) return .usage;
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
         .ok => .ok,
@@ -509,6 +530,15 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
         .invalid => .usage,
         .interrupted => .interrupted,
     };
+}
+
+/// Reports a name given to --rerun-rule that is not a rule of the workflow.
+fn knownRules(wf: *const workflow.Workflow, names: []const []const u8) !bool {
+    for (names) |n| if (wf.ruleIndex(n) == null) {
+        std.debug.print("workz: --rerun-rule {s}: no such rule\n", .{n});
+        return false;
+    };
+    return true;
 }
 
 fn findProgram(c: Ctx, name: []const u8) !?[]const u8 {

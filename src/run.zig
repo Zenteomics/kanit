@@ -27,6 +27,10 @@ pub const Options = struct {
     retry: u32 = 0,
     timeout_s: ?u64 = null,
     rerun: bool = false,
+    /// Rules to run even when reusable (`--rerun-rule`); their consumers
+    /// follow when their outputs change.
+    rerun_rules: []const []const u8 = &.{},
+
     input_manifest: ?[]const u8 = null,
     isolation: bool = true,
     pass_env: []const []const u8 = &.{},
@@ -34,6 +38,12 @@ pub const Options = struct {
     quiet: bool = false,
     /// systemd slice the isolated run's scope is placed in.
     slice: ?[]const u8 = null,
+
+    pub fn forced(self: Options, name: []const u8) bool {
+        if (self.rerun) return true;
+        for (self.rerun_rules) |n| if (std.mem.eql(u8, n, name)) return true;
+        return false;
+    }
 };
 
 pub const Outcome = enum(u8) { ok = 0, failed = 1, invalid = 2, interrupted = 130 };
@@ -331,7 +341,7 @@ const Engine = struct {
             return;
         }
         t.key = key.?;
-        if (!self.opts.rerun) if (self.st.data.rules.map.get(r.name)) |e| {
+        if (!self.opts.forced(r.name)) if (self.st.data.rules.map.get(r.name)) |e| {
             if (std.mem.eql(u8, e.key, key.?.key) and try self.outputsIntact(&e)) {
                 t.status = .reused;
                 self.finished += 1;
@@ -1575,16 +1585,18 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
                     continue;
                 }
             }
+            // A rule run on request keeps its changed outputs in previous/.
+            if (opts.forced(r.name)) continue;
             changed += 1;
             if (first_changed.len == 0) first_changed = o.path;
-            if (!opts.rerun) {
+            {
                 std.debug.print("workz: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
                 events.emit("output_changed", .{ .rule = r.name, .path = o.path });
             }
         }
     }
-    if (changed > 0 and !opts.rerun) {
-        std.debug.print("workz: refusing to reuse changed outputs; use --rerun to run the affected rules again (earlier bytes are kept in previous/)\n", .{});
+    if (changed > 0) {
+        std.debug.print("workz: refusing to reuse changed outputs; use --rerun, or --rerun-rule for the affected rules, to run them again (earlier bytes are kept in previous/)\n", .{});
         return refusal.refuse(.failed, try std.fmt.allocPrint(a, "{d} recorded outputs changed outside workz, first {s}; use --rerun", .{ changed, first_changed }));
     }
 

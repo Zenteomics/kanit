@@ -99,6 +99,23 @@ TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > changed.json 2> /dev/null
 rc=$?
 check "an output with a stored digest and different bytes is still refused" '[ $rc = 1 ] && jq -e ".status == \"refused\"" changed.json > /dev/null'
 
+new rerun-rule
+echo x > in.txt
+{ header rerun-rule
+  rule a '["in.txt"]' '["a.txt"]' '"cat in.txt > a.txt"'
+  rule b '["a.txt"]' '["b.txt"]' '"date +%s%N > b.txt"'
+  rule c '["b.txt"]' '["c.txt"]' '"cat b.txt > c.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+"$workz" plan wf.toml --rerun-rule b > plan.txt
+check "plan shows a requested rule and the consumers that follow it" 'grep -q "reuse a" plan.txt && grep -q "run   b  (rerun requested)" plan.txt && grep -q "run   c  (producer b runs)" plan.txt'
+echo tampered > b.txt
+"$workz" run wf.toml "${iso[@]}" --rerun-rule b -q > s2.json
+check "--rerun-rule runs the rule and its consumers, keeping a changed output in previous/" '[ "$(status_of s2.json completed)" = 2 ] && [ "$(status_of s2.json reused)" = 1 ] && grep -rq tampered "$(last_launch)/attempts/b/001/previous/"'
+"$workz" run wf.toml "${iso[@]}" --rerun-rule nosuch -q > /dev/null 2> err.txt
+rc=$?
+check "--rerun-rule refuses a name that is not a rule" '[ $rc = 2 ] && grep -q "no such rule" err.txt'
+
 # ---------------------------------------------------------------- early cutoff
 new cutoff
 echo data > in.txt

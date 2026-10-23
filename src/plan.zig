@@ -26,6 +26,7 @@ pub const Context = struct {
     env_text: []const u8,
     engine_id: []const u8,
     rerun: bool = false,
+    rerun_rules: []const []const u8 = &.{},
     cut: ?state.Cutoff = null,
     environ: *const std.process.Environ.Map,
     /// Per rule: key text beyond the command, as the run computes it.
@@ -102,7 +103,10 @@ pub const Context = struct {
         var missing: ?[]const u8 = null;
         const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, self.extras[i], &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
-        if (self.rerun) return .{ .run = true, .reason = "rerun requested", .key = k };
+        const asked = self.rerun or for (self.rerun_rules) |n| {
+            if (std.mem.eql(u8, n, r.name)) break true;
+        } else false;
+        if (asked) return .{ .run = true, .reason = "rerun requested", .key = k };
         if (state.firstDifference(&e, &k)) |what| {
             if (std.mem.eql(u8, what, "environment")) if (self.st.data.envs.map.get(e.env)) |was| {
                 var changed: std.Io.Writer.Allocating = .init(self.a);
