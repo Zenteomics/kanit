@@ -63,6 +63,7 @@ Each rule names its input files, its output files, one shell command and a resou
 | `graph`        | print DOT                   |
 | `run`          | run the selected rules      |
 | `watch`        | live view of a run          |
+| `logs RULE`    | a rule's newest output      |
 | `clean`        | remove leftovers            |
 | `status`       | summary of the newest run   |
 | `verify`       | check recorded outputs      |

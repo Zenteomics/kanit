@@ -627,6 +627,26 @@ check "watch shows the running task with its memory and last output" 'grep -q "^
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
 
+new logs-command
+{ header logs
+  rule talk '[]' '["t.txt"]' '"echo to-out; echo to-err >&2; touch t.txt"'
+  rule flaky '[]' '["f.txt"]' '"if [ -f tried ]; then echo second; touch f.txt; else touch tried; echo first; exit 1; fi"' 'retries = 1'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > /dev/null 2>&1
+"$workz" logs -d . talk > both.txt
+"$workz" logs wf.toml talk --stderr > err.txt
+"$workz" logs -d . flaky --attempt 1 --stdout > first.txt
+"$workz" logs -d . flaky --stdout > last.txt
+check "logs shows a rule's streams, one stream, or an earlier attempt" 'grep -q "^to-out$" both.txt && grep -q "^to-err$" both.txt && [ "$(cat err.txt)" = to-err ] && [ "$(cat first.txt)" = first ] && [ "$(cat last.txt)" = second ]'
+{ header logs; rule slow '[]' '["s.txt"]' '"for i in 1 2 3; do echo tick-$i; sleep 0.4; done; touch s.txt"'; } > slow.toml
+"$workz" run slow.toml "${iso[@]}" -q > /dev/null &
+runner=$!
+for _ in $(seq 50); do [ -n "$(ls -d .workz/launches/*/attempts/slow/001 2> /dev/null)" ] && break; sleep 0.05; done
+timeout 10 "$workz" logs -d . slow --stdout --follow > follow.txt
+rc=$?
+wait $runner
+check "logs --follow streams a running attempt and returns when it ends" '[ $rc = 0 ] && [ "$(grep -c tick- follow.txt)" = 3 ]'
+
 new clean
 { header clean
   rule a '[]' '["a.txt"]' '"date +%s%N > a.txt"'

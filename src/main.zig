@@ -24,6 +24,7 @@ const usage =
     \\  status [WORKFLOW]        summary of the newest launch
     \\  verify WORKFLOW          check recorded outputs (--content hashes them)
     \\  report [WORKFLOW]        what each attempt of a launch used (--bottlenecks: what limited it)
+    \\  logs [WORKFLOW] RULE     standard output and error of a rule's newest attempt
     \\  clean [WORKFLOW]         remove leftover containers (--keep N: and all but the newest N launches)
     \\  version                  print the engine version
     \\
@@ -52,6 +53,11 @@ const usage =
     \\  --launch ID              a launch other than the newest
     \\  --format tsv|json|html   attempt table, or a self-contained HTML page (default tsv)
     \\  --bottlenecks            critical path, waiting, request sizing, utilization
+    \\
+    \\logs options:
+    \\  --launch ID, --attempt N an earlier launch or attempt
+    \\  --stdout, --stderr       one stream only (default both)
+    \\  -f, --follow             keep printing until the attempt ends
     \\
     \\clean options:
     \\  --keep N                 keep the newest N launches and those holding a recorded attempt
@@ -98,7 +104,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -333,6 +339,58 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
+}
+
+const LogsExtra = struct {
+    opts: *workz.logs.Options,
+    fn option(self: LogsExtra, arg: []const u8, value: ?[]const u8) !usize {
+        const eq = std.mem.eql;
+        if (eq(u8, arg, "--stdout")) {
+            self.opts.stream = .stdout;
+            return 1;
+        }
+        if (eq(u8, arg, "--stderr")) {
+            self.opts.stream = .stderr;
+            return 1;
+        }
+        if (eq(u8, arg, "-f") or eq(u8, arg, "--follow")) {
+            self.opts.follow = true;
+            return 1;
+        }
+        if (eq(u8, arg, "--launch")) {
+            self.opts.launch = value orelse return badValue(arg);
+            return 2;
+        }
+        if (eq(u8, arg, "--attempt")) {
+            const v = value orelse return badValue(arg);
+            self.opts.attempt = std.fmt.parseInt(u32, v, 10) catch return badValue(arg);
+            return 2;
+        }
+        return 0;
+    }
+};
+
+fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    var opts: workz.logs.Options = .{};
+    if (try parseArgs(c.a, args, &common, LogsExtra{ .opts = &opts })) |e| return e;
+    // `logs RULE` in the working directory (or -d DIR), or `logs WORKFLOW RULE`.
+    const rule = switch (common.positional.items.len) {
+        0 => blk: {
+            const r = common.workflow orelse return fail("logs needs a rule name", .{});
+            common.workflow = null;
+            break :blk r;
+        },
+        1 => common.positional.items[0],
+        else => return fail("logs takes one rule name", .{}),
+    };
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    const dir = (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse return fail("no attempt of rule {s} recorded in {s}/.workz", .{ rule, root });
+    var buf: [65536]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    try workz.logs.show(c.gpa, c.a, &w.interface, dir, opts);
+    try w.interface.flush();
+    return .ok;
 }
 
 const CleanExtra = struct {
