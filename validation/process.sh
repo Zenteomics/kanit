@@ -229,6 +229,14 @@ wait $engine 2>/dev/null
 { header container-crash; crule long '[]' '["l.txt"]' '"touch l.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "a container left by a killed engine is removed by the next launch" 'jq -e "select(.event == \"containers_checked\") | select(.leftovers_removed >= 1)" "$(last_launch)/events.jsonl" > /dev/null && [ "$(leftovers)" = 0 ] && [ "$(status_of s2.json completed)" = 1 ]'
+{ header container-crash; crule long '[]' '["l.txt"]' '"sleep 60; touch l.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" --rerun -q > s3.json 2>/dev/null &
+engine=$!
+for _ in $(seq 100); do [ "$(leftovers)" = 1 ] && break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2>/dev/null
+"$workz" clean -d . > clean.txt
+check "clean removes a container left by a killed engine" 'grep -q "removed 1 container(s)" clean.txt && [ "$(leftovers)" = 0 ]'
 
 # ---------------------------------------------------------------- shared services
 # srule NAME INPUTS OUTPUTS SHELL SERVICE: a container rule that joins SERVICE.
@@ -601,6 +609,27 @@ wait $runner
 check "watch shows the running task with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " Mi\| Ki" view.txt'
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
+
+new clean
+{ header clean
+  rule a '[]' '["a.txt"]' '"date +%s%N > a.txt"'
+  rule b '[]' '["b.txt"]' '"touch b.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > /dev/null
+for _ in 1 2 3; do "$workz" run wf.toml "${iso[@]}" -t a --rerun -q > /dev/null; done
+first=$(ls .workz/launches | head -1)
+"$workz" clean -d . --keep 1 --dry-run > dry.txt
+check "clean --dry-run lists what it would remove and removes nothing" '[ "$(ls .workz/launches | wc -l)" = 4 ] && grep -q "would remove 0 container(s) and 2 launch(es)" dry.txt'
+"$workz" clean -d . --keep 1 > clean.txt
+check "clean --keep keeps the newest launches and one that holds a recorded attempt" '[ "$(ls .workz/launches | wc -l)" = 2 ] && [ -d ".workz/launches/$first" ] && grep -q "kept 1 older launch" clean.txt && "$workz" explain wf.toml b | grep -q "is reused"'
+{ header clean; rule slow '[]' '["s.txt"]' '"sleep 2; touch s.txt"'; } > busy.toml
+"$workz" run busy.toml "${iso[@]}" -q > /dev/null &
+runner=$!
+for _ in $(seq 50); do [ "$(ls .workz/launches | wc -l)" = 3 ] && break; sleep 0.1; done
+"$workz" clean -d . --keep 1 > /dev/null 2> busy.txt
+rc=$?
+wait $runner
+check "clean refuses while a run holds the working directory" '[ $rc != 0 ] && grep -q "a run holds" busy.txt'
 
 new report-html
 { header report-html

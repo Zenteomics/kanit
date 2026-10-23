@@ -666,3 +666,28 @@ test "html report text is escaped" {
     try workz.html.escape(&out.writer, "a<b> & \"c\" 'd'");
     try testing.expectEqualStrings("a&lt;b&gt; &amp; &quot;c&quot; &#39;d&#39;", out.written());
 }
+
+test "removing a launch directory does not follow symlinks out of it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try s.dir("keep");
+    _ = try s.file("keep/precious", "data");
+    // `gone` is removed below; the scratch cleanup then finds nothing.
+    const gone = try std.fs.path.join(testing.allocator, &.{ s.path, "gone" });
+    defer testing.allocator.free(gone);
+    try sys.mkdir(testing.allocator, gone);
+    const inner = try std.fs.path.join(testing.allocator, &.{ gone, "sub" });
+    defer testing.allocator.free(inner);
+    try sys.mkdir(testing.allocator, inner);
+    try sys.writeFile(testing.allocator, try std.fs.path.join(a, &.{ inner, "f" }), "12345");
+    try s.link("gone/sub/to-keep", "../../keep");
+    const fd = try sys.openRead(testing.allocator, s.path);
+    defer sys.close(fd);
+    const bytes = try workz.clean.removeAt(fd, "gone", false, 0);
+    try testing.expect(bytes >= 5);
+    try testing.expect(!sys.exists(testing.allocator, gone));
+    try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "keep/precious" })));
+}

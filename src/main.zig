@@ -24,6 +24,7 @@ const usage =
     \\  status [WORKFLOW]        summary of the newest launch
     \\  verify WORKFLOW          check recorded outputs (--content hashes them)
     \\  report [WORKFLOW]        what each attempt of a launch used (--bottlenecks: what limited it)
+    \\  clean [WORKFLOW]         remove leftover containers (--keep N: and all but the newest N launches)
     \\  version                  print the engine version
     \\
     \\common options:
@@ -49,6 +50,10 @@ const usage =
     \\  --launch ID              a launch other than the newest
     \\  --format tsv|json|html   attempt table, or a self-contained HTML page (default tsv)
     \\  --bottlenecks            critical path, waiting, request sizing, utilization
+    \\
+    \\clean options:
+    \\  --keep N                 keep the newest N launches and those holding a recorded attempt
+    \\  --dry-run                show what would be removed
     \\
     \\watch options:
     \\  --once                   print one view and exit
@@ -91,7 +96,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -315,6 +320,41 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
+}
+
+const CleanExtra = struct {
+    opts: *workz.clean.Options,
+    fn option(self: CleanExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--dry-run")) {
+            self.opts.dry_run = true;
+            return 1;
+        }
+        if (std.mem.eql(u8, arg, "--keep")) {
+            const v = value orelse return badValue(arg);
+            self.opts.keep = std.fmt.parseInt(usize, v, 10) catch return badValue(arg);
+            return 2;
+        }
+        return 0;
+    }
+};
+
+fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    var opts: workz.clean.Options = .{};
+    if (try parseArgs(c.a, args, &common, CleanExtra{ .opts = &opts })) |e| return e;
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    var buf: [4096]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
+        error.Busy => return fail("a run holds {s}/.workz/lock; clean after it ends", .{root}),
+        else => return err,
+    };
+    const verb = if (opts.dry_run) "would remove" else "removed";
+    try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
+    if (r.kept_for_records > 0) try w.interface.print("; kept {d} older launch(es) that hold recorded attempts", .{r.kept_for_records});
+    try w.interface.writeAll("\n");
+    try w.interface.flush();
+    return .ok;
 }
 
 const WatchExtra = struct {
