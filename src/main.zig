@@ -43,7 +43,7 @@ const usage =
     \\  --grace SECONDS          wait before killing a stopped task (default 10)
     \\  --slice NAME             place the run's scope in this systemd slice (NAME.slice)
     \\  --no-isolation           no network namespace and no cgroup limits
-    \\  -q, --quiet              no progress lines on stderr
+    \\  -q, --quiet              no progress lines on stderr; failures still print
     \\
     \\report options:
     \\  --launch ID              a launch other than the newest
