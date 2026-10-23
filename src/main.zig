@@ -63,6 +63,9 @@ const usage =
     \\  --keep N                 keep the newest N launches and those holding a recorded attempt
     \\  --dry-run                show what would be removed
     \\
+    \\status options:
+    \\  --history [N]            one line for each of the last N launches (default 10)
+    \\
     \\watch options:
     \\  --once                   print one view and exit
     \\  --interval MS            refresh interval (default 1000)
@@ -444,7 +447,17 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
 const WatchExtra = struct {
     once: *bool,
     interval: *u64,
+    history: ?*?usize = null,
     fn option(self: WatchExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (self.history) |h| if (std.mem.eql(u8, arg, "--history")) {
+            // An optional count follows.
+            if (value) |v| if (std.fmt.parseInt(usize, v, 10)) |n| {
+                h.* = n;
+                return 2;
+            } else |_| {};
+            h.* = 10;
+            return 1;
+        };
         if (std.mem.eql(u8, arg, "--once")) {
             self.once.* = true;
             return 1;
@@ -467,8 +480,16 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     var common: Common = .{};
     var once = summary;
     var interval: u64 = 1000;
-    if (try parseArgs(c.a, args, &common, WatchExtra{ .once = &once, .interval = &interval })) |e| return e;
+    var history: ?usize = null;
+    if (try parseArgs(c.a, args, &common, WatchExtra{ .once = &once, .interval = &interval, .history = if (summary) &history else null })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
+    if (history) |n| {
+        var buf: [16384]u8 = undefined;
+        var w = std.Io.File.stdout().writer(c.io, &buf);
+        try monitor.history(c.gpa, &w.interface, root, n);
+        try w.interface.flush();
+        return .ok;
+    }
     const ok = if (summary) try monitor.status(c.gpa, c.io, root) else try monitor.watch(c.gpa, c.io, root, once, @max(interval, 100));
     return if (ok) .ok else .failed;
 }

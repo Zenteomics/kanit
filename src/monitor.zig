@@ -8,6 +8,7 @@ const sys = @import("sys.zig");
 const records = @import("records.zig");
 const cgroup = @import("cgroup.zig");
 const tui = @import("tui.zig");
+const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Status = enum {
@@ -388,6 +389,45 @@ pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_
         if (once or tracker.finished) return true;
         const ts: linux.timespec = .{ .sec = @intCast(interval_ms / 1000), .nsec = @intCast((interval_ms % 1000) * std.time.ns_per_ms) };
         _ = linux.nanosleep(&ts, null);
+    }
+}
+
+/// One line per launch, newest first, for the last `n`: start, status,
+/// elapsed time, counts and the error of a failed launch.
+pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const rec = try records.recordsDir(a, root);
+    const names = try clean.launchNames(gpa, a, rec);
+    try w.writeAll("LAUNCH                          STATUS        ELAPSED   DONE  FAILED  OTHER\n");
+    var shown: usize = 0;
+    var i = names.len;
+    while (i > 0 and shown < n) : (shown += 1) {
+        i -= 1;
+        const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
+        const text = sys.readFile(gpa, path, 1 << 20) catch {
+            try w.print("{s:<31} {s:<13}\n", .{ names[i], "running?" });
+            continue;
+        };
+        defer gpa.free(text);
+        const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch continue;
+        const counts = if (v.object.get("counts")) |c| c else std.json.Value{ .null = {} };
+        const cnt = struct {
+            fn of(c: std.json.Value, k: []const u8) u64 {
+                return if (c == .object) (if (c.object.get(k)) |x| (if (x == .integer and x.integer > 0) @intCast(x.integer) else 0) else 0) else 0;
+            }
+        }.of;
+        const done = cnt(counts, "completed") + cnt(counts, "reused");
+        const bad = cnt(counts, "failed") + cnt(counts, "blocked");
+        const other = cnt(counts, "cancelled") + cnt(counts, "not_started");
+        const elapsed = float(v, "elapsed_s") orelse 0;
+        var dur: [16]u8 = undefined;
+        var dw: std.Io.Writer = .fixed(&dur);
+        try duration(&dw, @intFromFloat(elapsed * 1e9));
+        try w.print("{s:<31} {s:<13} {s} {d:>5} {d:>7} {d:>6}", .{ names[i], str(v, "status") orelse "?", dw.buffered(), done, bad, other });
+        if (str(v, "error")) |e| try w.print("  {s}", .{e[0..@min(e.len, 100)]});
+        try w.writeAll("\n");
     }
 }
 

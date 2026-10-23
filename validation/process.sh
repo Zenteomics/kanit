@@ -651,6 +651,9 @@ timeout 10 "$workz" logs -d . slow --stdout --follow > follow.txt
 rc=$?
 wait $runner
 check "logs --follow streams a running attempt and returns when it ends" '[ $rc = 0 ] && [ "$(grep -c tick- follow.txt)" = 3 ]'
+"$workz" status -d . --history > hist.txt
+"$workz" status -d . --history 1 > hist1.txt
+check "status --history lists recent launches, newest first" '[ "$(wc -l < hist.txt)" = 3 ] && [ "$(wc -l < hist1.txt)" = 2 ] && sed -n 2p hist.txt | grep -q "completed .* 1 "'
 
 new clean
 { header clean
