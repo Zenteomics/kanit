@@ -61,11 +61,11 @@ pub const Limits = struct {
     oom_group: bool = false,
 };
 
-/// Creates `<root>/<name>` with the given limits and swap disabled.
+/// Creates `<root>/<name>` with the given limits. Swap needs no setting:
+/// the run's scope has `memory.swap.max` 0, which bounds every group below.
 pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits: Limits) ![]const u8 {
     const path = try std.fs.path.join(a, &.{ tree.root, name });
     try sys.mkdir(gpa, path);
-    try set(gpa, path, "memory.swap.max", "0");
     if (limits.memory_bytes) |m| {
         var buf: [32]u8 = undefined;
         try set(gpa, path, "memory.max", try std.fmt.bufPrint(&buf, "{d}", .{m}));

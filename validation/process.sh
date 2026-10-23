@@ -418,6 +418,10 @@ new oom
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "a task above its memory request is OOM-killed and reported" 'grep -q "out of memory: could not stay within its 64 MiB request" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
 check "an OOM kill ends the whole task, its shell included" 'jq -e ".signal == 9 and .exit_code == null" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+# Tasks never swap: the run's scope allows no swap, which bounds every task below it.
+{ header oom; rule swap '[]' '["s.txt"]' '"cg=$(sed -n \"s/^0:://p\" /proc/self/cgroup); cat /sys/fs/cgroup${cg%/*}/memory.swap.max > s.txt"'; } > swap.toml
+"$workz" run swap.toml "${iso[@]}" -q > swap.json
+check "the run's scope allows tasks no swap" '[ "$(cat s.txt)" = 0 ]'
 
 new interrupt
 { header interrupt
