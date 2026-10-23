@@ -31,6 +31,15 @@ alive() { [ -d "/proc/$1" ] && ! grep -q '^State:.*Z' "/proc/$1/status" 2>/dev/n
 
 iso=(--max-threads 4 --max-memory 2G)
 
+# Container and service checks need rootless Podman with these local images
+# (workz never pulls); the terminal checks need tmux. Missing ones are skipped.
+img=community.wave.seqera.io/library/coreutils_grep_gzip_lbzip2_pruned:838ba80435a629f8
+img2=community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57
+star=community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4
+skipped=0
+skip() { skipped=$((skipped + 1)); printf 'skip  %s\n' "$1"; }
+have_images() { command -v podman > /dev/null && podman image exists "$@" 2> /dev/null; }
+
 # ---------------------------------------------------------------- reuse
 export TZ=UTC LANG=C.UTF-8
 new reuse
@@ -129,8 +138,7 @@ cp up.txt up.copy && mv up.copy up.txt
 check "a cutoff output copied back with the same bytes keeps everything reused" '[ "$(status_of c8.json reused)" = 4 ]'
 
 # ---------------------------------------------------------------- container rules
-img=community.wave.seqera.io/library/coreutils_grep_gzip_lbzip2_pruned:838ba80435a629f8
-img2=community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57
+if have_images "$img" && have_images "$img2"; then
 leftovers() { podman ps --all --quiet --filter "label=workz.workdir=$PWD" | wc -l; }
 # Removes only the temporary name: `podman untag NAME` alone would remove
 # every name of the image NAME points to.
@@ -252,8 +260,8 @@ sed -i 's/echo loaded/echo loaded again/' wf.toml
 "$workz" plan wf.toml > plan.txt
 check "a changed service command reruns the rules that join it" 'grep -q "run   u1  (command changed)" plan.txt && grep -q "run   u2  (command changed)" plan.txt'
 
+if have_images "$star"; then
 new service-star
-star=community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4
 awk 'BEGIN { srand(7); printf ">chr1\n"; for (i = 0; i < 2000000; i++) { g = g substr("ACGT", int(rand() * 4) + 1, 1); if (i % 80 == 79) { print g; s = s g; g = "" } }
   for (r = 0; r < 2; r++) { f = "r" r ".fq"; for (k = 0; k < 20000; k++) { p = int(rand() * (length(s) - 100)) + 1; printf "@r%d\n%s\n+\n%s\n", k, substr(s, p, 100), sprintf("%100s", "") > f } } }' > genome.fa
 sed -i '/^+$/{n;s/ /I/g}' r0.fq r1.fq
@@ -274,6 +282,8 @@ timeout 120 "$workz" run wf.toml "${iso[@]}" -q > s.json
 check "STAR aligns against a genome its service loaded once, with the same alignments" '[ "$(status_of s.json completed)" = 5 ] && [ "$(loads)" = 1 ] && grep -q "Found genome in shared memory" shared/0/Log.out && cmp -s <(grep -v "^@" shared/0/Aligned.out.sam) <(grep -v "^@" own/0/Aligned.out.sam) && cmp -s <(grep -v "^@" shared/1/Aligned.out.sam) <(grep -v "^@" own/1/Aligned.out.sam)'
 svc_peak=$(jq -r 'select(.event == "shared_released") | .memory_peak' "$(last_launch)/events.jsonl")
 check "the genome is charged to the service's cgroup" '[ "$svc_peak" -ge "$(stat -c %s genome/SA)" ] && [ "$(leftovers)" = 0 ]'
+
+else skip "STAR with a shared genome service (needs the image $star)"; fi
 
 new service-gap
 { header service-gap
@@ -354,6 +364,8 @@ check "a killed engine's service and container rules end with it" '[ ! -d "$run_
 sed -i 's/sleep 60; //' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "the next launch removes their containers and runs" '[ "$(status_of s2.json completed)" = 1 ] && [ "$(leftovers)" = 0 ]'
+
+else skip "container rules and shared services (needs rootless Podman with $img and $img2)"; fi
 
 # ---------------------------------------------------------------- failure policy
 new failure
@@ -595,6 +607,7 @@ new report-html
 "$workz" report -d . --format html > r.html
 check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html'
 
+if command -v tmux > /dev/null; then
 # Interactive watch on a terminal: a private tmux server gives it a real
 # terminal; the screen is read back with capture-pane.
 tm() { tmux -L "workz-check-$$" -f /dev/null "$@"; }
@@ -636,6 +649,7 @@ for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "SIGTERM leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
 tm kill-server 2> /dev/null
 rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"
+else skip "interactive watch (needs tmux)"; fi
 
 # ---------------------------------------------------------------- cases from the oxo-local acceptance programs
 new retry-evidence
@@ -751,5 +765,5 @@ for name in ordinary shared_inputs log_is_input log_hardlink relative_alias log_
 done
 
 echo
-echo "$pass passed, $failed failed"
+echo "$pass passed, $failed failed, $skipped skipped"
 [ $failed = 0 ]
