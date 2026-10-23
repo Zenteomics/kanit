@@ -691,3 +691,13 @@ test "removing a launch directory does not follow symlinks out of it" {
     try testing.expect(!sys.exists(testing.allocator, gone));
     try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "keep/precious" })));
 }
+
+test "a workflow error shows its source line, with a caret under a known column" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workflow.snippet(&out.writer, "a = 1\noutput = [\"a\" \"b\"]\n", 2, 15);
+    try testing.expectEqualStrings("  2 | output = [\"a\" \"b\"]\n    |               ^\n", out.written());
+    out.clearRetainingCapacity();
+    try workflow.snippet(&out.writer, "x\ny\n", 1, 0);
+    try testing.expectEqualStrings("  1 | x\n", out.written());
+}

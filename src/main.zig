@@ -173,6 +173,17 @@ fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
     };
 }
 
+/// Shows the source line of a rejected workflow on stderr.
+fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
+    if (problem.line == 0) return;
+    const source = sys.readFile(c.gpa, path, 64 << 20) catch return;
+    defer c.gpa.free(source);
+    var buf: [1024]u8 = undefined;
+    var w = std.Io.File.stderr().writer(c.io, &buf);
+    workflow.snippet(&w.interface, source, problem.line, problem.col) catch return;
+    w.interface.flush() catch {};
+}
+
 /// Loads, checks and selects; prints the reason and returns null when invalid.
 fn load(c: Ctx, common: *const Common) !?Loaded {
     const wpath = common.workflow orelse {
@@ -185,6 +196,7 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     var wf = workflow.load(c.gpa, wf_abs, root, &problem) catch |err| switch (err) {
         error.Invalid => {
             std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
+            showSnippet(c, wf_abs, problem);
             c.gpa.free(problem.message);
             return null;
         },
@@ -194,6 +206,7 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     var g = graph.build(c.gpa, &wf, &problem) catch |err| switch (err) {
         error.Cycle, error.Invalid => {
             std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
+            showSnippet(c, wf_abs, problem);
             c.gpa.free(problem.message);
             wf.deinit();
             return null;

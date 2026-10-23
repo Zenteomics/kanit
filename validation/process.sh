@@ -615,6 +615,11 @@ printf '[workflow]\nname = "v"\nversion = "1"\nformat_version = 2\n\n[[rules]]\n
 "$workz" validate future.toml 2> err.txt
 check "a newer format version is refused" 'grep -q "format_version 2 is not supported" err.txt'
 
+new snippet
+{ header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
+"$workz" validate wf.toml > /dev/null 2> err.txt
+check "a workflow error shows the offending line" 'grep -q "did you mean .memory." err.txt && grep -q "| memroy = \"1G\"" err.txt'
+
 # ---------------------------------------------------------------- monitoring
 new watch
 { header watch; rule w '[]' '["w.txt"]' '"echo working >&2; sleep 3; touch w.txt"'; } > wf.toml

@@ -97,6 +97,9 @@ pub const Workflow = struct {
 /// A rejected workflow: the message names the line when the source shows it.
 pub const Problem = struct {
     message: []u8 = &.{},
+    /// Where in the source, when known: 1-based line, and column or 0.
+    line: u32 = 0,
+    col: u32 = 0,
 
     pub fn set(self: *Problem, gpa: Allocator, comptime fmt: []const u8, args: anytype) error{ Invalid, OutOfMemory } {
         self.message = try std.fmt.allocPrint(gpa, fmt, args);
@@ -147,6 +150,7 @@ const Parser = struct {
         const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
         defer self.gpa.free(msg);
         const l = self.line(at);
+        self.problem.line = l;
         if (l > 0) return self.problem.set(self.gpa, "line {d}: {s}", .{ l, msg });
         return self.problem.set(self.gpa, "{s}", .{msg});
     }
@@ -219,6 +223,30 @@ fn contains(list: []const []const u8, key: []const u8) bool {
 }
 
 /// Allowed key within edit distance 3 of `key`, for hints.
+/// Writes line `line` of `source` under a gutter, with a caret under
+/// column `col` when it is known.
+pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void {
+    if (line == 0) return;
+    var it = std.mem.splitScalar(u8, source, '\n');
+    var n: u32 = 1;
+    while (it.next()) |text| : (n += 1) {
+        if (n != line) continue;
+        const shown = text[0..@min(text.len, 200)];
+        try w.print("  {d} | {s}\n", .{ n, shown });
+        if (col > 0 and col <= shown.len + 1) {
+            var gutter: [16]u8 = undefined;
+            const width = std.fmt.bufPrint(&gutter, "{d}", .{n}) catch return;
+            try w.writeAll("  ");
+            for (0..width.len) |_| try w.writeAll(" ");
+            try w.writeAll(" | ");
+            // Tabs keep their width so the caret lines up.
+            for (shown[0 .. col - 1]) |c| try w.writeAll(if (c == '\t') "\t" else " ");
+            try w.writeAll("^\n");
+        }
+        return;
+    }
+}
+
 pub fn closest(allowed: []const []const u8, key: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_d: usize = 4;
@@ -335,7 +363,11 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
     var info: toml.ErrorInfo = .{};
     const doc = toml.parseSliceWithSpans(gpa, source, &info, &spans) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
-        else => return problem.set(gpa, "line {d}, column {d}: {s}", .{ info.line, info.col, info.message() }),
+        else => {
+            problem.line = @intCast(info.line);
+            problem.col = @intCast(info.col);
+            return problem.set(gpa, "line {d}, column {d}: {s}", .{ info.line, info.col, info.message() });
+        },
     };
     defer toml.deinit(doc, gpa);
 
@@ -665,6 +697,8 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
     defer cache.deinit();
 
     for (wf.rules) |r| {
+        // Errors about this rule show its line.
+        problem.line = r.line;
         if ((try names.fetchPut(gpa, r.name, {})) != null) return problem.set(gpa, "line {d}: duplicate rule name '{s}'", .{ r.line, r.name });
         for (r.input) |in| if (!localPath(in)) return problem.set(gpa, "rule {s}: input '{s}' must be an explicit local path", .{ r.name, in });
         for (r.output, r.output_abs) |out, abs| {
@@ -716,6 +750,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
     }
     var side_inodes: std.AutoHashMapUnmanaged(Inode, []const u8) = .empty;
     defer side_inodes.deinit(gpa);
+    problem.line = 0;
     var it = side.iterator();
     while (it.next()) |e| {
         if (outputs.contains(e.key_ptr.*)) return problem.set(gpa, "rule {s}: a log or benchmark overlaps a declared output", .{e.value_ptr.*});
@@ -726,6 +761,8 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         }
     }
     for (wf.rules) |r| {
+        // Errors about this rule show its line.
+        problem.line = r.line;
         for (r.input_abs, r.input) |in, written| {
             if (side.get(in)) |w| return problem.set(gpa, "rule {s}: input '{s}' is the log or benchmark of rule {s}", .{ r.name, written, w });
             if (side_inodes.count() > 0) if (try cache.stat(in)) |id| {
@@ -740,6 +777,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             }
         }
     }
+    problem.line = 0;
     // Mapped files are measured at launch, so they cannot be produced by the
     // run; a service's files can (the graph checks its users' order).
     for (wf.shared) |s| {
