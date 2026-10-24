@@ -617,6 +617,14 @@ printf '[workflow]\nname = "v"\nversion = "1"\nformat_version = 2\n\n[[rules]]\n
 "$workz" validate future.toml 2> err.txt
 check "a newer format version is refused" 'grep -q "format_version 2 is not supported" err.txt'
 
+new init
+"$workz" init > init.txt
+mkdir data && seq 5 > data/reads.txt
+"$workz" init 2> again.txt
+rc=$?
+"$workz" run workflow.toml "${iso[@]}" -q > s.json
+check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 2 ] && grep -q "does not overwrite" again.txt && [ "$(status_of s.json completed)" = 2 ] && [ "$(cat out/report.txt)" = "reads: 5" ]'
+
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
 "$workz" validate wf.toml > /dev/null 2> err.txt

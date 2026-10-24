@@ -27,6 +27,7 @@ const usage =
     \\  report [WORKFLOW]        what each attempt of a launch used (--bottlenecks: what limited it)
     \\  logs [WORKFLOW] RULE     standard output and error of a rule's newest attempt
     \\  clean [WORKFLOW]         remove leftover containers (--keep N: and all but the newest N launches)
+    \\  init [FILE]              write a commented starter workflow (default workflow.toml)
     \\  version                  print the engine version
     \\
     \\common options:
@@ -108,7 +109,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -362,6 +363,17 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
+}
+
+const starter_workflow = @embedFile("templates/workflow.toml");
+
+fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
+    if (args.len > 1) return fail("init takes at most one file name", .{});
+    const path = if (args.len == 1) args[0] else "workflow.toml";
+    if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
+    try sys.writeFile(c.gpa, path, starter_workflow);
+    try out(c.io, "wrote {s}; edit it, then: workz validate {s}\n", .{ path, path });
+    return .ok;
 }
 
 const LogsExtra = struct {

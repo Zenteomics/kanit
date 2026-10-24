@@ -65,6 +65,7 @@ Each rule names its input files, its output files, one shell command and a resou
 | `watch`        | live view of a run          |
 | `logs RULE`    | a rule's newest output      |
 | `clean`        | remove leftovers            |
+| `init`         | write a starter workflow    |
 | `status`       | summary of the newest run   |
 | `verify`       | check recorded outputs      |
 

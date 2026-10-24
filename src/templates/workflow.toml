@@ -1,0 +1,53 @@
+# A workz workflow: an explicit graph of rules. Each rule names its inputs,
+# its outputs, one shell command and what it needs. A rule runs after the
+# rules that produce its inputs; `workz plan` shows what would run.
+#
+#   workz validate workflow.toml
+#   workz run workflow.toml
+#   workz watch
+
+[workflow]
+name = "example"
+version = "1"
+
+# At most this many rules of a kind run at once.
+[resource_groups.disk]
+max = 2
+
+# Large read-only inputs held once in memory for the rules that use them:
+# [shared.reference]
+# path = "/data/reference/index"
+
+[[rules]]
+name = "count"
+input = ["data/reads.txt"]
+output = ["out/count.txt"]
+shell = "mkdir -p out && wc -l < data/reads.txt > out/count.txt"
+log = "logs/count.log"
+
+[rules.resources]
+threads = 1
+memory = "256M"
+groups = { disk = 1 }
+
+[[rules]]
+name = "report"
+input = ["out/count.txt"]
+output = ["out/report.txt"]
+shell = "echo \"reads: $(cat out/count.txt)\" > out/report.txt"
+
+[rules.resources]
+memory = "64M"
+
+# A rule can run its command in a local container image (rootless Podman;
+# images are never pulled):
+# [[rules]]
+# name = "trim"
+# input = ["data/reads.fq.gz"]
+# output = ["out/trimmed.fq.gz"]
+# container = "community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57"
+# shell = "fastp -i data/reads.fq.gz -o out/trimmed.fq.gz"
+#
+# [rules.resources]
+# threads = 2
+# memory = "2G"
