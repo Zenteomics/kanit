@@ -380,7 +380,7 @@ pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_
     if (!once and tui.isTerminal(0) and tui.isTerminal(1)) return tui.run(gpa, &tracker, interval_ms);
     const tty = tui.isTerminal(1);
     var obuf: [16384]u8 = undefined;
-    var out = std.Io.File.stdout().writer(io, &obuf);
+    var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
         _ = try tracker.update();
         if (tty and !once) try out.interface.writeAll("\x1b[H\x1b[2J");

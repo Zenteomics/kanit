@@ -604,6 +604,8 @@ new formats
 printf '[workflow]\nname = "f"\nversion = "1"\n\n[[rules]]\nname = "x"\noutptu = ["x.txt"]\nshell = "true"\nmemory = "1M"\n' > typo.toml
 "$workz" validate typo.toml 2> err.txt
 check "an unknown key names its line and the closest key" 'grep -q "line 7: unknown key .outptu. in a rule; did you mean .output.?" err.txt'
+{ echo "written before"; "$workz" validate typo.toml; "$workz" version; } > shared.txt 2>&1
+check "output to a file other commands also write appends to it" '[ "$(head -1 shared.txt)" = "written before" ] && grep -q "unknown key .outptu." shared.txt && grep -q "^  7 | outptu" shared.txt && tail -1 shared.txt | grep -q "^workz "'
 { header cycle; rule p '["q.txt"]' '["p.txt"]' '"true"'; rule q '["p.txt"]' '["q.txt"]' '"true"'; } > cycle.toml
 "$workz" validate cycle.toml 2> err.txt
 check "a cycle is rejected" 'grep -q "cycle" err.txt'

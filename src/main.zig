@@ -116,7 +116,7 @@ pub fn main(init: std.process.Init) !u8 {
 
 fn out(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(io, &buf);
     try w.interface.print(fmt, args);
     try w.interface.flush();
 }
@@ -185,7 +185,7 @@ fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
     const source = sys.readFile(c.gpa, path, 64 << 20) catch return;
     defer c.gpa.free(source);
     var buf: [1024]u8 = undefined;
-    var w = std.Io.File.stderr().writer(c.io, &buf);
+    var w = std.Io.File.stderr().writerStreaming(c.io, &buf);
     workflow.snippet(&w.interface, source, problem.line, problem.col) catch return;
     w.interface.flush() catch {};
 }
@@ -240,7 +240,7 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
     defer l.deinit();
     if (dot) {
         var buf: [8192]u8 = undefined;
-        var w = std.Io.File.stdout().writer(c.io, &buf);
+        var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
         try graph.writeDot(&w.interface, &l.wf, &l.g, l.mask);
         try w.interface.flush();
         return .ok;
@@ -300,7 +300,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(&l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     if (summary) try plan.printSummary(&w.interface, &ctx, l.mask) else try plan.printPlan(&w.interface, &ctx, l.mask);
     try w.interface.flush();
     return .ok;
@@ -324,7 +324,7 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(&l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);
     try w.interface.flush();
     if (!found) return fail("unknown rule '{s}'", .{common.positional.items[0]});
@@ -360,7 +360,7 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
     var buf: [16384]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
@@ -394,7 +394,7 @@ fn cmdRules(c: Ctx, args: []const [:0]const u8) !Exit {
     var wf = workflow.load(c.gpa, try sys.absolute(c.a, try sys.cwd(c.a), common.workflow.?), root, &problem) catch return .failed;
     defer wf.deinit();
     var buf: [16384]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     for (wf.rules) |r| try w.interface.print("{s}\n", .{r.name});
     try w.interface.flush();
     return .ok;
@@ -446,7 +446,7 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     const dir = (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse return fail("no attempt of rule {s} recorded in {s}/.workz", .{ rule, root });
     var buf: [65536]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     try workz.logs.show(c.gpa, c.a, &w.interface, dir, opts);
     try w.interface.flush();
     return .ok;
@@ -474,7 +474,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     if (try parseArgs(c.a, args, &common, CleanExtra{ .opts = &opts })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     var buf: [4096]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return fail("a run holds {s}/.workz/lock; clean after it ends", .{root}),
         else => return err,
@@ -528,7 +528,7 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     if (history) |n| {
         var buf: [16384]u8 = undefined;
-        var w = std.Io.File.stdout().writer(c.io, &buf);
+        var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
         try monitor.history(c.gpa, &w.interface, root, n);
         try w.interface.flush();
         return .ok;
@@ -572,7 +572,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
     if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
     var buf: [65536]u8 = undefined;
-    var w = std.Io.File.stdout().writer(c.io, &buf);
+    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     if (bottlenecks) {
         try report.writeBottlenecks(c.gpa, c.a, &w.interface, dir);
     } else switch (format) {
