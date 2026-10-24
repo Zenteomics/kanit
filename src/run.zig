@@ -189,6 +189,8 @@ const Holder = struct {
     kill_at: ?i128 = null,
     /// Why the holder failed; rules that need it fail with this reason.
     failure: ?[]const u8 = null,
+    /// Starts that failed before ready and were retried.
+    failed_starts: u32 = 0,
     /// Its memory is counted against the budget: from its first user's
     /// admission until no rule left to run needs it.
     held: bool = false,
@@ -990,6 +992,15 @@ const Engine = struct {
                 try std.fmt.allocPrint(self.a, "exited with status {d} {s}: {s}", .{ c, when, last })
             else
                 try std.fmt.allocPrint(self.a, "killed by signal {d} {s}: {s}", .{ reaped.signal() orelse 0, when, last });
+        }
+        // A service that failed before it was ready starts again while it
+        // has retries left and rules still wait for it.
+        if (was != .ready and h.failed_starts < s.retries and h.users > 0 and !self.stopping) {
+            h.failed_starts += 1;
+            self.events.emit("shared_retry", .{ .name = s.name, .reason = why, .next_start = h.starts + 1 });
+            self.alert("restarting shared service {s}: {s}", .{ s.name, why });
+            try self.startHolder(hi);
+            return;
         }
         h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
         self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });

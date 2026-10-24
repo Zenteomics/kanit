@@ -702,6 +702,8 @@ test "a workflow error shows its source line, with a caret under a known column"
     try testing.expectEqualStrings("  1 | x\n", out.written());
 }
 
-test "service mounts need a service" {
+test "service retries and mounts need a service" {
+    try expectInvalid(head ++ "[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\nretries = 4\n", "retries must be between 0 and 3");
+    try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nretries = 1\n", "retries start a service again");
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nmounts = { \"a\" = \"/b\" }\n", "mounts place host files inside a service's image");
 }

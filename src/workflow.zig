@@ -56,6 +56,8 @@ pub const Shared = struct {
     memory_mib: ?u64 = null,
     /// Longest a service may take to become ready.
     timeout_s: ?u64 = null,
+    /// Starts after a failure before ready, before its users fail.
+    retries: u32 = 0,
     /// Host paths mounted read-only over paths in the service's image.
     mounts: []const ImageMount = &.{},
 
@@ -113,7 +115,7 @@ const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_group
 const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
-const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "mounts" };
+const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
 const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
@@ -486,6 +488,11 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 if (image == null) return p.failKey(&at, "timeout", "shared.{s}: timeout limits a service's loading, which needs a container", .{e.key_ptr.*});
                 break :blk parseDuration(text) orelse return p.failKey(&at, "timeout", "shared.{s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ e.key_ptr.*, text });
             } else null;
+            const retries: u32 = if (try p.int(s, "retries", &at, "shared")) |n| blk: {
+                if (image == null) return p.failKey(&at, "retries", "shared.{s}: retries start a service again, which needs a container", .{e.key_ptr.*});
+                if (n < 0 or n > 3) return p.failKey(&at, "retries", "shared.{s}: retries must be between 0 and 3", .{e.key_ptr.*});
+                break :blk @intCast(n);
+            } else 0;
             const svc_mounts = try p.imageMounts(s, &at, "shared", e.key_ptr.*, root);
             if (svc_mounts.len > 0 and image == null) return p.failKey(&at, "mounts", "shared.{s}: mounts place host files inside a service's image, which needs a container", .{e.key_ptr.*});
             try shared.append(arena, .{
@@ -496,6 +503,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 .command = command,
                 .memory_mib = mib,
                 .timeout_s = timeout_s,
+                .retries = retries,
                 .mounts = svc_mounts,
             });
         }

@@ -359,14 +359,15 @@ timeout 60 "$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json
 ms=$(( ($(date +%s%N) - t0) / 1000000 ))
 check "a service that is not ready within its timeout fails its users ($ms ms)" '[ "$(jq -r "select(.event == \"task_failed\") | .reason" "$(last_launch)/events.jsonl")" = "shared input slow could not be loaded: did not become ready within 1 s" ] && [ $ms -lt 8000 ] && [ "$(leftovers)" = 0 ]'
 
-new service-mounts
+new service-retry-start
 echo mounted-ok > flag.txt
-{ header service-mounts
-  service seg '"cat /etc/workz-flag >&2; ipcmk -M 1048576"' 64M | sed 's/^memory = "64M"$/&\nmounts = { "flag.txt" = "\/etc\/workz-flag" }/'
+{ header service-retry-start
+  service seg '"case $WORKZ_SERVICE_STOP in *-1.stop) echo first start fails >&2; exit 3 ;; esac; cat /etc/workz-flag >&2; ipcmk -M 1048576"' 64M | sed 's/^memory = "64M"$/&\nretries = 1\nmounts = { "flag.txt" = "\/etc\/workz-flag" }/'
   srule u '[]' '["u.txt"]' '"ipcs -m > u.txt"' seg
 } > wf.toml
 timeout 60 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> /dev/null
-check "a service mount places a host file in its image" '[ "$(status_of s.json completed)" = 1 ] && grep -q mounted-ok "$(last_launch)/shared/seg-1.stderr.log" && grep -q " 1048576 " u.txt'
+check "a service that fails before it is ready starts again within its retries" '[ "$(status_of s.json completed)" = 1 ] && [ "$(loads)" = 2 ] && jq -e "select(.event == \"shared_retry\")" "$(last_launch)/events.jsonl" > /dev/null && grep -q " 1048576 " u.txt'
+check "a service mount places a host file in its image" 'grep -q mounted-ok "$(last_launch)/shared/seg-2.stderr.log"'
 
 new service-interrupt
 { header service-interrupt
