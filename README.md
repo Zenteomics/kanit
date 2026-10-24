@@ -106,7 +106,7 @@ A shared entry with `container`, `command` and `memory` is a service. Before its
 - `path` may hold files that rules of the workflow produce, such as an index; each rule that joins the service must then depend on those rules. The service's image, command and path are part of its users' keys.
 - A rule can join one service; shell rules cannot join services.
 
-Ready rules start in priority order, then by the time they became ready, then by file order; every rule that fits the free CPU, memory, group and job capacity starts, so a rule waiting for room never holds back a smaller one.
+Ready rules start in priority order; among equal priorities, the rule heading the longest estimated chain of work first (each rule estimated by its last recorded wall time, else the median of its kind, else 1 s), then by the time they became ready, then by file order. Every rule that fits the free CPU, memory, group and job capacity starts, so a rule waiting for room never holds back a smaller one.
 
 ## Reuse
 

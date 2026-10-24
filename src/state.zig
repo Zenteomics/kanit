@@ -41,6 +41,9 @@ pub const Entry = struct {
     outputs: []const Output,
     attempt: []const u8,
     finished: []const u8,
+    /// Wall seconds of the recorded attempt; ranks ready rules by the work
+    /// that follows them. 0 when unknown.
+    wall_s: f64 = 0,
 };
 
 pub const ManifestEntry = struct { id: []const u8, sha256: []const u8 };

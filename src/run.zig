@@ -15,6 +15,7 @@ const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const container = @import("container.zig");
+const report = @import("report.zig");
 const Allocator = std.mem.Allocator;
 
 pub const version = @import("root.zig").version;
@@ -255,6 +256,8 @@ const Engine = struct {
     network: ?Network,
     /// The guard of a run without isolation.
     guard: ?Guard = null,
+    /// Critical-path rank per rule (computeRanks), empty until needed.
+    ranks: []const f64 = &.{},
     /// Podman, when the selected rules use containers.
     podman: ?[]const u8 = null,
     /// cgroup of the podman clients and conmon processes, when isolated.
@@ -438,6 +441,7 @@ const Engine = struct {
         var ready: std.ArrayList(usize) = .empty;
         defer ready.deinit(self.gpa);
         for (self.tasks, 0..) |t, i| if (t.status == .ready) try ready.append(self.gpa, i);
+        if (ready.items.len > 1 and self.ranks.len == 0) try self.computeRanks();
         std.mem.sort(usize, ready.items, self, readyBefore);
         for (ready.items) |i| {
             if (self.stopping) break;
@@ -477,10 +481,49 @@ const Engine = struct {
         }
     }
 
+    /// Rank of each rule: its estimated wall time plus the largest rank of
+    /// its consumers, so the rules heading the longest remaining chain rank
+    /// highest. Estimates are each rule's last recorded wall time, else the
+    /// median of its kind (the name without its sample part), else 1 s.
+    fn computeRanks(self: *Engine) !void {
+        const n = self.wf.rules.len;
+        const est = try self.a.alloc(f64, n);
+        var by_kind: std.StringHashMapUnmanaged(std.ArrayList(f64)) = .empty;
+        for (self.wf.rules, 0..) |r, i| {
+            est[i] = 0;
+            const e = self.st.data.rules.map.get(r.name) orelse continue;
+            if (e.wall_s <= 0) continue;
+            est[i] = e.wall_s;
+            const gop = try by_kind.getOrPut(self.a, report.pattern(r.name));
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
+            try gop.value_ptr.append(self.a, e.wall_s);
+        }
+        for (self.wf.rules, 0..) |r, i| if (est[i] == 0) {
+            est[i] = 1;
+            if (by_kind.get(report.pattern(r.name))) |list| {
+                std.mem.sort(f64, list.items, {}, std.sort.asc(f64));
+                est[i] = list.items[list.items.len / 2];
+            }
+        };
+        const ranks = try self.a.alloc(f64, n);
+        var k = self.g.order.len;
+        while (k > 0) {
+            k -= 1;
+            const i = self.g.order[k];
+            var after: f64 = 0;
+            for (self.g.children[i]) |c| after = @max(after, ranks[c]);
+            ranks[i] = est[i] + after;
+        }
+        self.ranks = ranks;
+    }
+
     fn readyBefore(self: *Engine, x: usize, y: usize) bool {
         const rx = self.rule(x);
         const ry = self.rule(y);
         if (rx.priority != ry.priority) return rx.priority > ry.priority;
+        // Among equal priorities, the rule with the longest estimated work
+        // after it first: the critical path starts as early as it can.
+        if (self.ranks.len > 0 and self.ranks[x] != self.ranks[y]) return self.ranks[x] > self.ranks[y];
         const sx = self.tasks[x].ready_seq;
         const sy = self.tasks[y].ready_seq;
         if (sx != sy) return sx < sy;
@@ -1089,6 +1132,7 @@ const Engine = struct {
                 .outputs = outputs.items,
                 .attempt = try sa.dupe(u8, t.dir),
                 .finished = try sa.dupe(u8, finished_text),
+                .wall_s = wall_s,
             });
             if (!self.st.data.envs.map.contains(k.env))
                 try self.st.data.envs.map.put(sa, try sa.dupe(u8, k.env), try sa.dupe(u8, self.env_text));

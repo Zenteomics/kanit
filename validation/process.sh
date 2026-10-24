@@ -559,6 +559,17 @@ new slice
 "$workz" run wf.toml "${iso[@]}" --slice workz-validation.slice -q > s.json
 check "--slice places the run in the named slice and the summary has the engine's cost" 'jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | grep -q "/workz-validation.slice/" && jq -e ".engine_cost.cpu_s > 0 and .engine_cost.max_rss_mib > 0" s.json > /dev/null'
 
+new critical-path
+{ header critical-path
+  for i in 1 2 3 4 5 6; do rule "short$i" '[]' "[\"s$i.txt\"]" "\"sleep 0.3; touch s$i.txt\""; done
+  rule c1 '[]' '["c1.txt"]' '"sleep 0.3; touch c1.txt"'
+  rule c2 '["c1.txt"]' '["c2.txt"]' '"sleep 0.3; touch c2.txt"'
+  rule c3 '["c2.txt"]' '["c3.txt"]' '"sleep 0.3; touch c3.txt"'
+} > wf.toml
+"$workz" run wf.toml --max-threads 2 --max-memory 1G -q > s.json
+first=$(jq -r 'select(.event == "task_started") | .rule' "$(last_launch)/events.jsonl" | head -2 | tr '\n' ' ')
+check "among equal priorities the head of the longest chain starts first ($first)" 'echo "$first" | grep -q "c1 "'
+
 # ---------------------------------------------------------------- inputs and formats
 new manifest
 echo data > ext.txt
