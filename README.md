@@ -69,6 +69,8 @@ Each rule names its input files, its output files, one shell command and a resou
 | `status`       | summary of the newest run   |
 | `verify`       | check recorded outputs      |
 
+Bash completion for commands, options and rule names: `source <(workz completion bash)`.
+
 - Select rules with `--target RULE` (repeatable); a target brings its dependencies.
 - `run` options: `--jobs`, `--max-threads`, `--max-memory`, `--keep-going`, `--retry`, `--timeout`, `--rerun`, `--rerun-rule RULE`, `--input-manifest FILE`, `--pass-env NAME`, `--grace SECONDS`, `--slice NAME`, `--no-isolation`, `--quiet`.
 - Exit status: 0 success, 1 a rule or check failed, 2 invalid command line or workflow, 130 interrupted.

@@ -28,6 +28,7 @@ const usage =
     \\  logs [WORKFLOW] RULE     standard output and error of a rule's newest attempt
     \\  clean [WORKFLOW]         remove leftover containers (--keep N: and all but the newest N launches)
     \\  init [FILE]              write a commented starter workflow (default workflow.toml)
+    \\  completion bash          print a bash completion script
     \\  version                  print the engine version
     \\
     \\common options:
@@ -109,7 +110,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -366,6 +367,7 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
 }
 
 const starter_workflow = @embedFile("templates/workflow.toml");
+const bash_completion = @embedFile("templates/completion.bash");
 
 fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
     if (args.len > 1) return fail("init takes at most one file name", .{});
@@ -373,6 +375,28 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     try sys.writeFile(c.gpa, path, starter_workflow);
     try out(c.io, "wrote {s}; edit it, then: workz validate {s}\n", .{ path, path });
+    return .ok;
+}
+
+fn cmdCompletion(c: Ctx, args: []const [:0]const u8) !Exit {
+    if (args.len != 1 or !std.mem.eql(u8, args[0], "bash")) return fail("completion supports: bash", .{});
+    try out(c.io, "{s}", .{bash_completion});
+    return .ok;
+}
+
+/// Internal, for completion: the rule names of a workflow, one per line.
+fn cmdRules(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    if (try parseArgs(c.a, args, &common, NoExtra{})) |e| return e;
+    if (common.workflow == null) common.workflow = "workflow.toml";
+    var problem: workflow.Problem = .{};
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    var wf = workflow.load(c.gpa, try sys.absolute(c.a, try sys.cwd(c.a), common.workflow.?), root, &problem) catch return .failed;
+    defer wf.deinit();
+    var buf: [16384]u8 = undefined;
+    var w = std.Io.File.stdout().writer(c.io, &buf);
+    for (wf.rules) |r| try w.interface.print("{s}\n", .{r.name});
+    try w.interface.flush();
     return .ok;
 }
 

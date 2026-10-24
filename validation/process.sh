@@ -624,6 +624,9 @@ mkdir data && seq 5 > data/reads.txt
 rc=$?
 "$workz" run workflow.toml "${iso[@]}" -q > s.json
 check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 2 ] && grep -q "does not overwrite" again.txt && [ "$(status_of s.json completed)" = 2 ] && [ "$(cat out/report.txt)" = "reads: 5" ]'
+words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run workflow.toml -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
+opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz plan --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+check "bash completion offers rule names and command options" '[ "$words" = "count report" ] && [ "$opts" = "--summary" ]'
 
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
