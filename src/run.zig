@@ -343,6 +343,12 @@ const Engine = struct {
         t.key = key.?;
         if (!self.opts.forced(r.name)) if (self.st.data.rules.map.get(r.name)) |e| {
             if (std.mem.eql(u8, e.key, key.?.key) and try self.outputsIntact(&e)) {
+                // A state from before environments were recorded gains this one.
+                if (!self.st.data.envs.map.contains(e.env)) {
+                    const sa = self.st.allocator();
+                    try self.st.data.envs.map.put(sa, try sa.dupe(u8, e.env), try sa.dupe(u8, self.env_text));
+                    self.dirty = true;
+                }
                 t.status = .reused;
                 self.finished += 1;
                 self.events.emit("task_reused", .{ .rule = r.name });
