@@ -790,6 +790,7 @@ const Engine = struct {
                 try std.fmt.allocPrint(self.a, "WORKZ_SERVICE_STOP={s}", .{fifo}),
             }),
             .service = true,
+            .image_mounts = s.mounts,
             .script = script,
         });
 

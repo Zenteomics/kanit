@@ -56,6 +56,8 @@ pub const Shared = struct {
     memory_mib: ?u64 = null,
     /// Longest a service may take to become ready.
     timeout_s: ?u64 = null,
+    /// Host paths mounted read-only over paths in the service's image.
+    mounts: []const ImageMount = &.{},
 
     pub fn isService(self: Shared) bool {
         return self.container != null;
@@ -111,7 +113,7 @@ const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_group
 const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
-const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout" };
+const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "mounts" };
 const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
@@ -206,6 +208,31 @@ const Parser = struct {
             else => return self.failKey(at, key, "{s}.{s} must be an array of strings", .{ where, key }),
         };
         return out;
+    }
+
+    /// `mounts = { "host path" = "/path/in/image" }` of a rule or service.
+    fn imageMounts(self: *Parser, table: *const toml.Table, at: []const toml.PathSegment, what: []const u8, name: []const u8, root: []const u8) ![]const ImageMount {
+        const mv = table.get("mounts") orelse return &.{};
+        const mt = switch (mv) {
+            .table => |tb| tb,
+            else => return self.failKey(at, "mounts", "{s} {s}: mounts must be a table of host path = path in the image", .{ what, name }),
+        };
+        var out: std.ArrayList(ImageMount) = .empty;
+        var mit = mt.iterator();
+        while (mit.next()) |me| {
+            const src = me.key_ptr.*;
+            const target = switch (me.value_ptr.*) {
+                .string => |s| s,
+                else => return self.failKey(at, "mounts", "{s} {s}: the image path for '{s}' must be a string", .{ what, name, src }),
+            };
+            // Podman's --volume syntax cannot carry ':' or ','.
+            if (!localPath(src) or std.mem.indexOfAny(u8, src, ":,") != null)
+                return self.failKey(at, "mounts", "{s} {s}: invalid mount source '{s}'", .{ what, name, src });
+            if (!std.fs.path.isAbsolute(target) or std.mem.eql(u8, target, "/") or std.mem.indexOfAny(u8, target, ":,") != null or hasParentComponent(target))
+                return self.failKey(at, "mounts", "{s} {s}: mount target '{s}' must be an absolute path in the image other than /, without ':' or ','", .{ what, name, target });
+            try out.append(self.arena, .{ .source = try self.arena.dupe(u8, src), .source_abs = try sys.absolute(self.arena, root, src), .target = try self.arena.dupe(u8, target) });
+        }
+        return out.items;
     }
 
     fn failKey(self: *Parser, at: []const toml.PathSegment, key: []const u8, comptime fmt: []const u8, args: anytype) error{ Invalid, OutOfMemory } {
@@ -459,6 +486,8 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 if (image == null) return p.failKey(&at, "timeout", "shared.{s}: timeout limits a service's loading, which needs a container", .{e.key_ptr.*});
                 break :blk parseDuration(text) orelse return p.failKey(&at, "timeout", "shared.{s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ e.key_ptr.*, text });
             } else null;
+            const svc_mounts = try p.imageMounts(s, &at, "shared", e.key_ptr.*, root);
+            if (svc_mounts.len > 0 and image == null) return p.failKey(&at, "mounts", "shared.{s}: mounts place host files inside a service's image, which needs a container", .{e.key_ptr.*});
             try shared.append(arena, .{
                 .name = try arena.dupe(u8, e.key_ptr.*),
                 .path = sp,
@@ -467,6 +496,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 .command = command,
                 .memory_mib = mib,
                 .timeout_s = timeout_s,
+                .mounts = svc_mounts,
             });
         }
     }
@@ -491,32 +521,16 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
         var input = try p.strings(r, "input", &at, name);
         const output = try p.strings(r, "output", &at, name);
-        var mounts: std.ArrayList(ImageMount) = .empty;
-        if (r.get("mounts")) |mv| {
-            const mt = switch (mv) {
-                .table => |tb| tb,
-                else => return p.failKey(&at, "mounts", "rule {s}: mounts must be a table of host path = path in the image", .{name}),
-            };
+        const mounts = try p.imageMounts(r, &at, "rule", name, root);
+        if (mounts.len > 0) {
+            // Each mount source is also an input of the rule.
             var extra: std.ArrayList([]const u8) = .empty;
             try extra.appendSlice(arena, input);
-            var mit = mt.iterator();
-            while (mit.next()) |me| {
-                const src = me.key_ptr.*;
-                const target = switch (me.value_ptr.*) {
-                    .string => |s| s,
-                    else => return p.failKey(&at, "mounts", "rule {s}: the image path for '{s}' must be a string", .{ name, src }),
-                };
-                // Podman's --volume syntax cannot carry ':' or ','.
-                if (!localPath(src) or std.mem.indexOfAny(u8, src, ":,") != null)
-                    return p.failKey(&at, "mounts", "rule {s}: invalid mount source '{s}'", .{ name, src });
-                if (!std.fs.path.isAbsolute(target) or std.mem.eql(u8, target, "/") or std.mem.indexOfAny(u8, target, ":,") != null or hasParentComponent(target))
-                    return p.failKey(&at, "mounts", "rule {s}: mount target '{s}' must be an absolute path in the image other than /, without ':' or ','", .{ name, target });
-                const s_abs = try sys.absolute(arena, root, src);
-                try mounts.append(arena, .{ .source = try arena.dupe(u8, src), .source_abs = s_abs, .target = try arena.dupe(u8, target) });
+            for (mounts) |m| {
                 const listed = for (extra.items) |in| {
-                    if (std.mem.eql(u8, in, src)) break true;
+                    if (std.mem.eql(u8, in, m.source)) break true;
                 } else false;
-                if (!listed) try extra.append(arena, try arena.dupe(u8, src));
+                if (!listed) try extra.append(arena, m.source);
             }
             input = extra.items;
         }
@@ -591,7 +605,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
             .container = try p.str(r, "container", &at, name),
-            .mounts = mounts.items,
+            .mounts = mounts,
             .groups = group_uses.items,
             .shared = shared_uses,
         };

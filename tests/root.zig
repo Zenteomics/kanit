@@ -701,3 +701,7 @@ test "a workflow error shows its source line, with a caret under a known column"
     try workflow.snippet(&out.writer, "x\ny\n", 1, 0);
     try testing.expectEqualStrings("  1 | x\n", out.written());
 }
+
+test "service mounts need a service" {
+    try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nmounts = { \"a\" = \"/b\" }\n", "mounts place host files inside a service's image");
+}

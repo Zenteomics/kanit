@@ -209,7 +209,10 @@ pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std
         for (r.shared) |s| if (wf.sharedIndex(s)) |si| {
             const svc = wf.shared[si];
             const simg = svc.container orelse continue;
-            const text = try std.fmt.allocPrint(a, "{s}\x00{s}\x00{s}", .{ images.get(simg) orelse simg, svc.command.?, svc.path_abs orelse "" });
+            var text_w: std.Io.Writer.Allocating = .init(a);
+            try text_w.writer.print("{s}\x00{s}\x00{s}", .{ images.get(simg) orelse simg, svc.command.?, svc.path_abs orelse "" });
+            for (svc.mounts) |m| try text_w.writer.print("\x00mount {s} {s}", .{ m.target, m.source_abs });
+            const text = text_w.written();
             try w.writer.print(" service {s} {s}", .{ svc.name, &sys.sha256Bytes(text) });
         };
         e.* = try w.toOwnedSlice();
