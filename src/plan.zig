@@ -123,6 +123,43 @@ pub const Context = struct {
     }
 };
 
+/// A reason without the rule or file it names, to group decisions:
+/// "producer X runs" is "a producer runs", "output missing: P" is
+/// "output missing", and so on.
+pub fn reasonClass(reason: []const u8) []const u8 {
+    if (std.mem.startsWith(u8, reason, "producer ")) return "a producer runs";
+    for ([_][]const u8{ "input missing", "output missing", "output changed" }) |p| if (std.mem.startsWith(u8, reason, p)) return p;
+    return reason;
+}
+
+/// Counts of the decisions by reason class, largest first.
+pub fn printSummary(w: *std.Io.Writer, ctx: *Context, mask: []const bool) !void {
+    const ds = try ctx.decideAll(mask);
+    var groups: std.StringArrayHashMapUnmanaged(struct { run: bool, n: usize }) = .empty;
+    for (ctx.g.order) |i| {
+        if (!mask[i]) continue;
+        const key = try std.fmt.allocPrint(ctx.a, "{s}\x00{s}", .{ if (ds[i].run) "run" else "reuse", reasonClass(ds[i].reason) });
+        const gop = try groups.getOrPut(ctx.a, key);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .run = ds[i].run, .n = 0 };
+        gop.value_ptr.n += 1;
+    }
+    const Sort = struct {
+        vals: []const @TypeOf(groups.values()[0]),
+        pub fn lessThan(s: @This(), x: usize, y: usize) bool {
+            return s.vals[x].n > s.vals[y].n;
+        }
+    };
+    groups.sort(Sort{ .vals = groups.values() });
+    var runs: usize = 0;
+    var reuse: usize = 0;
+    for (groups.keys(), groups.values()) |k, v| {
+        const reason = k[std.mem.indexOfScalar(u8, k, 0).? + 1 ..];
+        try w.print("{d:>6} {s:<5} {s}\n", .{ v.n, if (v.run) "run" else "reuse", reason });
+        if (v.run) runs += v.n else reuse += v.n;
+    }
+    try w.print("{d} to run, {d} to reuse\n", .{ runs, reuse });
+}
+
 pub fn printPlan(w: *std.Io.Writer, ctx: *Context, mask: []const bool) !void {
     const ds = try ctx.decideAll(mask);
     var runs: usize = 0;

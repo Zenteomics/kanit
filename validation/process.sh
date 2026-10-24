@@ -83,6 +83,8 @@ TZ=Asia/Tokyo "$workz" run wf.toml "${iso[@]}" -q > tz3.json
 check "a time zone change reruns every rule and an unchanged one reuses them" '[ "$(status_of tz1.json reused)" = 3 ] && [ "$(status_of tz2.json completed)" = 3 ] && [ "$(status_of tz3.json reused)" = 3 ]'
 TZ=Asia/Tokyo LANG=C "$workz" plan wf.toml > plan-lang.txt
 check "plan names the variable when the locale changes" 'grep -q "run   a  (environment changed: LANG)" plan-lang.txt && grep -q "run   c  (environment changed: LANG)" plan-lang.txt'
+TZ=Asia/Tokyo LANG=C "$workz" plan wf.toml --summary > plan-summary.txt
+check "plan --summary counts the decisions by reason" 'grep -q "^ *2 run   environment changed: LANG$" plan-summary.txt && grep -q "^ *1 run   a producer runs$" plan-summary.txt && grep -q "^3 to run, 0 to reuse$" plan-summary.txt'
 TZ=Asia/Tokyo LANG=C "$workz" explain wf.toml a > explain-lang.txt
 check "explain gives the old and new value" "grep -q \"    LANG: was '\$LANG', now 'C'\" explain-lang.txt"
 TZ=Asia/Tokyo PATH="/opt/workz-check/bin:$PATH" "$workz" explain wf.toml a > explain-path.txt

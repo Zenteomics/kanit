@@ -16,7 +16,8 @@ const usage =
     \\
     \\commands:
     \\  validate WORKFLOW        check the workflow file and graph
-    \\  plan WORKFLOW            show which rules would run or be reused (alias: dry-run)
+    \\  plan WORKFLOW            show which rules would run or be reused (alias: dry-run;
+    \\                           --summary: counts by reason)
     \\  explain WORKFLOW RULE    show why a rule would run (plan and explain accept --pass-env)
     \\  graph WORKFLOW           print the selected graph in DOT form
     \\  run WORKFLOW             run the selected rules
@@ -250,6 +251,7 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
 
 const PlanExtra = struct {
     rerun: *bool,
+    summary: ?*bool = null,
     pass: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
     a: std.mem.Allocator,
@@ -258,6 +260,10 @@ const PlanExtra = struct {
             try self.reruns.append(self.a, value orelse return badValue(arg));
             return 2;
         }
+        if (self.summary) |s| if (std.mem.eql(u8, arg, "--summary")) {
+            s.* = true;
+            return 1;
+        };
         if (std.mem.eql(u8, arg, "--rerun")) {
             self.rerun.* = true;
             return 1;
@@ -279,7 +285,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var rerun = false;
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
+    var summary = false;
+    if (try parseArgs(c.a, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     var st = try plan.loadState(c.gpa, l.wf.root, c.a);
@@ -292,7 +299,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     if (!try knownRules(&l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writer(c.io, &buf);
-    try plan.printPlan(&w.interface, &ctx, l.mask);
+    if (summary) try plan.printSummary(&w.interface, &ctx, l.mask) else try plan.printPlan(&w.interface, &ctx, l.mask);
     try w.interface.flush();
     return .ok;
 }
