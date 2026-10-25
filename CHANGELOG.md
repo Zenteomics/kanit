@@ -2,7 +2,7 @@
 
 Every user-visible change to workz, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the record files under `.workz/` and the command line; each such change is listed under **Upgrading**.
 
-## Unreleased
+## 0.3.0 - 2026-10-25
 
 Reports you can share and runs you can steer: an HTML report of a launch, launch comparisons and request suggestions, commands to stop, retry and inspect rules while a launch runs, per-rule work directories, and mounts for container images.
 
