@@ -185,6 +185,62 @@ pub fn pattern(name: []const u8) []const u8 {
     return name;
 }
 
+pub const Suggestion = struct {
+    kind: []const u8,
+    attempts: usize,
+    delegated: bool,
+    threads: f64,
+    threads_used: f64,
+    suggest_threads: f64,
+    memory_mib: f64,
+    peak_mib: f64,
+    suggest_mib: f64,
+};
+
+/// Request suggestions per kind of rule from completed attempts: memory
+/// from the largest peak plus a fifth in 64 MiB steps (the cgroup peak for
+/// rules with shared inputs or a container, else the process RSS), threads
+/// from the most cores an attempt used, rounded up and at most the request.
+/// Kinds whose work ran outside workz get none.
+pub fn suggestions(a: Allocator, rows: []const Attempt) ![]Suggestion {
+    var kinds: std.StringArrayHashMapUnmanaged(Suggestion) = .empty;
+    var basis_peak: std.StringHashMapUnmanaged(bool) = .empty;
+    var deleg: std.StringHashMapUnmanaged(usize) = .empty;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.status, "completed")) continue;
+        const k = pattern(r.rule);
+        const gop = try kinds.getOrPut(a, k);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .kind = k, .attempts = 0, .delegated = false, .threads = 0, .threads_used = 0, .suggest_threads = 0, .memory_mib = 0, .peak_mib = 0, .suggest_mib = 0 };
+        const s = gop.value_ptr;
+        s.attempts += 1;
+        s.threads = @max(s.threads, r.threads);
+        s.memory_mib = @max(s.memory_mib, r.request_mib);
+        if (r.wall_s > 0) s.threads_used = @max(s.threads_used, r.cpu_s / r.wall_s);
+        const peak_based = r.uses_shared or r.in_container;
+        if (peak_based) try basis_peak.put(a, k, true);
+        s.peak_mib = @max(s.peak_mib, if (peak_based) r.peak_mib orelse r.rss_mib else r.rss_mib);
+        const d = try deleg.getOrPut(a, k);
+        if (!d.found_existing) d.value_ptr.* = 0;
+        d.value_ptr.* += @intFromBool(r.delegated());
+    }
+    for (kinds.values()) |*s| {
+        s.delegated = (deleg.get(s.kind) orelse 0) * 2 > s.attempts;
+        if (s.delegated) continue;
+        s.suggest_mib = @max(@ceil(s.peak_mib * 1.2 / 64.0) * 64.0, 64);
+        s.suggest_threads = @min(@max(@ceil(s.threads_used - 0.05), 1), @max(s.threads, 1));
+    }
+    return kinds.values();
+}
+
+pub fn writeSuggestions(w: *std.Io.Writer, list: []const Suggestion, json: bool) !void {
+    if (json) {
+        try w.print("{f}\n", .{std.json.fmt(list, .{})});
+        return;
+    }
+    try w.writeAll("kind\tattempts\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tpeak_mib\tsuggest_mib\tdelegated\n");
+    for (list) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{d:.0}\t{}\n", .{ s.kind, s.attempts, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.peak_mib, s.suggest_mib, s.delegated });
+}
+
 const KindStats = struct { n: usize = 0, delegated: usize = 0, walls: std.ArrayList(f64) = .empty, peak: f64 = 0, cpu: f64 = 0 };
 
 fn kindStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanaged(KindStats) {

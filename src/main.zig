@@ -56,6 +56,7 @@ const usage =
     \\  --launch ID              a launch other than the newest
     \\  --format tsv|json|html   attempt table, or a self-contained HTML page (default tsv)
     \\  --bottlenecks            critical path, waiting, request sizing, utilization
+    \\  --suggest                suggested threads and memory per kind of rule (tsv or json)
     \\  --compare OTHER          compare with OTHER: a launch ID or directory, or a working
     \\                           directory (its newest launch)
     \\
@@ -546,7 +547,12 @@ const ReportExtra = struct {
     format: *ReportFormat,
     bottlenecks: *bool,
     compare: *?[]const u8,
+    suggest: *bool,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--suggest")) {
+            self.suggest.* = true;
+            return 1;
+        }
         if (std.mem.eql(u8, arg, "--compare")) {
             self.compare.* = value orelse return badValue(arg);
             return 2;
@@ -586,14 +592,17 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var format: ReportFormat = .tsv;
     var bottlenecks = false;
     var compare: ?[]const u8 = null;
-    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare })) |e| return e;
+    var suggest = false;
+    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
     if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
     var buf: [65536]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    if (compare) |other| {
+    if (suggest) {
+        try report.writeSuggestions(&w.interface, try report.suggestions(c.a, try report.attempts(c.gpa, c.a, dir)), format == .json);
+    } else if (compare) |other| {
         const base = (try resolveLaunch(c, rec, other)) orelse return fail("no launch found for {s}", .{other});
         try report.writeCompare(c.gpa, c.a, &w.interface, base, dir);
     } else if (bottlenecks) {

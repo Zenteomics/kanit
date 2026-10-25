@@ -203,6 +203,9 @@ sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
 "$workz" report -d . --bottlenecks > report.txt
 # KIND N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
 check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
+"$workz" report -d . --suggest > suggest.tsv
+"$workz" report -d . --suggest --format json > suggest.json
+check "report --suggest gives the same sizing as tsv and json" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 >= $7 && $7 > 300) }'"'"' suggest.tsv && jq -e ".[0].kind == \"big\" and .[0].suggest_mib >= .[0].peak_mib" suggest.json > /dev/null'
 
 new container-mounts
 echo "workz-check release" > os-release
