@@ -26,6 +26,7 @@ const usage =
     \\  verify WORKFLOW          check recorded outputs (--content hashes them)
     \\  report [WORKFLOW]        what each attempt of a launch used (--bottlenecks: what limited it)
     \\  logs [WORKFLOW] RULE     standard output and error of a rule's newest attempt
+    \\  control [WORKFLOW] CMD   steer the running launch: stop RULE, retry RULE, or cancel
     \\  clean [WORKFLOW]         remove leftover containers (--keep N: and all but the newest N launches)
     \\  init [FILE]              write a commented starter workflow (default workflow.toml)
     \\  completion bash          print a bash completion script
@@ -113,7 +114,7 @@ pub fn main(init: std.process.Init) !u8 {
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) blk: {
         try out(init.io, "{s}", .{usage});
         break :blk .ok;
-    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
+    } else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else fail("unknown command '{s}'; run 'workz help'", .{cmd});
     return @intFromEnum(code);
 }
 
@@ -367,6 +368,35 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
+}
+
+/// Appends a command to the running launch's control file; the engine
+/// applies it and records the result as a `control` event.
+fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    if (try parseArgs(c.a, args, &common, NoExtra{})) |e| return e;
+    // The first word is a workflow file only when it is not a command.
+    var words: std.ArrayList([]const u8) = .empty;
+    if (common.workflow) |wfp| {
+        if (std.mem.eql(u8, wfp, "stop") or std.mem.eql(u8, wfp, "retry") or std.mem.eql(u8, wfp, "cancel")) {
+            try words.append(c.a, wfp);
+            common.workflow = null;
+        }
+    }
+    try words.appendSlice(c.a, common.positional.items);
+    const ok = words.items.len >= 1 and ((std.mem.eql(u8, words.items[0], "cancel") and words.items.len == 1) or
+        ((std.mem.eql(u8, words.items[0], "stop") or std.mem.eql(u8, words.items[0], "retry")) and words.items.len == 2));
+    if (!ok) return fail("control needs: stop RULE, retry RULE, or cancel", .{});
+    const root = (try rootOf(c, &common)) orelse return .usage;
+    const rec = try workz.records.recordsDir(c.a, root);
+    const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
+    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return fail("the newest launch has ended: {s}", .{dir});
+    const line = if (words.items.len == 2) try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ words.items[0], words.items[1] }) else "cancel\n";
+    const fd = try sys.openWrite(c.gpa, try std.fs.path.join(c.a, &.{ dir, "control" }), .append);
+    defer sys.close(fd);
+    try sys.writeAll(fd, line);
+    try out(c.io, "sent: {s}", .{line});
+    return .ok;
 }
 
 const starter_workflow = @embedFile("templates/workflow.toml");

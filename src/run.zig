@@ -260,6 +260,11 @@ const Engine = struct {
     guard: ?Guard = null,
     /// Critical-path rank per rule (computeRanks), empty until needed.
     ranks: []const f64 = &.{},
+    /// The launch's `control` file, watched through inotify, and how much
+    /// of it has been read.
+    control_path: []const u8 = "",
+    control_watch: sys.Fd = -1,
+    control_offset: u64 = 0,
     /// Podman, when the selected rules use containers.
     podman: ?[]const u8 = null,
     /// cgroup of the podman clients and conmon processes, when isolated.
@@ -1236,6 +1241,89 @@ const Engine = struct {
         };
     }
 
+    // ---- control ----
+
+    /// Applies the lines appended to the control file: `stop RULE`,
+    /// `retry RULE` and `cancel` (see `workz control`).
+    fn readControl(self: *Engine) !void {
+        var drain: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
+        _ = linux.read(self.control_watch, &drain, drain.len);
+        const fd = sys.openRead(self.gpa, self.control_path) catch return;
+        defer sys.close(fd);
+        var buf: [4096]u8 = undefined;
+        const n = sys.check(linux.pread(fd, &buf, buf.len, @intCast(self.control_offset))) catch return;
+        // Only complete lines are applied; a partial one waits.
+        const end = (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse return) + 1;
+        self.control_offset += end;
+        var it = std.mem.splitScalar(u8, buf[0..end], '\n');
+        while (it.next()) |line| {
+            if (line.len == 0) continue;
+            var words = std.mem.tokenizeScalar(u8, line, ' ');
+            const cmd = words.next() orelse continue;
+            const name = words.next() orelse "";
+            const result = try self.control(cmd, name);
+            self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
+            self.alert("control {s} {s}: {s}", .{ cmd, name, result });
+        }
+    }
+
+    fn control(self: *Engine, cmd: []const u8, name: []const u8) ![]const u8 {
+        const eql = std.mem.eql;
+        if (eql(u8, cmd, "cancel")) {
+            if (self.stopping) return "already stopping";
+            self.interrupted = true;
+            self.interrupted_at = sys.monoNs();
+            self.beginStop();
+            return "stopping the launch";
+        }
+        const i = self.wf.ruleIndex(name) orelse return "no such rule";
+        const t = &self.tasks[i];
+        if (eql(u8, cmd, "stop")) switch (t.status) {
+            .running => {
+                if (t.cancelled) return "already stopping";
+                t.cancelled = true;
+                self.terminate(t, @as(i128, self.opts.grace_s) * std.time.ns_per_s);
+                self.events.emit("task_cancelling", .{ .rule = name });
+                return "stopping";
+            },
+            .pending, .ready, .staging => {
+                // A staged rule holds its reservation and its shared inputs.
+                if (t.status == .staging) {
+                    self.reserve(i, false);
+                    self.releaseShared(i);
+                }
+                try self.setWait(i, null);
+                t.status = .cancelled;
+                t.reason = "stopped on request";
+                self.finished += 1;
+                self.events.emit("task_failed", .{ .rule = name, .reason = t.reason });
+                return "cancelled before it started";
+            },
+            else => return "not running",
+        };
+        if (eql(u8, cmd, "retry")) {
+            if (self.stopping) return "the launch is stopping";
+            if (t.status != .failed and t.status != .cancelled) return "not failed";
+            t.status = .pending;
+            t.reason = "";
+            t.cancelled = false;
+            t.max_attempts = t.attempts + 1;
+            self.finished -= 1;
+            // Rules blocked behind it may run again.
+            var queue: std.ArrayList(usize) = .empty;
+            defer queue.deinit(self.gpa);
+            try queue.append(self.gpa, i);
+            while (queue.pop()) |q| for (self.g.children[q]) |c| if (self.tasks[c].status == .blocked) {
+                self.tasks[c].status = .pending;
+                self.tasks[c].reason = "";
+                self.finished -= 1;
+                try queue.append(self.gpa, c);
+            };
+            return "retrying";
+        }
+        return "unknown command";
+    }
+
     // ---- stopping ----
 
     fn beginStop(self: *Engine) void {
@@ -1423,6 +1511,7 @@ const Engine = struct {
             defer fds.deinit(self.gpa);
             try fds.append(self.gpa, .{ .fd = self.sigfd, .events = linux.POLL.IN, .revents = 0 });
             for (self.holders) |h| if (h.st == .loading and h.pipe >= 0) try fds.append(self.gpa, .{ .fd = h.pipe, .events = linux.POLL.IN, .revents = 0 });
+            if (self.control_watch >= 0) try fds.append(self.gpa, .{ .fd = self.control_watch, .events = linux.POLL.IN, .revents = 0 });
             process.wait(fds.items, self.nextDeadline());
             const seen = process.readSignals(self.sigfd);
             if (process.has(seen, .INT) or process.has(seen, .TERM) or process.has(seen, .HUP)) {
@@ -1441,6 +1530,7 @@ const Engine = struct {
                 }
             }
             for (fds.items[1..]) |f| if (f.revents != 0) {
+                if (f.fd == self.control_watch) try self.readControl();
                 for (self.holders, 0..) |h, hi| if (h.pipe == f.fd) try self.holderReady(hi);
             };
             try self.reapAll();
@@ -1789,6 +1879,16 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         t.max_attempts = 1 + (wf.rules[i].retries orelse opts.retry);
     }
     engine.last_save_ns = sys.monoNs();
+    // The control file of this launch, watched for appended commands.
+    engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
+    sys.writeFile(gpa, engine.control_path, "") catch {};
+    if (sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK))) |ifd| {
+        const pz = try a.dupeZ(u8, engine.control_path);
+        if (sys.check(linux.inotify_add_watch(@intCast(ifd), pz, linux.IN.MODIFY))) |_| {
+            engine.control_watch = @intCast(ifd);
+        } else |_| sys.close(@intCast(ifd));
+    } else |_| {}
+    defer if (engine.control_watch >= 0) sys.close(engine.control_watch);
     engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
     engine.last_sample_ns = engine.last_save_ns;
     if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);

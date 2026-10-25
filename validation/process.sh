@@ -709,6 +709,26 @@ check "logs --follow streams a running attempt and returns when it ends" '[ $rc 
 "$workz" status -d . --history 1 > hist1.txt
 check "status --history lists recent launches, newest first" '[ "$(wc -l < hist.txt)" = 3 ] && [ "$(wc -l < hist1.txt)" = 2 ] && sed -n 2p hist.txt | grep -q "completed .* 1 "'
 
+new control
+{ header control
+  rule slow '[]' '["s.txt"]' '"sleep 30; touch s.txt"'
+  rule after '["s.txt"]' '["a.txt"]' '"touch a.txt"'
+  rule bad '[]' '["b.txt"]' '"[ -f fixed ] && touch b.txt"'
+  rule b2 '["b.txt"]' '["b2.txt"]' '"touch b2.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -k --grace 1 -q > s.json 2> /dev/null &
+runner=$!
+for _ in $(seq 50); do jq -e 'select(.event == "task_failed" or (.event == "task_finished" and .status == "failed"))' .workz/launches/*/events.jsonl > /dev/null 2>&1 && break; sleep 0.1; done
+touch fixed
+"$workz" control -d . retry bad > /dev/null
+for _ in $(seq 50); do [ -f b2.txt ] && break; sleep 0.1; done
+"$workz" control -d . stop slow > /dev/null
+wait $runner
+check "control retries a failed rule with its blocked consumers and stops a running one" '[ -f b2.txt ] && [ "$(status_of s.json completed)" = 2 ] && [ "$(status_of s.json cancelled)" = 1 ] && [ "$(status_of s.json blocked)" = 1 ] && [ "$(jq -r "select(.event == \"control\") | .result" "$(last_launch)/events.jsonl" | tr "\n" " ")" = "retrying stopping " ]'
+"$workz" control -d . cancel 2> ended.txt
+rc=$?
+check "control refuses a launch that has ended" '[ $rc != 0 ] && grep -q "has ended" ended.txt'
+
 new clean
 { header clean
   rule a '[]' '["a.txt"]' '"date +%s%N > a.txt"'

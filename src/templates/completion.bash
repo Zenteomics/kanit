@@ -6,7 +6,7 @@ _workz() {
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
     if [ "$COMP_CWORD" = 1 ]; then
-        COMPREPLY=($(compgen -W "validate plan dry-run explain graph run watch status verify report logs clean init completion version" -- "$cur"))
+        COMPREPLY=($(compgen -W "validate plan dry-run explain graph run watch status verify report logs clean control init completion version" -- "$cur"))
         return
     fi
     # The workflow file named so far, for rule names.
