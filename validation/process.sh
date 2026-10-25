@@ -579,6 +579,10 @@ new critical-path
 "$workz" run wf.toml --max-threads 2 --max-memory 1G -q > s.json
 first=$(jq -r 'select(.event == "task_started") | .rule' "$(last_launch)/events.jsonl" | head -2 | tr '\n' ' ')
 check "among equal priorities the head of the longest chain starts first ($first)" 'echo "$first" | grep -q "c1 "'
+base=$(basename "$(last_launch)")
+"$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun -q > s2.json
+"$workz" report -d . --compare "$base" > compare.txt
+check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
 
 # ---------------------------------------------------------------- inputs and formats
 new manifest

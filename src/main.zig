@@ -56,6 +56,8 @@ const usage =
     \\  --launch ID              a launch other than the newest
     \\  --format tsv|json|html   attempt table, or a self-contained HTML page (default tsv)
     \\  --bottlenecks            critical path, waiting, request sizing, utilization
+    \\  --compare OTHER          compare with OTHER: a launch ID or directory, or a working
+    \\                           directory (its newest launch)
     \\
     \\logs options:
     \\  --launch ID, --attempt N an earlier launch or attempt
@@ -543,7 +545,12 @@ const ReportExtra = struct {
     launch: *?[]const u8,
     format: *ReportFormat,
     bottlenecks: *bool,
+    compare: *?[]const u8,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--compare")) {
+            self.compare.* = value orelse return badValue(arg);
+            return 2;
+        }
         if (std.mem.eql(u8, arg, "--bottlenecks")) {
             self.bottlenecks.* = true;
             return 1;
@@ -561,19 +568,35 @@ const ReportExtra = struct {
     }
 };
 
+/// A launch named by ID (in `rec`), by its directory, or by a working
+/// directory, meaning its newest launch.
+fn resolveLaunch(c: Ctx, rec: []const u8, name: []const u8) !?[]const u8 {
+    if (std.mem.indexOfScalar(u8, name, '/') == null) {
+        const dir = try std.fs.path.join(c.a, &.{ rec, "launches", name });
+        return if (sys.exists(c.gpa, dir)) dir else null;
+    }
+    const path = (try sys.realpath(c.a, name)) orelse return null;
+    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ path, "events.jsonl" }))) return path;
+    return workz.records.latestLaunch(c.gpa, c.a, try workz.records.recordsDir(c.a, path));
+}
+
 fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var launch: ?[]const u8 = null;
     var format: ReportFormat = .tsv;
     var bottlenecks = false;
-    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks })) |e| return e;
+    var compare: ?[]const u8 = null;
+    if (try parseArgs(c.a, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return fail("no launch recorded in {s}", .{rec});
     if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
     var buf: [65536]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    if (bottlenecks) {
+    if (compare) |other| {
+        const base = (try resolveLaunch(c, rec, other)) orelse return fail("no launch found for {s}", .{other});
+        try report.writeCompare(c.gpa, c.a, &w.interface, base, dir);
+    } else if (bottlenecks) {
         try report.writeBottlenecks(c.gpa, c.a, &w.interface, dir);
     } else switch (format) {
         .html => try workz.html.write(c.gpa, c.a, &w.interface, dir),

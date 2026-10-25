@@ -185,6 +185,77 @@ pub fn pattern(name: []const u8) []const u8 {
     return name;
 }
 
+const KindStats = struct { n: usize = 0, delegated: usize = 0, walls: std.ArrayList(f64) = .empty, peak: f64 = 0, cpu: f64 = 0 };
+
+fn kindStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanaged(KindStats) {
+    var kinds: std.StringArrayHashMapUnmanaged(KindStats) = .empty;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.status, "completed")) continue;
+        const gop = try kinds.getOrPut(a, pattern(r.rule));
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        const k = gop.value_ptr;
+        k.n += 1;
+        k.delegated += @intFromBool(r.delegated());
+        try k.walls.append(a, r.wall_s);
+        k.peak = @max(k.peak, r.peak_mib orelse r.rss_mib);
+        k.cpu += r.cpu_s;
+    }
+    for (kinds.values()) |*k| std.mem.sort(f64, k.walls.items, {}, std.sort.asc(f64));
+    return kinds;
+}
+
+fn median(xs: []const f64) f64 {
+    if (xs.len == 0) return 0;
+    const m = xs.len / 2;
+    return if (xs.len % 2 == 1) xs[m] else (xs[m - 1] + xs[m]) / 2;
+}
+
+fn change(w: *std.Io.Writer, was: f64, now: f64) !void {
+    if (was <= 0) return w.writeAll("       -");
+    try w.print(" {d:>6.0}%", .{(now - was) / was * 100});
+}
+
+/// Compares launch `now_dir` with the baseline `was_dir`: session totals,
+/// then per kind of rule the completed attempts, median wall time, largest
+/// peak memory and total CPU time of each, with the change.
+pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8) !void {
+    const was_rows = try attempts(gpa, a, was_dir);
+    const now_rows = try attempts(gpa, a, now_dir);
+    const was_s = summaryElapsed(gpa, a, was_dir) orelse 0;
+    const now_s = summaryElapsed(gpa, a, now_dir) orelse 0;
+    var was_task: f64 = 0;
+    var now_task: f64 = 0;
+    for (was_rows) |r| was_task += r.wall_s * r.threads;
+    for (now_rows) |r| now_task += r.wall_s * r.threads;
+    try w.print("baseline {s}\nlaunch   {s}\n\n", .{ was_dir, now_dir });
+    try w.writeAll("                          BASELINE     LAUNCH   CHANGE\n");
+    try w.print("  elapsed s             {d:>10.1} {d:>10.1}", .{ was_s, now_s });
+    try change(w, was_s, now_s);
+    try w.print("\n  attempts              {d:>10} {d:>10}\n  reserved thread-s     {d:>10.0} {d:>10.0}", .{ was_rows.len, now_rows.len, was_task, now_task });
+    try change(w, was_task, now_task);
+    try w.writeAll("\n\nper kind of rule (completed attempts)\n");
+    try w.writeAll("  KIND                             N   WALL S (MEDIAN)          PEAK MiB (MAX)           CPU S (TOTAL)\n");
+    const was_k = try kindStats(a, was_rows);
+    const now_k = try kindStats(a, now_rows);
+    var names: std.StringArrayHashMapUnmanaged(void) = .empty;
+    for (was_k.keys()) |k| try names.put(a, k, {});
+    for (now_k.keys()) |k| try names.put(a, k, {});
+    for (names.keys()) |name| {
+        const x = was_k.get(name) orelse KindStats{};
+        const y = now_k.get(name) orelse KindStats{};
+        try w.print("  {s:<30} {d:>3}  {d:>7.2} {d:>7.2}", .{ name[0..@min(name.len, 30)], y.n, median(x.walls.items), median(y.walls.items) });
+        try change(w, median(x.walls.items), median(y.walls.items));
+        // Use measured outside workz's cgroups does not compare.
+        const outside = x.delegated * 2 > x.n or y.delegated * 2 > y.n;
+        try w.print("  {d:>7.0} {d:>7.0}", .{ x.peak, y.peak });
+        if (outside) try w.writeAll("       -") else try change(w, x.peak, y.peak);
+        try w.print("  {d:>7.1} {d:>7.1}", .{ x.cpu, y.cpu });
+        if (outside) try w.writeAll("       -") else try change(w, x.cpu, y.cpu);
+        if (outside) try w.print("  {s} ran its work outside workz", .{if (x.delegated * 2 > x.n) "baseline" else "launch"});
+        try w.writeAll("\n");
+    }
+}
+
 const Timing = struct { start: ?i128 = null, finish: ?i128 = null, waited: f64 = 0, status: []const u8 = "" };
 
 /// Prints what limited the launch: its critical path, waiting by reason,
