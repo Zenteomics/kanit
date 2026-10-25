@@ -422,10 +422,20 @@ pub fn computeKey(
     missing: *?[]const u8,
 ) !?Key {
     var k: Key = undefined;
+    // A workdir and links are part of the command; without them the text
+    // is the shell alone.
+    var shell: []const u8 = r.shell;
+    if (r.workdir != null or r.links.len > 0) {
+        var w: std.Io.Writer.Allocating = .init(a);
+        try w.writer.writeAll(r.shell);
+        if (r.workdir) |d| try w.writer.print("\x00workdir {s}", .{d});
+        for (r.links) |l| try w.writer.print("\x00link {s} {s}", .{ l.name, l.target_abs });
+        shell = w.written();
+    }
     if (extra.len == 0) {
-        k.command = try hex(a, r.shell);
+        k.command = try hex(a, shell);
     } else {
-        const text = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ r.shell, extra });
+        const text = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ shell, extra });
         k.command = try hex(a, text);
     }
     k.env = try hex(a, env_text);

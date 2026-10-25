@@ -90,6 +90,7 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
     for (extra_ro) |p| try ro.append(a, p);
     var rw: std.ArrayList([]const u8) = .empty;
     for (r.output_abs) |o| try rw.append(a, std.fs.path.dirname(o) orelse root);
+    if (r.workdir_abs) |d| try rw.append(a, d);
     const ro_min = try minimal(a, ro.items);
     const rw_min = try minimal(a, rw.items);
     var out: std.ArrayList(Mount) = .empty;
@@ -137,6 +138,8 @@ pub const RunSpec = struct {
     service: bool = false,
     /// Host paths mounted read-only over paths in the image.
     image_mounts: []const workflow.ImageMount = &.{},
+    /// Directory the command starts in, when not the working directory.
+    workdir: ?[]const u8 = null,
     /// Path of the script `/bin/sh` runs.
     script: []const u8,
 };
@@ -145,16 +148,16 @@ pub const RunSpec = struct {
 pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
     var v: std.ArrayList([]const u8) = .empty;
     try v.appendSlice(a, &.{
-        s.podman,                           "run",
-        "--rm",                             "--pull=never",
-        "--name",                           s.name,
-        "--label",                          try std.fmt.allocPrint(a, "workz.workdir={s}", .{s.root}),
-        "--label",                          try std.fmt.allocPrint(a, "workz.launch={s}", .{s.launch}),
-        "--network=none",                   "--cap-drop=ALL",
-        "--security-opt=no-new-privileges", "--security-opt=label=disable",
-        "--read-only",                      "--log-driver=none",
-        "--init",                           "--workdir",
-        if (s.service) "/tmp" else s.root,  "--entrypoint",
+        s.podman,                                           "run",
+        "--rm",                                             "--pull=never",
+        "--name",                                           s.name,
+        "--label",                                          try std.fmt.allocPrint(a, "workz.workdir={s}", .{s.root}),
+        "--label",                                          try std.fmt.allocPrint(a, "workz.launch={s}", .{s.launch}),
+        "--network=none",                                   "--cap-drop=ALL",
+        "--security-opt=no-new-privileges",                 "--security-opt=label=disable",
+        "--read-only",                                      "--log-driver=none",
+        "--init",                                           "--workdir",
+        if (s.service) "/tmp" else s.workdir orelse s.root, "--entrypoint",
         "/bin/sh",
     });
     if (s.service) try v.append(a, "--ipc=shareable");

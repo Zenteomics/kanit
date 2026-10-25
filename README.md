@@ -51,6 +51,7 @@ Each rule names its input files, its output files, one shell command and a resou
 - `shared` names large read-only inputs. Before their first user starts, a holder maps each file once, and memory admission counts its size once however many rules use it. A shared entry can instead be a service that holds something in memory for container rules (see below).
 - `retries` (0-3) and `timeout` (`90s`, `30m`, `2h`, `1h30m`) apply to each attempt.
 - `container = "IMAGE"` runs the rule's `shell` in that local image with rootless Podman (see below).
+- `workdir = "work/align_s1"` runs the command in that directory below the working directory, made before each attempt; inputs and outputs stay relative to the working directory. `links = { "reads.fq" = "data/s1.fq" }` makes symlinks there to some of the rule's inputs, replacing earlier links but never another file. Both are part of the rule's command.
 - `cutoff = true` hashes the rule's outputs after it succeeds. When the rule runs again and writes the same bytes, its consumers are reused instead of run again. Use it on rules whose outputs repeat byte for byte (trimmed reads, sorted alignments, call tables); reports with dates gain nothing from it.
 
 ## Commands

@@ -37,9 +37,18 @@ pub const Rule = struct {
     /// Host files or directories mounted read-only over paths in the image.
     /// Their sources are also inputs of the rule.
     mounts: []const ImageMount = &.{},
+    /// Directory the command runs in, inside the working directory, made
+    /// before each attempt; paths stay relative to the working directory.
+    workdir: ?[]const u8 = null,
+    workdir_abs: ?[]const u8 = null,
+    /// Symlinks made in the work directory before each attempt, each to one
+    /// of the rule's inputs.
+    links: []const Link = &.{},
     groups: []const GroupUse,
     shared: []const []const u8,
 };
+
+pub const Link = struct { name: []const u8, target: []const u8, target_abs: []const u8 };
 
 pub const ImageMount = struct { source: []const u8, source_abs: []const u8, target: []const u8 };
 
@@ -116,7 +125,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -591,6 +600,26 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             null;
         const log = try p.str(r, "log", &at, name);
         const bench = try p.str(r, "benchmark", &at, name);
+        const workdir = try p.str(r, "workdir", &at, name);
+        var links: std.ArrayList(Link) = .empty;
+        if (r.get("links")) |lv| {
+            const lt = switch (lv) {
+                .table => |tb| tb,
+                else => return p.failKey(&at, "links", "rule {s}: links must be a table of name = input path", .{name}),
+            };
+            if (workdir == null) return p.failKey(&at, "links", "rule {s}: links are made in the rule's workdir, which it does not set", .{name});
+            var lit = lt.iterator();
+            while (lit.next()) |le| {
+                const lname = le.key_ptr.*;
+                const target = switch (le.value_ptr.*) {
+                    .string => |s| s,
+                    else => return p.failKey(&at, "links", "rule {s}: the target of link '{s}' must be a string", .{ name, lname }),
+                };
+                if (lname.len == 0 or std.mem.indexOfScalar(u8, lname, '/') != null or std.mem.eql(u8, lname, ".") or std.mem.eql(u8, lname, ".."))
+                    return p.failKey(&at, "links", "rule {s}: link name '{s}' must be a plain file name", .{ name, lname });
+                try links.append(arena, .{ .name = try arena.dupe(u8, lname), .target = try arena.dupe(u8, target), .target_abs = try sys.absolute(arena, root, target) });
+            }
+        }
 
         rules[i] = .{
             .index = i,
@@ -614,6 +643,9 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
             .container = try p.str(r, "container", &at, name),
             .mounts = mounts,
+            .workdir = workdir,
+            .workdir_abs = if (workdir) |d| try sys.absolute(arena, root, d) else null,
+            .links = links.items,
             .groups = group_uses.items,
             .shared = shared_uses,
         };
@@ -757,6 +789,19 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             if (r.container == null) return problem.set(gpa, "rule {s} uses the shared service '{s}'; only container rules can join a service", .{ r.name, s });
         };
         if (services > 1) return problem.set(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
+        if (r.workdir) |d| {
+            if (!localPath(d) or std.fs.path.isAbsolute(d) or hasParentComponent(d) or !within(wf.root, r.workdir_abs.?) or std.mem.eql(u8, r.workdir_abs.?, wf.root))
+                return problem.set(gpa, "rule {s}: workdir '{s}' must be a directory below the working directory", .{ r.name, d });
+            const rel = r.workdir_abs.?[wf.root.len..];
+            if (std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz"))
+                return problem.set(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d });
+        }
+        for (r.links) |l| {
+            const is_input = for (r.input_abs) |in| {
+                if (std.mem.eql(u8, in, l.target_abs)) break true;
+            } else false;
+            if (!is_input) return problem.set(gpa, "rule {s}: link '{s}' points at '{s}', which is not an input of the rule", .{ r.name, l.name, l.target });
+        }
         if (r.mounts.len > 0 and r.container == null) return problem.set(gpa, "rule {s} has mounts but no container; mounts place host files inside an image", .{r.name});
         if (r.container) |img| if (img.len == 0 or std.mem.indexOfAny(u8, img, " \t\n") != null) return problem.set(gpa, "rule {s}: invalid container image '{s}'", .{ r.name, img });
         for (r.shared) |s| {

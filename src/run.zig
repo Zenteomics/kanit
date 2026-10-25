@@ -585,6 +585,7 @@ const Engine = struct {
 
         try self.journal.mark(self.gpa, "dispatch", r.name);
         if (self.st.data.rules.map.fetchSwapRemove(r.name) != null) self.dirty = true;
+        if (r.workdir_abs) |d| if (try self.prepareWorkdir(r, d)) |why| return self.failToStart(i, why);
 
         const out_fd = try sys.openWrite(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stdout.log", .{t.dir}), .truncate);
         defer sys.close(out_fd);
@@ -626,6 +627,7 @@ const Engine = struct {
                 }),
                 .ipc_service = self.serviceOf(r),
                 .image_mounts = r.mounts,
+                .workdir = r.workdir_abs,
                 .script = script,
             });
             t.container_name = name;
@@ -633,7 +635,7 @@ const Engine = struct {
                 .path = (try self.a.dupeZ(u8, self.podman.?)).ptr,
                 .argv = (try process.Vec.init(self.a, argv)).items.ptr,
                 .envp = self.envp.items.ptr,
-                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .cwd = (try self.a.dupeZ(u8, r.workdir_abs orelse self.wf.root)).ptr,
                 .stdin = self.devnull,
                 .stdout = out_fd,
                 .stderr = err_fd,
@@ -646,7 +648,7 @@ const Engine = struct {
                 .path = self.bash.ptr,
                 .argv = argv.items.ptr,
                 .envp = env.items.ptr,
-                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .cwd = (try self.a.dupeZ(u8, r.workdir_abs orelse self.wf.root)).ptr,
                 .stdin = self.devnull,
                 .stdout = out_fd,
                 .stderr = err_fd,
@@ -656,17 +658,7 @@ const Engine = struct {
             };
         }
         t.pid = process.spawn(&spec) catch |err| {
-            t.status = .failed;
-            t.reason = try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() });
-            if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
-            t.cg = null;
-            self.reserve(i, false);
-            self.releaseShared(i);
-            self.finished += 1;
-            self.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
-            self.alert("failed {s}: {s}", .{ r.name, t.reason });
-            if (!self.opts.keep_going) self.beginStop();
-            return;
+            return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
         };
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
@@ -683,6 +675,39 @@ const Engine = struct {
 
     /// A container's environment: the image's own, plus locale, time zone,
     /// passed names and the WORKZ_* variables; never the host PATH.
+    /// An attempt that could not start: it fails and gives back what it held.
+    fn failToStart(self: *Engine, i: usize, reason: []const u8) void {
+        const t = &self.tasks[i];
+        const r = self.rule(i);
+        t.status = .failed;
+        t.reason = reason;
+        if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+        t.cg = null;
+        self.reserve(i, false);
+        self.releaseShared(i);
+        self.finished += 1;
+        self.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
+        self.alert("failed {s}: {s}", .{ r.name, t.reason });
+        if (!self.opts.keep_going) self.beginStop();
+    }
+
+    /// Makes a rule's work directory and its links; the reason it cannot,
+    /// or null. A link replaces an earlier symlink, never another file.
+    fn prepareWorkdir(self: *Engine, r: *const workflow.Rule, dir: []const u8) !?[]const u8 {
+        sys.mkdirAll(self.gpa, dir) catch |err|
+            return try std.fmt.allocPrint(self.a, "cannot make workdir {s}: {s}", .{ r.workdir.?, @errorName(err) });
+        for (r.links) |l| {
+            const path = try std.fs.path.join(self.a, &.{ dir, l.name });
+            if (try sys.lstat(self.gpa, path)) |id| {
+                if (id.mode & 0o170000 != 0o120000) return try std.fmt.allocPrint(self.a, "link {s} in workdir {s} would replace a file that is not a link", .{ l.name, r.workdir.? });
+                _ = try sys.check(linux.unlinkat(linux.AT.FDCWD, try self.a.dupeZ(u8, path), 0));
+            }
+            _ = sys.check(linux.symlinkat(try self.a.dupeZ(u8, l.target_abs), linux.AT.FDCWD, try self.a.dupeZ(u8, path))) catch |err|
+                return try std.fmt.allocPrint(self.a, "cannot make link {s}: {s}", .{ l.name, @errorName(err) });
+        }
+        return null;
+    }
+
     /// A container's environment: TZ, LANG, LC_ALL and --pass-env names from
     /// the engine's, then `extra`.
     fn containerEnv(self: *Engine, extra: []const []const u8) ![]const []const u8 {

@@ -427,6 +427,7 @@ test "container mounts list each directory once with the access it needs" {
     defer arena.deinit();
     const a = arena.allocator();
     var rule: workflow.Rule = undefined;
+    rule.workdir_abs = null;
     rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
     const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});

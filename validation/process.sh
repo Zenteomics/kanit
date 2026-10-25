@@ -118,6 +118,28 @@ check "--rerun-rule runs the rule and its consumers, keeping a changed output in
 rc=$?
 check "--rerun-rule refuses a name that is not a rule" '[ $rc = 2 ] && grep -q "no such rule" err.txt'
 
+new workdir
+mkdir data && echo hello > data/in.txt
+{ header workdir
+  rule a '["data/in.txt"]' '["work/a/out.txt"]' '"cat in.txt > out.txt; pwd > where.txt"' 'workdir = "work/a"
+links = { "in.txt" = "data/in.txt" }'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+check "a rule runs in its workdir with links to its inputs" '[ "$(cat work/a/out.txt)" = hello ] && [ -L work/a/in.txt ] && [ "$(cat work/a/where.txt)" = "$PWD/work/a" ]'
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+sed 's|workdir = "work/a"|workdir = "work/b"|; s|work/a/out.txt|work/b/out.txt|' wf.toml > moved.toml
+"$workz" plan moved.toml > plan.txt
+check "a rerun keeps its workdir links, and moving the workdir reruns the rule" '[ "$(status_of s2.json reused)" = 1 ] && grep -q "run   a  (command changed)" plan.txt'
+{ header workdir; rule x '[]' '["x.txt"]' '"true"' 'links = { "i" = "data/in.txt" }'; } > nowd.toml
+{ header workdir; rule x '[]' '["work/x/x.txt"]' '"true"' 'workdir = "work/x"
+links = { "i" = "data/in.txt" }'; } > notinput.toml
+{ header workdir; rule x '[]' '["x.txt"]' '"true"' 'workdir = "../elsewhere"'; } > outside.toml
+"$workz" validate nowd.toml 2> e1.txt; "$workz" validate notinput.toml 2> e2.txt; "$workz" validate outside.toml 2> e3.txt
+check "links need a workdir and an input as target, and a workdir stays inside" 'grep -q "does not set" e1.txt && grep -q "not an input of the rule" e2.txt && grep -q "must be a directory below the working directory" e3.txt'
+rm work/a/in.txt && echo real > work/a/in.txt
+"$workz" run wf.toml "${iso[@]}" --rerun -q > s3.json 2> /dev/null
+check "a link never replaces a file that is not a link" '[ "$(status_of s3.json failed)" = 1 ] && [ "$(cat work/a/in.txt)" = real ] && jq -r "select(.event == \"task_failed\") | .reason" "$(last_launch)/events.jsonl" | grep -q "would replace a file"'
+
 # ---------------------------------------------------------------- early cutoff
 new cutoff
 echo data > in.txt
@@ -195,6 +217,13 @@ drop_alias
 "$workz" run alias.toml "${iso[@]}" -q > s4.json 2> err4.txt
 rc=$?
 check "a missing image refuses the launch without pulling" '[ $rc = 2 ] && jq -e ".status == \"refused\" and (.error | test(\"not available locally\"))" s4.json > /dev/null'
+
+new container-workdir
+echo inside > in.txt
+{ header container-workdir; crule c '["in.txt"]' '["work/c/o.txt"]' '"tr a-z A-Z < in.txt > o.txt"' "" 'workdir = "work/c"
+links = { "in.txt" = "in.txt" }'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "a container rule runs in its workdir with its links" '[ "$(cat work/c/o.txt)" = INSIDE ] && [ "$(leftovers)" = 0 ]'
 
 new container-sizing
 { header container-sizing; crule big '[]' '["b.txt"]' '"x=$(head -c 200000000 /dev/zero | tr \"\\\\0\" a); touch b.txt"'; } > wf.toml
