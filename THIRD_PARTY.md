@@ -4,7 +4,7 @@ workz links the following library into its binary.
 
 ## z-toml 0.4.0
 
-TOML parser, https://github.com/eneskemalergin/z-toml
+TOML parser, <https://github.com/eneskemalergin/z-toml>
 
 ```text
 MIT License

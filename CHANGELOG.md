@@ -2,6 +2,55 @@
 
 Every user-visible change to workz, newest first. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the record files under `.workz/` and the command line; each such change is listed under **Upgrading**.
 
+## Unreleased
+
+Reports you can share and runs you can steer: an HTML report of a launch, launch comparisons and request suggestions, commands to stop, retry and inspect rules while a launch runs, per-rule work directories, and mounts for container images.
+
+### Upgrading
+
+- `state.json` records the keyed environment of each recorded rule. workz 0.3.0 reads the state of earlier versions and reruns nothing. workz 0.2.0 and earlier refuse a state file that 0.3.0 has written; to go back, delete `.workz/state.json`, and every rule runs again.
+- Among ready rules of equal priority, the rule heading the longest chain of work starts first. If your workflow depends on file order to start rules in a particular order, give those rules a `priority`.
+
+### Added
+
+- `workz report --format html` writes one self-contained page for a launch: the summary, a timeline of every attempt with the critical path outlined, threads, cores and memory over the run, memory request against peak for each kind of rule, the bottleneck report, each failure with the end of its standard error, and the attempt table. The page has no scripts and loads nothing from elsewhere.
+- `workz report --compare OTHER` compares a launch with another one, named by launch ID, launch directory or working directory: elapsed time, attempts and reserved thread-seconds, then the median wall time, largest peak and total CPU time of each kind of rule, with the change in percent.
+- `workz report --suggest` prints the suggested threads and memory for each kind of rule as TSV, or as JSON with `--format json`, for a workflow generator to apply.
+- `workz report --bottlenecks` says, for each resource group that held ready rules back, how often a waiting rule would have fitted the free threads and memory, and from 25% of the samples that a higher `max` would have started it earlier. It also lists the shared inputs with their starts, load time, declared memory and peak, and suggests a `memory` for services.
+- `workz control stop RULE`, `retry RULE` and `cancel` steer the running launch. `stop` cancels a rule and blocks its dependents while the rest goes on; `retry` runs a failed or stopped rule again with its blocked dependents; `cancel` stops the launch like an interrupt. Every command is recorded as a `control` event.
+- `workz logs RULE` prints the standard output and error of the rule's newest attempt. `--stdout` or `--stderr` keeps one stream, `--launch ID` and `--attempt N` pick an earlier attempt, and `--follow` streams a running one until it ends.
+- `workz clean` removes containers that earlier launches left behind; `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--dry-run` names the launches it would remove and counts the containers.
+- `workz status --history [N]` prints one line for each of the last N launches: status, elapsed time, counts and any launch error.
+- `workz init [FILE]` writes a commented starter workflow, and `workz completion bash` prints a completion script for commands, most options and rule names.
+- `--rerun-rule RULE` on `run`, `plan` and `explain` runs the named rules even when they are reusable. Their consumers follow when the outputs change, and changed outputs of the named rules are moved to `previous/` instead of refusing the launch.
+- `workz plan --summary` counts the decisions by reason, for example `449 run   a producer runs`.
+- `plan` names the environment variables that changed (`environment changed: PATH`), and `explain` describes each change: entries added to or removed from a list such as `PATH`, or the old and new value.
+- Workflow errors show the offending line of the file, and errors about a rule point at its `[[rules]]` line.
+- `workdir` runs a rule's command in a directory below the working directory, made before each attempt, and `links` places symlinks to some of the rule's inputs there. Container rules get the work directory mounted read-write.
+- `mounts` on a container rule or a shared service places host files or directories read-only over paths inside the image. On a rule, each source is also an input, so editing it runs the rule again.
+- `timeout` on a shared service limits how long it may take to become ready, and `retries` (0 to 3) starts it again when it fails before it is ready.
+- The interactive `watch` view lists every selected rule from the start, with a line for each shared input and the memory it holds. `i` shows a rule's request, times and live cgroup counters, `/` searches rule names, `s` changes the sort order, and `S`, `R` and `X` stop, retry or cancel.
+
+### Changed
+
+- Ready rules of equal priority start in critical-path order. Each rule is estimated by its last recorded wall time, else the middle wall time of its kind, else 1 s; priorities still come first.
+- The launcher starts the run's scope without reading the workflow. The engine reads it once, inside the scope, and protects the memory of shared inputs from reclaim with the scope's `MemoryLow`, recorded as a `memory_protected` event.
+- Task cgroups leave the swap limit to the run's scope, which allows no swap for any group below it.
+
+### Fixed
+
+- With `--no-isolation`, the running tasks of a killed engine end with it: a guard process holds their process groups and kills them when the engine's end of its pipe closes.
+- Output of workz redirected to a file that other commands also write (`>>`, or `> log 2>&1`) is appended instead of overwriting earlier lines.
+- `report --bottlenecks` sizes container rules by their cgroup peak, not by the memory of the Podman client, and measures elapsed time as the launch summary does.
+- A launch after a crash checks that the leftover containers it removed are gone, and removes them again while Podman still lists them.
+- When no ready rule can ever start and nothing is running, the launch stops with an error that names the rule and the resource it waits for.
+- A launch records the environment of the rules it reuses, so state written by earlier versions gains it without a rerun.
+
+### Performance
+
+- `validate` and every command that reads a workflow take time linear in its size.
+- Resuming a launch reads the workflow once, examines each input path once, and checks for inputs changed during the run only on the rules that ran.
+
 ## 0.2.0 - 2026-10-21
 
 Containers: rules can run in local images through rootless Podman, a shared service can hold a large index in memory once for many rules, and `watch` becomes an interactive terminal view.
