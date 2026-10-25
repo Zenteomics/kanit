@@ -799,6 +799,26 @@ wait_for "workz watch"
 kill -TERM "$(pgrep -P "$(tm display-message -p -t "$sess" '#{pane_pid}')" -x workz)"
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "SIGTERM leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
+new watch-control
+{ header watch-control
+  rule long '[]' '["l.txt"]' '"echo long-runs >&2; sleep 30; touch l.txt"'
+  rule after '["l.txt"]' '["a.txt"]' '"touch a.txt"'
+  rule other '[]' '["o.txt"]' '"touch o.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json 2> /dev/null &
+runner=$!
+for _ in $(seq 50); do [ -d .workz/launches ] && break; sleep 0.1; done
+sess=w4; tm new-session -d -s "$sess" -x 120 -y 16 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt"
+check "the view lists a rule that has yet to start as pending" 'wait_for "^pending    after"'
+tm send-keys -t "$sess" / l o n g Enter
+check "/ keeps the rules whose name matches" 'wait_for "^running    long" && ! screen | grep -q "^pending    after"'
+tm send-keys -t "$sess" i
+check "i shows the selected rule's request and live counters" 'wait_for "^request    1 threads, 64 MiB" && screen | grep -q "^memory "'
+tm send-keys -t "$sess" S
+wait $runner
+check "S stops the selected running rule through the control file" 'jq -e "select(.event == \"control\" and .command == \"stop\" and .rule == \"long\")" "$(last_launch)/events.jsonl" > /dev/null && [ "$(status_of s.json cancelled)" = 1 ]'
+tm send-keys -t "$sess" q q
+
 tm kill-server 2> /dev/null
 rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"
 else skip "interactive watch (needs tmux)"; fi

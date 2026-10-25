@@ -707,3 +707,41 @@ test "service retries and mounts need a service" {
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nretries = 1\n", "retries start a service again");
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nmounts = { \"a\" = \"/b\" }\n", "mounts place host files inside a service's image");
 }
+
+test "the watch lists every selected rule and searches and sorts them" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const ev = "{\"v\":1,\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"selected\":3,\"rules\":[\"zeta\",\"alpha_1\",\"alpha_2\"]}\n" ++
+        "{\"v\":1,\"time\":\"2026-01-01T00:00:01.000Z\",\"event\":\"task_started\",\"rule\":\"alpha_2\",\"attempt\":1,\"directory\":\"\"}\n";
+    _ = try s.file("events.jsonl", ev);
+    var t = try workz.monitor.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    try testing.expectEqual(@as(usize, 3), t.rules.items.len);
+    try testing.expectEqual(workz.monitor.Status.pending, t.rules.items[0].status);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const tui = workz.tui;
+    const now = workz.monitor.parseTime("2026-01-01T00:00:05.000Z").?;
+    // Running first, then pending in launch order.
+    try testing.expectEqualSlices(usize, &.{ 2, 0, 1 }, try tui.visible(arena.allocator(), &t, .all, .status, "", now));
+    try testing.expectEqualSlices(usize, &.{ 1, 2, 0 }, try tui.visible(arena.allocator(), &t, .all, .name, "", now));
+    try testing.expectEqualSlices(usize, &.{ 2, 1 }, try tui.visible(arena.allocator(), &t, .all, .status, "alpha", now));
+
+    var ui: tui.Ui = .{};
+    const rows = [_]usize{ 2, 0, 1 };
+    ui.key(.{ .char = '/' }, &rows, 10);
+    for ("alp") |c| ui.key(.{ .char = c }, &rows, 10);
+    ui.key(.{ .char = 127 }, &rows, 10);
+    ui.key(.enter, &rows, 10);
+    try testing.expectEqualStrings("al", ui.queryText());
+    try testing.expect(!ui.typing);
+    ui.key(.{ .char = 's' }, &rows, 10);
+    try testing.expectEqual(tui.Sort.elapsed, ui.sort);
+    ui.key(.down, &rows, 10);
+    ui.key(.{ .char = 'S' }, &rows, 10);
+    try testing.expectEqualStrings("stop", ui.action.?.cmd);
+    try testing.expectEqual(@as(?usize, 2), ui.action.?.rule);
+    ui.key(.{ .char = 'i' }, &rows, 10);
+    try testing.expectEqual(tui.Mode.details, ui.mode);
+}

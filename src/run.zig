@@ -754,7 +754,7 @@ const Engine = struct {
         h.pid = try process.spawn(&spec);
         h.pipe = pipe[0];
         h.st = .loading;
-        self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid });
+        self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = h.cg });
         self.progress("loading shared input {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
@@ -826,7 +826,7 @@ const Engine = struct {
         h.st = .loading;
         h.timed_out = false;
         h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
-        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid });
+        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid, .cgroup = h.cg });
         self.progress("starting shared service {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
@@ -1893,7 +1893,10 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.last_sample_ns = engine.last_save_ns;
     if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);
     const t0 = t_open;
-    events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation, .cgroup = if (tree) |t| t.root else null, .shared = shared_info, .checks_s = @as(f64, @floatFromInt(sys.monoNs() - t_open)) / 1e9 });
+    // The selected rules, so a view can list those that have yet to start.
+    var selected_names: std.ArrayList([]const u8) = .empty;
+    for (wf.rules, 0..) |r, ri| if (mask[ri]) try selected_names.append(a, r.name);
+    events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .rules = selected_names.items, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation, .cgroup = if (tree) |t| t.root else null, .shared = shared_info, .checks_s = @as(f64, @floatFromInt(sys.monoNs() - t_open)) / 1e9 });
 
     engine.loop() catch |err| {
         engine.fatal = @errorName(err);

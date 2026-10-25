@@ -78,14 +78,28 @@ pub const Filter = enum {
         return switch (f) {
             .all => true,
             .active => s.active() or s == .retrying,
-            .waiting => s == .waiting,
+            .waiting => s == .waiting or s == .pending,
             .failed => s == .failed or s == .blocked or s == .cancelled,
             .done => s.done(),
         };
     }
 };
 
-pub const Mode = enum { table, log, timeline };
+pub const Mode = enum { table, log, timeline, details };
+
+/// Order of the table rows.
+pub const Sort = enum {
+    /// Running first, then waiting, failed, done and pending.
+    status,
+    /// Longest running or longest run first.
+    elapsed,
+    /// Largest recorded peak first.
+    memory,
+    name,
+};
+
+/// A control command chosen in the view, for the run loop to send.
+pub const Action = struct { cmd: []const u8, rule: ?usize };
 
 pub const Ui = struct {
     mode: Mode = .table,
@@ -96,12 +110,24 @@ pub const Ui = struct {
     top: usize = 0,
     stderr: bool = true,
     quit: bool = false,
+    sort: Sort = .status,
+    /// Rows whose name contains this text; typed after `/`.
+    query: [64]u8 = undefined,
+    query_len: usize = 0,
+    typing: bool = false,
+    /// A control command to send, set by `S`, `R` and `X`.
+    action: ?Action = null,
+    /// A line shown in place of the help until `message_until`.
+    message: [160]u8 = undefined,
+    message_len: usize = 0,
+    message_until: i128 = 0,
     /// Table rows on screen in the last frame.
     page: usize = 20,
 
     /// Applies a key. `rows` lists the visible rules in display order;
     /// `page` is the number of table rows on screen.
     pub fn key(self: *Ui, k: Key, rows: []const usize, page: usize) void {
+        if (self.typing) return self.typeKey(k);
         switch (k) {
             .interrupt => self.quit = true,
             .escape, .left => if (self.mode == .table) {
@@ -141,9 +167,56 @@ pub const Ui = struct {
                 'w' => self.setFilter(.waiting),
                 'f' => self.setFilter(.failed),
                 'd' => self.setFilter(.done),
+                'i' => if (self.selected != null) {
+                    self.mode = if (self.mode == .details) .table else .details;
+                },
+                's' => self.sort = @enumFromInt((@intFromEnum(self.sort) + 1) % std.enums.values(Sort).len),
+                '/' => {
+                    self.typing = true;
+                    self.query_len = 0;
+                    self.top = 0;
+                },
+                'S' => if (self.selected) |sel| {
+                    self.action = .{ .cmd = "stop", .rule = sel };
+                },
+                'R' => if (self.selected) |sel| {
+                    self.action = .{ .cmd = "retry", .rule = sel };
+                },
+                'X' => self.action = .{ .cmd = "cancel", .rule = null },
                 else => {},
             },
         }
+    }
+
+    /// Keys while typing a search: text, backspace, enter to keep it and
+    /// escape to clear it.
+    fn typeKey(self: *Ui, k: Key) void {
+        switch (k) {
+            .enter => self.typing = false,
+            .escape, .interrupt => {
+                self.typing = false;
+                self.query_len = 0;
+            },
+            .char => |c| if (c == 127 or c == 8) {
+                self.query_len -|= 1;
+            } else if (c >= 0x20 and c < 0x7f and self.query_len < self.query.len) {
+                self.query[self.query_len] = c;
+                self.query_len += 1;
+            },
+            else => {},
+        }
+        self.top = 0;
+    }
+
+    pub fn queryText(self: *const Ui) []const u8 {
+        return self.query[0..self.query_len];
+    }
+
+    pub fn say(self: *Ui, text: []const u8, now_ns: i128) void {
+        const n = @min(text.len, self.message.len);
+        @memcpy(self.message[0..n], text[0..n]);
+        self.message_len = n;
+        self.message_until = now_ns + 4 * std.time.ns_per_s;
     }
 
     fn setFilter(self: *Ui, f: Filter) void {
@@ -193,19 +266,52 @@ fn rank(s: Status) u8 {
         .waiting => 2,
         .failed, .blocked, .cancelled => 3,
         .completed, .reused => 4,
+        .pending => 5,
     };
 }
 
-/// Visible rules in display order: running first by start, then waiting,
-/// failed and done, each in the order the launch reached them.
-pub fn visible(a: Allocator, t: *const Tracker, f: Filter) ![]usize {
+fn elapsedOf(r: *const monitor.RuleView, now_ns: i128) i128 {
+    if (r.started_ns == 0) return 0;
+    return (if (r.finished_ns > 0) r.finished_ns else now_ns) - r.started_ns;
+}
+
+/// Visible rules in display order. By status: running first, then
+/// waiting, failed, done and pending, each in the order the launch reached
+/// them; or by elapsed time, recorded peak or name. `query` keeps the rules
+/// whose name contains it.
+pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []const u8, now_ns: i128) ![]usize {
     var out: std.ArrayList(usize) = .empty;
-    for (t.rules.items, 0..) |r, i| if (f.keeps(r.status)) try out.append(a, i);
-    std.mem.sort(usize, out.items, t, struct {
-        fn lt(tr: *const Tracker, x: usize, y: usize) bool {
-            const rx = rank(tr.rules.items[x].status);
-            const ry = rank(tr.rules.items[y].status);
-            if (rx != ry) return rx < ry;
+    for (t.rules.items, 0..) |r, i| {
+        if (!f.keeps(r.status)) continue;
+        if (query.len > 0 and std.mem.indexOf(u8, r.name, query) == null) continue;
+        try out.append(a, i);
+    }
+    const Ctx = struct { t: *const Tracker, sort: Sort, now: i128 };
+    std.mem.sort(usize, out.items, Ctx{ .t = t, .sort = sort, .now = now_ns }, struct {
+        fn lt(c: Ctx, x: usize, y: usize) bool {
+            const rx = &c.t.rules.items[x];
+            const ry = &c.t.rules.items[y];
+            switch (c.sort) {
+                .status => {
+                    const kx = rank(rx.status);
+                    const ky = rank(ry.status);
+                    if (kx != ky) return kx < ky;
+                },
+                .elapsed => {
+                    const ex = elapsedOf(rx, c.now);
+                    const ey = elapsedOf(ry, c.now);
+                    if (ex != ey) return ex > ey;
+                },
+                .memory => {
+                    const mx = rx.memory_peak orelse 0;
+                    const my = ry.memory_peak orelse 0;
+                    if (mx != my) return mx > my;
+                },
+                .name => {
+                    const o = std.mem.order(u8, rx.name, ry.name);
+                    if (o != .eq) return o == .lt;
+                },
+            }
             return x < y;
         }
     }.lt);
@@ -274,6 +380,7 @@ fn colorOf(s: Status) []const u8 {
         .failed, .blocked => "\x1b[31m",
         .running, .cancelling, .retrying => "\x1b[36m",
         .waiting => "\x1b[33m",
+        .pending => "\x1b[90m",
         .cancelled => "\x1b[35m",
         .completed, .reused => "\x1b[32m",
     };
@@ -308,19 +415,20 @@ pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols:
     var mb: [16]u8 = undefined;
     const done = t.count(.completed) + t.count(.reused);
     const res = t.reserved();
-    try f.put(null, "{d}/{d} done  {d} running  {d} waiting  {d} failed", .{ done, t.selected, t.count(.running) + t.count(.cancelling), t.count(.waiting), t.count(.failed) + t.count(.blocked) });
+    try f.put(null, "{d}/{d} done  {d} running  {d} waiting  {d} pending  {d} failed", .{ done, t.selected, t.count(.running) + t.count(.cancelling), t.count(.waiting), t.count(.pending), t.count(.failed) + t.count(.blocked) });
     if (t.cpu_cores) |cores| {
         try f.put(null, "reserved {d}/{d} threads, {d}/{d} MiB   using {d:.1} cores, {s}", .{ res.threads, t.max_threads, res.memory_mib, t.max_memory_mib, cores, std.mem.trim(u8, size(&mb, t.memory_current), " ") });
     } else try f.put(null, "reserved {d}/{d} threads, {d}/{d} MiB", .{ res.threads, t.max_threads, res.memory_mib, t.max_memory_mib });
-    if (t.shared.items.len > 0) {
-        var line: std.Io.Writer.Allocating = .init(a);
-        try line.writer.writeAll("shared");
-        for (t.shared.items) |s| try line.writer.print("  {s}: {s}", .{ s.name, s.state });
-        try f.put(null, "{s}", .{line.written()});
+    // One line per shared input: its state and, while it is held, its memory.
+    for (t.shared.items) |s| {
+        var sb: [16]u8 = undefined;
+        const held = std.mem.eql(u8, s.state, "loading") or std.mem.eql(u8, s.state, "ready");
+        const cur: ?u64 = if (live and held) (if (s.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null) else s.memory_peak;
+        try f.put(null, "shared {s}: {s}, {s} {s}", .{ s.name, s.state, if (held) "holding" else "peak", std.mem.trim(u8, size(&sb, cur), " ") });
     }
     if (t.final_error.len > 0) try f.put("\x1b[31m", "{s}", .{t.final_error});
 
-    const list = try visible(a, t, ui.filter);
+    const list = try visible(a, t, ui.filter, ui.sort, ui.queryText(), now_ns);
     const footer = 1;
     const head = f.line + 1;
     const page = rows -| (head + footer);
@@ -331,14 +439,22 @@ pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols:
         .table => try drawTable(gpa, a, &f, t, ui, list, page, now_ns, live),
         .timeline => try drawTimeline(&f, t, ui, list, page, end_ns),
         .log => try drawLog(gpa, a, &f, t, ui, rows -| (f.line + footer), live),
+        .details => try drawDetails(gpa, a, &f, t, ui, rows -| (f.line + footer), now_ns, live),
     }
     while (f.line < rows -| footer) try f.put(null, "", .{});
     const help = switch (ui.mode) {
-        .table => "q quit  j/k move  enter log  t timeline  a/r/w/f/d filter",
+        .table => "q quit  enter log  i details  t timeline  a/r/w/f/d filter  s sort  / search  S stop  R retry  X cancel",
         .timeline => "q back  j/k move  enter log  t table",
         .log => "q back  o stdout/stderr  j/k rule",
+        .details => "q back  j/k rule  enter log  S stop  R retry",
     };
-    try f.put("\x1b[7m", "[{s}] {s}", .{ @tagName(ui.filter), help });
+    if (ui.typing) {
+        try f.put("\x1b[7m", "search: {s}_  (enter keeps, esc clears)", .{ui.queryText()});
+    } else if (ui.message_len > 0 and now_ns < ui.message_until) {
+        try f.put("\x1b[7m", "{s}", .{ui.message[0..ui.message_len]});
+    } else if (ui.query_len > 0) {
+        try f.put("\x1b[7m", "[{s}, {s}, \"{s}\"] {s}", .{ @tagName(ui.filter), @tagName(ui.sort), ui.queryText(), help });
+    } else try f.put("\x1b[7m", "[{s}, {s}] {s}", .{ @tagName(ui.filter), @tagName(ui.sort), help });
     try f.finish();
 }
 
@@ -412,6 +528,50 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
     }
 }
 
+/// Everything known about the selected rule: its state and request, its
+/// times, and while it runs its cgroup's counters and pressure.
+fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, space: usize, now_ns: i128, live: bool) !void {
+    const ri = ui.selected orelse return;
+    const r = &t.rules.items[ri];
+    var b: [3][16]u8 = undefined;
+    try f.put("\x1b[1m", "{s}", .{r.name});
+    try f.put(null, "status     {s}, attempt {d}", .{ @tagName(r.status), r.attempt });
+    if (r.reason.len > 0) try f.put(null, "{s} {s}", .{ if (r.status == .waiting) "waits for " else "reason    ", r.reason });
+    if (r.threads > 0) try f.put(null, "request    {d} threads, {d} MiB", .{ r.threads, r.memory_mib });
+    if (r.ready_ns > 0) try f.put(null, "ready at   {s}", .{clock(&b[0], r.ready_ns - t.started_ns)});
+    if (r.started_ns > 0) try f.put(null, "started at {s}, {s} {s}", .{ clock(&b[0], r.started_ns - t.started_ns), if (r.finished_ns > 0) "ran" else "running for", clock(&b[1], elapsedOf(r, now_ns)) });
+    if (r.cpu_s) |c| try f.put(null, "cpu        {d:.2} s", .{c});
+    if (r.memory_peak) |m| try f.put(null, "peak       {s}", .{std.mem.trim(u8, size(&b[2], m), " ")});
+    if (live and r.status.active()) if (r.cg) |cg| {
+        const c = cgroup.read(gpa, cg);
+        try f.put(null, "memory     {s} now, {s} peak, {d} near-limit events", .{ std.mem.trim(u8, size(&b[0], c.memory_current), " "), std.mem.trim(u8, size(&b[1], c.memory_peak), " "), c.memory_max_events });
+        if (c.cpu_usage_usec) |us| try f.put(null, "cpu        {d:.2} s so far", .{@as(f64, @floatFromInt(us)) / 1e6});
+        const stall = struct {
+            fn s(v: ?u64) f64 {
+                return @as(f64, @floatFromInt(v orelse 0)) / 1e6;
+            }
+        }.s;
+        try f.put(null, "stalled    cpu {d:.1} s, memory {d:.1} s, io {d:.1} s", .{ stall(c.cpu_some_us), stall(c.memory_some_us), stall(c.io_some_us) });
+        try f.put(null, "cgroup     {s}", .{cg});
+    };
+    if (r.dir.len > 0) try f.put(null, "files      {s}", .{r.dir});
+    if (!live or r.dir.len == 0 or f.line + 2 >= space) return;
+    try f.put("\x1b[1m", "last output", .{});
+    const tail = sys.readTail(gpa, try std.fs.path.join(a, &.{ r.dir, "stderr.log" }), 4096) catch return;
+    defer gpa.free(tail);
+    var lines: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, tail, "\n"), '\n');
+    while (it.next()) |l| try lines.append(a, l);
+    const room = space -| f.line;
+    for (lines.items[lines.items.len -| room..]) |l| {
+        const clean = try a.dupe(u8, l);
+        for (clean) |*c| if (c.* < 0x20 or c.* == 0x7f) {
+            c.* = ' ';
+        };
+        try f.put(null, "  {s}", .{clean});
+    }
+}
+
 fn drawLog(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, space: usize, live: bool) !void {
     const ri = ui.selected orelse return;
     const r = &t.rules.items[ri];
@@ -474,6 +634,21 @@ const Terminal = struct {
 
 /// Runs the interactive view until `q` or an interrupt. The launch is
 /// followed while it runs and stays browsable after it ends.
+/// Appends a command chosen in the view to the launch's control file.
+fn send(gpa: Allocator, t: *const Tracker, ui: *Ui, act: Action) void {
+    var buf: [256]u8 = undefined;
+    const name = if (act.rule) |ri| t.rules.items[ri].name else "";
+    const line = (if (act.rule != null) std.fmt.bufPrint(&buf, "{s} {s}\n", .{ act.cmd, name }) else std.fmt.bufPrint(&buf, "{s}\n", .{act.cmd})) catch return;
+    var said: [200]u8 = undefined;
+    const path = std.fs.path.join(gpa, &.{ std.fs.path.dirname(t.events_path).?, "control" }) catch return;
+    defer gpa.free(path);
+    if (t.finished) return ui.say("the launch has ended", sys.realNs());
+    const fd = sys.openWrite(gpa, path, .append) catch return ui.say("cannot open the control file", sys.realNs());
+    defer sys.close(fd);
+    sys.writeAll(fd, line) catch return;
+    ui.say(std.fmt.bufPrint(&said, "sent: {s}", .{std.mem.trimEnd(u8, line, "\n")}) catch "sent", sys.realNs());
+}
+
 pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64) !bool {
     var set = linux.sigemptyset();
     for ([_]linux.SIG{ .INT, .TERM, .HUP, .WINCH }) |s| linux.sigaddset(&set, s);
@@ -528,7 +703,7 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64) !bool {
             if (n == 0) break;
             pending += n;
             _ = scratch.reset(.retain_capacity);
-            const list = try visible(scratch.allocator(), t, ui.filter);
+            const list = try visible(scratch.allocator(), t, ui.filter, ui.sort, ui.queryText(), sys.realNs());
             var at: usize = 0;
             while (at < pending) {
                 var used: usize = 0;
@@ -540,6 +715,10 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64) !bool {
                 }
                 at += used;
                 if (k) |key| ui.key(key, list, ui.page);
+                if (ui.action) |act| {
+                    send(gpa, t, &ui, act);
+                    ui.action = null;
+                }
                 if (ui.quit) break;
             }
             // A sequence cut by the read waits for its remaining bytes.

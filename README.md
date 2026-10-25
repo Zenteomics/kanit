@@ -133,10 +133,13 @@ Every launch that takes the lock gets a directory, refused ones included: a chan
 
 `watch` reads these files from any terminal and shows each running task with its elapsed time, current and peak memory, and last line of output. On a terminal it is interactive, and it stays open after the launch ends:
 
-- The header gives the counts, the reserved threads and memory against the budget, and the CPU cores and memory the run uses. Below it is a table of rules, running ones first, then waiting (with the reason), failed (with the reason) and done.
+- The header gives the counts, the reserved threads and memory against the budget, and the CPU cores and memory the run uses. Below it is one line per shared input with the memory it holds, then a table of every selected rule: running ones first, then waiting (with the reason), failed (with the reason), done and pending.
 - `j`/`k` or the arrows move the selection. Page keys, `g` and `G` jump. `a`, `r`, `w`, `f` and `d` show all, running, waiting, failed or done rules.
 - `enter` follows the selected attempt's standard error as it grows; `o` switches to standard output.
 - `t` draws a timeline of the launch: waiting as `.`, running as `>`, done as `=` and failed as `!`.
+- `i` shows the selected rule in detail: request, times, and while it runs its cgroup's memory, CPU and stall times.
+- `/` searches rule names; `s` cycles the order (status, elapsed time, peak memory, name).
+- `S` stops the selected rule, `R` retries it, `X` cancels the launch (as `workz control` does).
 - `q` goes back, or leaves; `ctrl-c` leaves.
 
 Each refresh parses only the events added since the last one. `--interval MS` sets the refresh period (default 1000), and `--once` prints the plain view and exits.

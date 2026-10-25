@@ -12,6 +12,8 @@ const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Status = enum {
+    /// Selected but not yet ready: its producers have not finished.
+    pending,
     waiting,
     running,
     cancelling,
@@ -55,6 +57,8 @@ pub const SharedView = struct {
     name: []const u8,
     state: []const u8,
     memory_peak: ?u64 = null,
+    /// cgroup of the current holder, for live counters.
+    cg: ?[]const u8 = null,
 };
 
 /// The state of one launch, kept up to date from its event stream.
@@ -163,6 +167,11 @@ pub const Tracker = struct {
             self.max_threads = @intCast(int(v, "max_threads") orelse 0);
             self.max_memory_mib = @intCast(int(v, "max_memory_mib") orelse 0);
             self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
+            // Every selected rule is listed from the start, as pending.
+            if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
+                const r = try self.rule(n.string);
+                r.status = .pending;
+            };
         } else if (eql(u8, ev, "launch_finished")) {
             self.finished = true;
             self.finished_ns = at;
@@ -175,6 +184,7 @@ pub const Tracker = struct {
             const s = try self.sharedView(str(v, "name") orelse "?");
             s.state = if (eql(u8, ev, "shared_loading")) "loading" else if (eql(u8, ev, "shared_loaded")) "ready" else if (eql(u8, ev, "shared_released")) "released" else if (eql(u8, ev, "shared_failed")) "failed" else s.state;
             if (int(v, "memory_peak")) |m| s.memory_peak = @intCast(m);
+            if (eql(u8, ev, "shared_loading")) s.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
         } else if (str(v, "rule")) |name| {
             const r = try self.rule(name);
             if (eql(u8, ev, "task_waiting")) {
