@@ -357,6 +357,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     } else if (by_reason.count() == 0) try w.writeAll("  none\n");
     sortByValue(&by_reason);
     for (by_reason.keys(), by_reason.values()) |k, s| try w.print("  {s:<32} {d:>9.1} s\n", .{ k, s });
+    try groupAdvice(a, w, text);
 
     // Sizing and character per kind of rule.
     const Kind = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, container: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
@@ -449,6 +450,68 @@ fn summaryElapsed(gpa: Allocator, a: Allocator, launch_dir: []const u8) ?f64 {
     defer gpa.free(bytes);
     const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch return null;
     return num(get(v, "elapsed_s"));
+}
+
+/// For each resource group that held ready rules: whether the budget had
+/// room for a waiting rule while it waited, from the run samples. If it
+/// did, the group's limit, not the budget, held the work back.
+fn groupAdvice(a: Allocator, w: *std.Io.Writer, text: []const u8) !void {
+    const Sample = struct { t: i128, threads: f64, mem: f64 };
+    const Wait = struct { rule: []const u8, group: []const u8, from: i128, to: i128 = 0 };
+    var samples: std.ArrayList(Sample) = .empty;
+    var waits: std.ArrayList(Wait) = .empty;
+    var open: std.StringHashMapUnmanaged(usize) = .empty;
+    var request: std.StringHashMapUnmanaged([2]f64) = .empty;
+    var max_threads: f64 = 0;
+    var max_memory: f64 = 0;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| {
+        if (line.len == 0) continue;
+        const v = std.json.parseFromSliceLeaky(Value, a, line, .{ .allocate = .alloc_always }) catch continue;
+        const ev = str(v, "event");
+        const at = monitor.parseTime(str(v, "time")) orelse continue;
+        if (std.mem.eql(u8, ev, "launch_started")) {
+            max_threads = num(get(v, "max_threads")) orelse 0;
+            max_memory = num(get(v, "max_memory_mib")) orelse 0;
+        } else if (std.mem.eql(u8, ev, "sample")) {
+            try samples.append(a, .{ .t = at, .threads = num(get(v, "threads_reserved")) orelse 0, .mem = num(get(v, "memory_reserved_mib")) orelse 0 });
+        } else if (std.mem.eql(u8, ev, "task_waiting") or std.mem.eql(u8, ev, "task_started")) {
+            const rule = str(v, "rule");
+            // The rule's previous wait ends here.
+            if (open.fetchRemove(rule)) |kv| waits.items[kv.value].to = at;
+            if (std.mem.eql(u8, ev, "task_started")) {
+                try request.put(a, rule, .{ num(get(v, "threads")) orelse 1, num(get(v, "memory_mib")) orelse 0 });
+            } else if (std.mem.startsWith(u8, str(v, "reason"), "group:")) {
+                try open.put(a, rule, waits.items.len);
+                try waits.append(a, .{ .rule = rule, .group = str(v, "reason")[6..], .from = at });
+            }
+        }
+    }
+    if (samples.items.len == 0 or waits.items.len == 0) return;
+    var groups: std.StringArrayHashMapUnmanaged(struct { seconds: f64 = 0, moments: usize = 0, fit: usize = 0 }) = .empty;
+    for (waits.items) |wt| {
+        if (wt.to == 0) continue;
+        const gop = try groups.getOrPut(a, wt.group);
+        if (!gop.found_existing) gop.value_ptr.* = .{};
+        gop.value_ptr.seconds += @as(f64, @floatFromInt(wt.to - wt.from)) / 1e9;
+        const req = request.get(wt.rule) orelse continue;
+        for (samples.items) |s| {
+            if (s.t < wt.from or s.t >= wt.to) continue;
+            gop.value_ptr.moments += 1;
+            if (max_threads - s.threads >= req[0] and max_memory - s.mem >= req[1]) gop.value_ptr.fit += 1;
+        }
+    }
+    var first = true;
+    for (groups.keys(), groups.values()) |name, g| {
+        if (g.moments == 0) continue;
+        if (first) try w.writeAll("\nresource groups (while their rules waited)\n");
+        first = false;
+        const share = @as(f64, @floatFromInt(g.fit)) / @as(f64, @floatFromInt(g.moments)) * 100;
+        try w.print("  {s:<30} {d:>9.1} s waited; ", .{ name[0..@min(name.len, 30)], g.seconds });
+        if (share >= 25) {
+            try w.print("in {d:.0}% of the samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier\n", .{share});
+        } else try w.print("the budget was full in {d:.0}% of the samples: a higher max would not help much\n", .{100 - share});
+    }
 }
 
 const SharedUse = struct {

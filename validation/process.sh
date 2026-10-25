@@ -517,6 +517,17 @@ check "report lists every attempt with its use" '[ "$(wc -l < report.tsv)" = 4 ]
 "$workz" report -d . --bottlenecks > bottlenecks.txt
 check "the bottleneck report names the critical path, the waiting group and request sizing" 'grep -q "critical path" bottlenecks.txt && grep -q "group:disk" bottlenecks.txt && grep -q "^  g3  *1 " bottlenecks.txt'
 
+
+new group-advice
+{ printf '[workflow]\nname = "advice"\nversion = "1"\n\n[resource_groups.disk]\nmax = 1\n\n'
+  for i in 1 2 3; do
+    printf '[[rules]]\nname = "g%s"\ninput = []\noutput = ["g%s.txt"]\nshell = "sleep 2.5; touch g%s.txt"\n[rules.resources]\nthreads = 1\nmemory = "64M"\ngroups = { disk = 1 }\n\n' $i $i $i
+  done
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+"$workz" report -d . --bottlenecks > advice.txt
+check "the report says when a group, not the budget, held rules back" 'grep -q "^  disk .* a higher max would have started it earlier" advice.txt'
+
 new budget
 { header budget
   for i in 1 2 3; do printf '[[rules]]\nname = "m%s"\ninput = []\noutput = ["m%s.txt"]\nshell = "date +%%s.%%N > m%s.txt; sleep 0.3; date +%%s.%%N >> m%s.txt"\n[rules.resources]\nthreads = 1\nmemory = "600M"\n\n' $i $i $i $i; done
