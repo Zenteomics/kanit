@@ -737,7 +737,7 @@ new report-html
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -k -q > s.json
 "$workz" report -d . --format html > r.html
-check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html'
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "Memory per kind of rule" r.html && grep -q "stroke=\"#111\"" r.html'
 
 if command -v tmux > /dev/null; then
 # Interactive watch on a terminal: a private tmux server gives it a real

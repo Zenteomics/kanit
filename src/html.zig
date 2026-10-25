@@ -136,8 +136,11 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
     } else try w.writeAll("<tr><td>status</td><td>running or interrupted (no summary)</td></tr>");
     try w.print("<tr><td>budget</td><td>{d:.0} threads, {d:.0} MiB</td></tr><tr><td>attempts</td><td>{d}</td></tr></table>\n", .{ max_threads, max_memory, rows.len });
 
-    try writeTimeline(a, w, rows, t0, span);
+    const path = try report.criticalPathNames(gpa, a, launch_dir, rows);
+    try writeTimeline(a, w, rows, t0, span, path);
     try writeUse(w, samples.items, max_threads, max_memory, span);
+
+    try writeSizing(a, w, rows);
 
     try w.writeAll("<h2>What limited the launch</h2>\n<pre>");
     var bottlenecks: std.Io.Writer.Allocating = .init(a);
@@ -164,7 +167,7 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
 
 /// One bar per attempt in start order: waiting before it in a light shade,
 /// running in the colour of its outcome.
-fn writeTimeline(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt, t0: i128, span: f64) !void {
+fn writeTimeline(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt, t0: i128, span: f64, path: []const []const u8) !void {
     const sorted = try a.dupe(report.Attempt, rows);
     std.mem.sort(report.Attempt, sorted, {}, struct {
         fn lt(_: void, x: report.Attempt, y: report.Attempt) bool {
@@ -183,7 +186,10 @@ fn writeTimeline(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt, 
         const x1 = start / span * width;
         const x2 = (start + r.wall_s) / span * width;
         if (x1 > x0) try w.print("<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" fill=\"#e5d9a8\"/>", .{ x0, y, x1 - x0, row_h - 0.5 });
-        try w.print("<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" fill=\"{s}\"><title>", .{ x1, y, @max(x2 - x1, 0.5), row_h - 0.5, color(r.status) });
+        const on_path = for (path) |n| {
+            if (std.mem.eql(u8, n, r.rule)) break true;
+        } else false;
+        try w.print("<rect x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" fill=\"{s}\"{s}><title>", .{ x1, y, @max(x2 - x1, 0.5), row_h - 0.5, color(r.status), if (on_path) " stroke=\"#111\" stroke-width=\"1\"" else "" });
         try escape(w, r.rule);
         try w.print(" #{d}: ", .{r.attempt});
         try escape(w, r.status);
@@ -199,7 +205,7 @@ fn writeTimeline(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt, 
         const x = tick / span * width;
         try w.print("<line x1=\"{d:.1}\" y1=\"0\" x2=\"{d:.1}\" y2=\"{d:.0}\" stroke=\"#ccc\" stroke-width=\"0.5\"/><text x=\"{d:.1}\" y=\"{d:.0}\" font-size=\"11\">{d} s</text>", .{ x, x, height - 18, x + 2, height - 6, @round(tick * 10) / 10 });
     }
-    try w.writeAll("</svg>\n<p><span style=\"color:#c9b35a\">&#9632;</span> waiting to start &nbsp; <span style=\"color:#3a7d44\">&#9632;</span> completed &nbsp; <span style=\"color:#c0392b\">&#9632;</span> failed &nbsp; <span style=\"color:#8c6bb1\">&#9632;</span> cancelled; hover a bar for its rule</p>\n");
+    try w.writeAll("</svg>\n<p><span style=\"color:#c9b35a\">&#9632;</span> waiting to start &nbsp; <span style=\"color:#3a7d44\">&#9632;</span> completed &nbsp; <span style=\"color:#c0392b\">&#9632;</span> failed &nbsp; <span style=\"color:#8c6bb1\">&#9632;</span> cancelled; outlined bars are the critical path; hover a bar for its rule</p>\n");
 }
 
 /// Threads reserved and CPU cores in use, then memory reserved and in use,
@@ -224,6 +230,28 @@ fn writeUse(w: *std.Io.Writer, samples: []const Sample, max_threads: f64, max_me
         }
         try w.writeAll("</svg>\n");
     }
+}
+
+/// Per kind of rule: the memory request against the largest peak, and the
+/// suggested request, as bars on one scale.
+fn writeSizing(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt) !void {
+    const list = try report.suggestions(a, rows);
+    if (list.len == 0) return;
+    var top: f64 = 1;
+    for (list) |s| top = @max(top, @max(s.memory_mib, s.peak_mib));
+    const width: f64 = 420;
+    const row_h: f64 = 16;
+    try w.print("<h2>Memory per kind of rule</h2>\n<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{d:.0}\" height=\"{d:.0}\">\n", .{ width + 420, @as(f64, @floatFromInt(list.len)) * row_h + 4 });
+    for (list, 0..) |s, i| {
+        const y = @as(f64, @floatFromInt(i)) * row_h;
+        try w.print("<text x=\"0\" y=\"{d:.0}\" font-size=\"11\">", .{y + 11});
+        try escape(w, s.kind[0..@min(s.kind.len, 34)]);
+        try w.print("</text><rect x=\"230\" y=\"{d:.0}\" width=\"{d:.1}\" height=\"6\" fill=\"#bbb\"/><rect x=\"230\" y=\"{d:.0}\" width=\"{d:.1}\" height=\"6\" fill=\"#2c6fbb\"/>", .{ y + 2, s.memory_mib / top * width, y + 8, s.peak_mib / top * width });
+        if (s.delegated) {
+            try w.print("<text x=\"{d:.0}\" y=\"{d:.0}\" font-size=\"11\">work ran outside workz</text>\n", .{ 240 + width, y + 11 });
+        } else try w.print("<text x=\"{d:.0}\" y=\"{d:.0}\" font-size=\"11\">request {d:.0} MiB, peak {d:.0} MiB, suggested {d:.0} MiB</text>\n", .{ 240 + width, y + 11, s.memory_mib, s.peak_mib, s.suggest_mib });
+    }
+    try w.writeAll("</svg>\n<p>grey: request; blue: largest peak</p>\n");
 }
 
 fn writeFailures(gpa: Allocator, a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt) !void {

@@ -629,6 +629,46 @@ fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded: *b
 
 /// Follows the run back from the last task to finish: each step's producer
 /// is the parent that finished last, the one it was waiting for.
+/// Names of the rules on the critical path: from the attempt that finished
+/// last back through the producer that finished last before it.
+pub fn criticalPathNames(gpa: Allocator, a: Allocator, launch_dir: []const u8, rows: []const Attempt) ![]const []const u8 {
+    var finish: std.StringHashMapUnmanaged(i128) = .empty;
+    for (rows) |r| if (r.started_ns > 0) {
+        const f = r.started_ns + @as(i128, @intFromFloat(r.wall_s * 1e9));
+        const gop = try finish.getOrPut(a, r.rule);
+        if (!gop.found_existing or f > gop.value_ptr.*) gop.value_ptr.* = f;
+    };
+    const launch_json = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return &.{};
+    defer gpa.free(launch_json);
+    const lv = std.json.parseFromSliceLeaky(Value, a, launch_json, .{ .allocate = .alloc_always }) catch return &.{};
+    var problem: workflow.Problem = .{};
+    var wf = workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), str(lv, "workdir"), &problem) catch {
+        if (problem.message.len > 0) gpa.free(problem.message);
+        return &.{};
+    };
+    defer wf.deinit();
+    var g = graph.build(gpa, &wf, &problem) catch return &.{};
+    defer g.deinit();
+    var cur: ?usize = null;
+    var best: i128 = 0;
+    for (wf.rules, 0..) |r, i| if (finish.get(r.name)) |f| if (cur == null or f > best) {
+        cur = i;
+        best = f;
+    };
+    var names: std.ArrayList([]const u8) = .empty;
+    while (cur) |i| {
+        try names.append(a, try a.dupe(u8, wf.rules[i].name));
+        var next: ?usize = null;
+        var next_f: i128 = 0;
+        for (g.parents[i]) |pi| if (finish.get(wf.rules[pi].name)) |f| if (next == null or f > next_f) {
+            next = pi;
+            next_f = f;
+        };
+        cur = next;
+    }
+    return names.items;
+}
+
 fn criticalPath(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, timing: *std.StringHashMapUnmanaged(Timing), t0: i128) !void {
     const launch_json = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return;
     defer gpa.free(launch_json);
