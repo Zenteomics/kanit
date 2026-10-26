@@ -582,6 +582,25 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                 }
             }
         }
+        // A rule reads the files of the mapped shared inputs it uses, so each
+        // is also its input and a rebuilt index reruns it. A service's path
+        // is not: rules of the workflow may produce it during the launch.
+        for (shared_uses) |used| {
+            const sh = for (wf.shared) |s| {
+                if (std.mem.eql(u8, s.name, used)) break s;
+            } else continue;
+            if (sh.isService()) continue;
+            const sp = sh.path orelse continue;
+            const sp_abs = sh.path_abs orelse continue;
+            const listed = for (input) |in| {
+                if (std.mem.eql(u8, try sys.absolute(arena, root, in), sp_abs)) break true;
+            } else false;
+            if (listed) continue;
+            const more = try arena.alloc([]const u8, input.len + 1);
+            @memcpy(more[0..input.len], input);
+            more[input.len] = sp;
+            input = more;
+        }
         if (threads == null) threads = default_threads;
         if (memory == null) memory = default_memory;
         const t = threads orelse 1;

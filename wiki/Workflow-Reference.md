@@ -31,7 +31,7 @@ retries = 1
 
 [[rules]]
 name = "align_s1"
-input = ["ref/bowtie2", "trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
+input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
 shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
 priority = 10
@@ -118,7 +118,7 @@ An entry with `container` is a service:
 | `retries`   | integer  | 0        | restarts before ready, 0 to 3    |
 | `mounts`    | table    | none     | host path = path in the image    |
 
-- A file input may not hold the output of a rule; a service's `path` may, if every rule that joins it depends on that rule.
+- A file input is also an input of every rule that uses it. It may not hold the output of a rule; a service's `path` may, if every rule that joins it depends on that rule.
 - `command`, `memory`, `timeout`, `retries` and `mounts` belong to services only.
 - See [Shared inputs](Resources-and-Scheduling.md#shared-inputs) and [Shared services](Containers-and-Services.md#shared-services).
 
@@ -149,7 +149,7 @@ An entry with `container` is a service:
 - A rule may not read its own output, two rules may not write the same file, and no rule may read another rule's log or benchmark.
 - An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
-- `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `:` or `,`.
+- `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
 
 ## [rules.resources]
 

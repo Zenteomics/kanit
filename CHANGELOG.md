@@ -4,12 +4,17 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 
 ## Unreleased
 
+### Upgrading
+
+- Rules that use a shared file input count its path as an input, so each such rule runs once after the upgrade.
+
 ### Changed
 
 - `build.zig.zon` pins z-toml by URL and hash, so a fresh clone builds with `zig build` alone.
 
 ### Fixed
 
+- A rule that uses a shared file input counts the input's path as an input, so rebuilding an index reruns the rules that read it.
 - A `state.json` upgraded from an earlier version is saved with the current format version.
 
 ## 0.3.0 - 2026-10-25

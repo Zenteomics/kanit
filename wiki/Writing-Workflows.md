@@ -5,7 +5,7 @@ A workz workflow is a flat list of concrete rules. This page covers how to struc
 ```toml
 [[rules]]
 name = "align_s1"
-input = ["ref/bowtie2", "trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
+input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
 shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
 priority = 10
@@ -79,7 +79,7 @@ groups = { disk = 1 }
 
 [[rules]]
 name = "align_$s"
-input = ["ref/bowtie2", "trimmed/${s}_1.fq.gz", "trimmed/${s}_2.fq.gz"]
+input = ["trimmed/${s}_1.fq.gz", "trimmed/${s}_2.fq.gz"]
 output = ["aligned/$s.bam"]
 shell = "bowtie2 --mm -p \$WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/${s}_1.fq.gz -2 trimmed/${s}_2.fq.gz | samtools view -b -o aligned/$s.bam -"
 priority = 10
@@ -123,7 +123,7 @@ valid: rnaseq (7 rules, 7 selected, 1 groups, 1 shared)
 Some choices in this script are worth copying:
 
 - `\$WORKZ_THREADS` stays a variable in the file and expands when the rule runs, to the threads the rule requested. Passing it to every multithreaded tool keeps the tool's threads equal to its CPU quota.
-- The bowtie2 index is a [shared input](Resources-and-Scheduling.md#shared-inputs) and also an input: the shared input loads it once for all alignments, and listing it in `input` reruns them when the index is rebuilt.
+- The bowtie2 index is a [shared input](Resources-and-Scheduling.md#shared-inputs): workz loads it once for all alignments, and counts it as an input of each, so rebuilding the index reruns them.
 - `bowtie2 --mm` maps the index instead of reading it, so the alignments share one copy of it in memory, which is what makes a shared input pay off.
 - The `disk` group lets at most two trims read from disk at once, while alignments with `priority = 10` start before trims that become ready at the same time.
 - Regenerating the file is safe. Rules whose command, request and inputs did not change are reused.

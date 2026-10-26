@@ -85,7 +85,7 @@ path = "ref/bowtie2"
 
 [[rules]]
 name = "align_s1"
-input = ["ref/bowtie2", "trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
+input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 # ...
 [rules.resources]
 threads = 8
@@ -97,7 +97,7 @@ Before the first rule that uses it starts, workz starts a holder process that ma
 
 - The holder stays while a rule that has yet to run needs it, and stops after its last user. When a waiting rule needs memory that only an idle holder occupies, the holder gives way.
 - With isolation, workz sets the run scope's `MemoryLow` at the start of the launch to the total size of its shared inputs and services, so other work on the machine does not push an index out of memory.
-- A shared input enters its users' rule keys by name only. List its path in each rule's `input` too, so that a rebuilt index reruns them.
+- A shared file input is also an input of every rule that uses it, so rebuilding the index reruns them; there is no need to list it in `input` as well.
 - A shared input may not contain the output of a rule.
 
 For an index a tool loads into System V shared memory, such as a STAR genome, use a [shared service](Containers-and-Services.md#shared-services) instead.

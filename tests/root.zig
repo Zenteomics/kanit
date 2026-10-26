@@ -221,6 +221,57 @@ test "format 1 accepts every rule field and the oxo-local resource tables" {
     try testing.expectEqual(@as(u64, 1024), wf.rules[1].memory_mib);
 }
 
+test "[unit] - [workflow]: a mapped shared input is an input of the rules that use it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        \\[shared.index]
+        \\path = "ref/index"
+        \\
+        \\[shared.genome]
+        \\path = "ref/star"
+        \\container = "img"
+        \\command = "true"
+        \\memory = "1G"
+        \\
+        \\[[rules]]
+        \\name = "uses"
+        \\input = ["reads.fq"]
+        \\output = ["a.bam"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[rules.resources]
+        \\shared = ["index"]
+        \\
+        \\[[rules]]
+        \\name = "lists"
+        \\input = ["./ref/index", "reads.fq"]
+        \\output = ["b.bam"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[rules.resources]
+        \\shared = ["index"]
+        \\
+        \\[[rules]]
+        \\name = "joins"
+        \\output = ["c.bam"]
+        \\container = "img"
+        \\shell = "true"
+        \\memory = "1M"
+        \\[rules.resources]
+        \\shared = ["genome"]
+        \\
+    , &problem);
+    defer wf.deinit();
+    const r = wf.rules[0];
+    try testing.expectEqual(@as(usize, 2), r.input.len);
+    try testing.expectEqualStrings("ref/index", r.input[1]);
+    try testing.expect(std.mem.endsWith(u8, r.input_abs[1], "/ref/index"));
+    try testing.expectEqual(@as(usize, 2), wf.rules[1].input.len);
+    try testing.expectEqual(@as(usize, 0), wf.rules[2].input.len);
+}
+
 test "format 1 rejects unknown keys, bad values and unsafe paths" {
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\nimage = \"img\"\n", "unknown key 'image'");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemroy = \"1M\"\n", "did you mean 'memory'?");
