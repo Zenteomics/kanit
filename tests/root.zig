@@ -841,7 +841,7 @@ test "removing a launch directory does not follow symlinks out of it" {
     try s.link("gone/sub/to-keep", "../../keep");
     const fd = try sys.openRead(testing.allocator, s.path);
     defer sys.close(fd);
-    const bytes = try workz.clean.removeAt(fd, "gone", false, 0);
+    const bytes = try workz.clean.removeAt(testing.allocator, fd, "gone", false, 0);
     try testing.expect(bytes >= 5);
     try testing.expect(!sys.exists(testing.allocator, gone));
     try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "keep/precious" })));

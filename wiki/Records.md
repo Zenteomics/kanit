@@ -67,7 +67,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `status` is `completed`, `failed`, `interrupted` or `refused`.
 - `error` holds the reason a launch was refused or stopped, or `null`.
 - `engine_cost` is the CPU time and peak memory of the engine itself.
-- A refused launch has no `engine_key` or `engine_cost`, and counts every selected rule as `not_started`.
+- A refused launch counts every selected rule as `not_started`.
 
 ## Attempt files
 
@@ -122,9 +122,9 @@ Rule events:
 
 - `task_waiting`: `rule`, `reason`.
 - `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`.
-- `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one.
+- `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.
-- `task_failed`: `rule`, `reason`, and `attempt` when an attempt had started.
+- `task_failed`: `rule`, `attempt` (null when the rule failed before an attempt started) and `reason`.
 - `task_blocked`, `task_reused`, `task_cancelling`: `rule`.
 - `task_timeout`: `rule`, `attempt`.
 - `output_preserved`: `rule`, `path`, `moved_to`.

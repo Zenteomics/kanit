@@ -8,6 +8,8 @@
 //!   .workz/launches/<id>/launch.json options, engine identity, shared sizes
 //!   .workz/launches/<id>/events.jsonl typed events, append-only
 //!   .workz/launches/<id>/summary.json final counts and status
+//!   .workz/launches/<id>/control      commands for the running launch
+//!   .workz/launches/<id>/shared/      service scripts, logs and stop pipes
 //!   .workz/launches/<id>/attempts/<rule>/<NNN>/ command.sh, request.json,
 //!       stdout.log, stderr.log, record.json (written last), previous/
 const std = @import("std");
@@ -65,20 +67,13 @@ pub fn latestLaunch(gpa: Allocator, a: Allocator, records: []const u8) !?[]const
     defer sys.close(fd);
     var best: ?[]u8 = null;
     defer if (best) |b| gpa.free(b);
-    var buf: [16384]u8 align(8) = undefined;
-    while (true) {
-        const n = try sys.check(linux.getdents64(fd, &buf, buf.len));
-        if (n == 0) break;
-        var off: usize = 0;
-        while (off < n) {
-            const reclen = std.mem.readInt(u16, buf[off + 16 ..][0..2], .little);
-            const name = std.mem.sliceTo(buf[off + 19 .. off + reclen], 0);
-            off += reclen;
-            if (name[0] == '.') continue;
-            if (best == null or std.mem.order(u8, name, best.?) == .gt) {
-                if (best) |b| gpa.free(b);
-                best = try gpa.dupe(u8, name);
-            }
+    // Launch IDs begin with their start time, so the newest sorts last.
+    var entries: sys.DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| {
+        if (e.name[0] == '.') continue;
+        if (best == null or std.mem.order(u8, e.name, best.?) == .gt) {
+            if (best) |b| gpa.free(b);
+            best = try gpa.dupe(u8, e.name);
         }
     }
     const b = best orelse return null;

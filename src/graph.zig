@@ -18,8 +18,6 @@ pub const Graph = struct {
     }
 };
 
-pub const Error = error{ Cycle, Invalid, OutOfMemory };
-
 pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workflow.Problem) !Graph {
     var g: Graph = undefined;
     g.arena = std.heap.ArenaAllocator.init(gpa);
@@ -117,6 +115,8 @@ fn checkServiceInputs(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow
             while (it.next()) |e| {
                 if (!workflow.within(sp, e.key_ptr.*) or seen[e.value_ptr.*]) continue;
                 const out = std.mem.trimStart(u8, e.key_ptr.*[wf.root.len..], "/");
+                if (e.value_ptr.* == u)
+                    return problem.set(gpa, "rule {s} joins service '{s}' and writes {s}, which the service loads; the service would start before the file exists", .{ r.name, s.name, out });
                 return problem.set(gpa, "rule {s} joins service '{s}', which loads {s} from rule {s}; make an output of {s} an input of {s}", .{ r.name, s.name, out, wf.rules[e.value_ptr.*].name, wf.rules[e.value_ptr.*].name, r.name });
             }
         }
@@ -163,7 +163,13 @@ pub fn select(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, tar
 
 /// Writes the selected graph in Graphviz DOT form.
 pub fn writeDot(w: *std.Io.Writer, wf: *const workflow.Workflow, g: *const Graph, mask: []const bool) !void {
-    try w.print("digraph \"{s}\" {{\n  rankdir=LR;\n  node [shape=box];\n", .{wf.name});
+    // Rule names cannot hold quotes; the workflow name can.
+    try w.writeAll("digraph \"");
+    for (wf.name) |c| {
+        if (c == '"' or c == '\\') try w.writeByte('\\');
+        try w.writeByte(c);
+    }
+    try w.writeAll("\" {\n  rankdir=LR;\n  node [shape=box];\n");
     for (g.order) |i| {
         if (!mask[i]) continue;
         try w.print("  \"{s}\";\n", .{wf.rules[i].name});

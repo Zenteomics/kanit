@@ -12,9 +12,10 @@ Three changes need action:
 
 - **Expect every rule to run once.** Recorded file identities no longer include the device number, and a rule that uses a shared file input now counts that file as an input.
 - **Pass `--json` for the JSON summary on a terminal.** On a terminal, `run` and `status` print a short readable summary; standard output that goes to a file or a pipe still gets JSON.
-- **Update scripts that read reports or exit statuses.**
+- **Update scripts that read reports, events or exit statuses.**
   - `report --suggest` names its first column and JSON field `step` instead of `kind`, and `--compare` and `--bottlenecks` group by step.
   - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
+  - A rule cancelled before its attempt started is recorded as `task_finished` with status `cancelled`, not as `task_failed`, and `task_failed` always has an `attempt` field, null when no attempt started.
 
 ### Added
 
@@ -58,7 +59,22 @@ Three changes need action:
   - Reuse survives a reboot on btrfs, which numbers its subvolumes anew at each mount; every rule used to run again after a reboot.
   - A rule that uses a shared file input counts the input's path as an input, so rebuilding an index reruns the rules that read it.
   - A `state.json` from an earlier version is saved with the current format version.
+- **`plan`, `explain` and `verify` predict what `run` does.**
+  - An output whose bytes still match its stored digest counts as intact, as `run` treats it, instead of "output changed".
+  - `explain` names the inputs that changed for the rule itself, and the inputs added or removed, from the inputs recorded with the rule.
+  - `explain` describes a change to a list such as `PATH` entry by entry in both directions.
+  - `plan --summary` counts the rules that a cutoff producer may leave reused on a line of their own.
+  - `verify` says how many selected rules have no record, instead of ending with "all match" after listing them.
+- **Shared inputs.** A directory of many files no longer risks failing to start its holder, and a holder that cannot start fails its rules with the reason instead of ending the launch.
+- **Stopping and control.**
+  - An attempt being stopped can no longer time out and push its kill back.
+  - Every complete `workz control` line is applied, however many arrive at once; a line too long to be a command is skipped with a notice.
+  - The engine says when `workz control` cannot reach a launch, or when the guard of `--no-isolation` tasks cannot start.
+- **Containers.**
+  - `plan` and `clean` give Podman the environment `run` gives it.
+  - A mount below another mount is left out even when a sibling directory sorts between them.
 - **Start order.** A rule that never completed is estimated by the median wall time of its step, as the reports compute it.
+- **Labels.** A rule named with a trailing `__` keeps its whole name as its step.
 - **Comparisons.**
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.
   - A step with no completed attempt on one side shows `-` and says on which side it did not run, instead of a change of -100%.
@@ -66,6 +82,10 @@ Three changes need action:
   - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
   - A rule that fails because its shared input could not be loaded prints a failure line with the reason.
   - An option without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
+  - A run whose scope cannot create task cgroups names the controllers to delegate, and other cgroup errors name the error.
+  - The refusal for an output changed outside workz gives its advice once.
+  - A group count below 1 names the count, an output listed twice in one rule says so, and a rule that writes into the path of the service it joins says so.
+  - `workz graph` escapes quotes in the workflow name.
 - **`workz init`** rejects options instead of writing a file named after them, and its starter workflow describes a resource group as units that rules take.
 - **`workz completion bash`** completes every option of every command, the `control` commands, and rule names after `control stop` and `control retry`.
 

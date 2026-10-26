@@ -221,22 +221,13 @@ fn removeChildren(gpa: Allocator, path: []const u8, depth: usize) !void {
     defer gpa.free(p);
     const fd: sys.Fd = @intCast(try sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
     defer sys.close(fd);
-    var buf: [8192]u8 align(8) = undefined;
-    while (true) {
-        const n = try sys.check(linux.getdents64(fd, &buf, buf.len));
-        if (n == 0) break;
-        var off: usize = 0;
-        while (off < n) {
-            const reclen = std.mem.readInt(u16, buf[off + 16 ..][0..2], .little);
-            const dtype = buf[off + 18];
-            const name = std.mem.sliceTo(buf[off + 19 .. off + reclen], 0);
-            off += reclen;
-            // DT_DIR entries are child groups; the rest are interface files.
-            if (dtype != 4 or std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            const child = try std.fs.path.join(gpa, &.{ path, name });
-            defer gpa.free(child);
-            try removeChildren(gpa, child, depth + 1);
-            try sys.rmdir(gpa, child);
-        }
+    var entries: sys.DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| {
+        // Directories are child groups; the rest are interface files.
+        if (e.kind != 4) continue;
+        const child = try std.fs.path.join(gpa, &.{ path, e.name });
+        defer gpa.free(child);
+        try removeChildren(gpa, child, depth + 1);
+        try sys.rmdir(gpa, child);
     }
 }

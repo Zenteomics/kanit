@@ -46,15 +46,13 @@ pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []c
 /// three times. Returns the number of containers found.
 pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) !usize {
     var status: u32 = 0;
-    const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
     var found: usize = 0;
     for (0..3) |round| {
-        const out = process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status) catch return found;
+        const ids = listLeftovers(gpa, a, podman, root, envp, devnull) catch return found;
         var argv: std.ArrayList([]const u8) = .empty;
         try argv.appendSlice(a, &.{ podman, "rm", "--force", "--ignore", "--depend", "--time", "0" });
         const fixed = argv.items.len;
-        var it = std.mem.tokenizeAny(u8, out, " \n");
-        while (it.next()) |id| try argv.append(a, id);
+        try argv.appendSlice(a, ids);
         if (argv.items.len == fixed) break;
         if (round == 0) found = argv.items.len - fixed;
         if (round > 0) {
@@ -64,6 +62,18 @@ pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: [
         _ = process.capture(gpa, a, argv.items, envp, devnull, &status) catch {};
     }
     return found;
+}
+
+/// IDs of the containers that launches in working directory `root` started
+/// and that still exist.
+pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) ![]const []const u8 {
+    var status: u32 = 0;
+    const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
+    const out = try process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status);
+    var ids: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.tokenizeAny(u8, out, " \n");
+    while (it.next()) |id| try ids.append(a, id);
+    return ids.items;
 }
 
 /// Removes one container, whatever its state; used after an attempt that
@@ -111,7 +121,12 @@ fn minimal(a: Allocator, dirs: []const []const u8) ![]const []const u8 {
     std.mem.sort([]const u8, sorted, {}, lessThan);
     var out: std.ArrayList([]const u8) = .empty;
     for (sorted) |d| {
-        if (out.items.len > 0 and workflow.within(out.items[out.items.len - 1], d)) continue;
+        // A sibling such as "/a-b" can sort between "/a" and "/a/c", so every
+        // kept directory is checked, not only the last.
+        const below = for (out.items) |k| {
+            if (workflow.within(k, d)) break true;
+        } else false;
+        if (below) continue;
         try out.append(a, d);
     }
     return out.items;

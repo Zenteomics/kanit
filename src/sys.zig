@@ -232,9 +232,10 @@ pub fn rmdir(gpa: Allocator, path: []const u8) !void {
 /// File identity used for resume decisions: inode, size, and the
 /// modification and change times in nanoseconds. A change time cannot be set
 /// back by user programs, so a rewrite that restores mtime is still detected.
-/// The device number takes part in comparisons within one launch but not in
-/// the recorded text (`format`): btrfs numbers its subvolumes anew at each
-/// mount, so a recorded device number would change with every reboot.
+/// The device number tells files apart within one launch, such as two paths
+/// that are hard links to one file, but is left out of the recorded text
+/// (`format`): btrfs numbers its subvolumes anew at each mount, so a
+/// recorded device number would change with every reboot.
 pub const Identity = struct {
     dev: u64,
     ino: u64,
@@ -242,11 +243,6 @@ pub const Identity = struct {
     mtime_ns: i128,
     ctime_ns: i128,
     mode: u32,
-
-    pub fn eql(a: Identity, b: Identity) bool {
-        return a.dev == b.dev and a.ino == b.ino and a.size == b.size and
-            a.mtime_ns == b.mtime_ns and a.ctime_ns == b.ctime_ns;
-    }
 
     pub fn isDir(self: Identity) bool {
         return self.mode & 0o170000 == 0o040000;
@@ -404,3 +400,33 @@ pub fn realpath(gpa: Allocator, path: []const u8) !?[]u8 {
     const n = try check(linux.readlinkat(linux.AT.FDCWD, proc, &buf, buf.len));
     return try gpa.dupe(u8, buf[0..n]);
 }
+
+/// The entries of an open directory, without "." and "..", read with
+/// getdents64. An entry's name lives in the reader's buffer until the next
+/// call of `next`.
+pub const DirEntries = struct {
+    fd: Fd,
+    buf: [16384]u8 align(8) = undefined,
+    n: usize = 0,
+    off: usize = 0,
+
+    /// `kind` is the d_type byte: 4 for a directory, 8 for a regular file,
+    /// 10 for a symlink, 0 when the file system does not say.
+    pub const Entry = struct { name: []const u8, kind: u8 };
+
+    pub fn next(self: *DirEntries) Error!?Entry {
+        while (true) {
+            if (self.off >= self.n) {
+                self.n = try check(linux.getdents64(self.fd, &self.buf, self.buf.len));
+                self.off = 0;
+                if (self.n == 0) return null;
+            }
+            const reclen = std.mem.readInt(u16, self.buf[self.off + 16 ..][0..2], .little);
+            const kind = self.buf[self.off + 18];
+            const name = std.mem.sliceTo(self.buf[self.off + 19 .. self.off + reclen], 0);
+            self.off += reclen;
+            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
+            return .{ .name = name, .kind = kind };
+        }
+    }
+};

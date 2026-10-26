@@ -133,9 +133,6 @@ pub const Reaped = struct {
     status: u32,
     usage: linux.rusage,
 
-    pub fn exited(self: Reaped) bool {
-        return linux.W.IFEXITED(self.status);
-    }
     pub fn exitCode(self: Reaped) ?u8 {
         return if (linux.W.IFEXITED(self.status)) linux.W.EXITSTATUS(self.status) else null;
     }

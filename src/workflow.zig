@@ -10,7 +10,6 @@ pub const format_version: i64 = 1;
 pub const GroupUse = struct { name: []const u8, count: u32 };
 
 pub const Rule = struct {
-    index: usize,
     line: u32,
     name: []const u8,
     /// Paths as written, and their absolute lexical forms.
@@ -46,6 +45,9 @@ pub const Rule = struct {
     links: []const Link = &.{},
     groups: []const GroupUse,
     shared: []const []const u8,
+    /// `shared` as indices into `Workflow.shared`, set once the workflow
+    /// is checked.
+    shared_index: []const usize = &.{},
     /// What the rule is, for reports and the live view; not part of its key.
     labels: Labels = .{ .step = "" },
 };
@@ -77,8 +79,11 @@ pub const label_keys = [_][]const u8{ "step", "category", "tool", "sample" };
 pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
     var l: Labels = .{ .step = name };
     if (std.mem.lastIndexOf(u8, name, "__")) |i| {
-        l.step = name[i + 2 ..];
-        if (i > 0) l.sample = name[0..i];
+        // A name that ends in "__" keeps it as its step.
+        if (i + 2 < name.len) {
+            l.step = name[i + 2 ..];
+            if (i > 0) l.sample = name[0..i];
+        }
     } else if (std.mem.lastIndexOfScalar(u8, name, '_')) |i| {
         if (i > 0) l.step = name[0..i];
     }
@@ -417,6 +422,19 @@ fn validName(name: []const u8) bool {
     return true;
 }
 
+/// An explicit local path written relative to the working directory,
+/// without "..".
+fn relativeLocal(p: []const u8) bool {
+    return localPath(p) and !std.fs.path.isAbsolute(p) and !hasParentComponent(p);
+}
+
+/// Whether `abs`, a path at or below `root`, is the engine's record
+/// directory or inside it.
+fn inRecords(root: []const u8, abs: []const u8) bool {
+    const rel = abs[root.len..];
+    return std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz");
+}
+
 /// Rejects remote, glob and empty paths; workflows name explicit local files.
 fn localPath(p: []const u8) bool {
     if (p.len == 0) return false;
@@ -628,7 +646,9 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
                         .integer => |n| n.value,
                         else => return p.failKey(&res_at, "groups", "rule {s}: group counts must be integers", .{name}),
                     };
-                    try group_uses.append(arena, .{ .name = try arena.dupe(u8, ge.key_ptr.*), .count = std.math.cast(u32, count) orelse 0 });
+                    const units = std.math.cast(u32, count) orelse
+                        return p.failKey(&res_at, "groups", "rule {s}: group '{s}' count {d} must be from 1 to the group's max", .{ name, ge.key_ptr.*, count });
+                    try group_uses.append(arena, .{ .name = try arena.dupe(u8, ge.key_ptr.*), .count = units });
                 }
             }
         }
@@ -710,7 +730,6 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         };
 
         rules[i] = .{
-            .index = i,
             .line = p.line(&at),
             .name = name,
             .input = input,
@@ -741,6 +760,12 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
     }
     wf.rules = rules;
     try checkRules(gpa, &wf, problem);
+    // Every shared name now exists: resolve each rule's to indices once.
+    for (rules) |*r| {
+        const idx = try arena.alloc(usize, r.shared.len);
+        for (r.shared, idx) |s, *x| x.* = wf.sharedIndex(s).?;
+        r.shared_index = idx;
+    }
     return wf;
 }
 
@@ -760,11 +785,10 @@ pub fn within(root: []const u8, path: []const u8) bool {
 /// directory, outside the engine's record directory, and must not resolve
 /// through a symlinked parent to somewhere else.
 fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: []const u8, written: []const u8, abs: []const u8, problem: *Problem) !void {
-    if (!localPath(written) or std.fs.path.isAbsolute(written) or hasParentComponent(written))
+    if (!relativeLocal(written))
         return problem.set(gpa, "rule {s}: '{s}' must be a relative path inside the working directory", .{ rule, written });
     if (!within(wf.root, abs)) return problem.set(gpa, "rule {s}: '{s}' leaves the working directory", .{ rule, written });
-    const rel = abs[wf.root.len..];
-    if (std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz"))
+    if (inRecords(wf.root, abs))
         return problem.set(gpa, "rule {s}: '{s}' is inside the engine record directory", .{ rule, written });
     if (try sys.lstat(gpa, abs)) |id| {
         if (!id.isReg()) return problem.set(gpa, "rule {s}: existing '{s}' must be a regular file", .{ rule, written });
@@ -846,7 +870,10 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         for (r.input) |in| if (!localPath(in)) return problem.set(gpa, "rule {s}: input '{s}' must be an explicit local path", .{ r.name, in });
         for (r.output, r.output_abs) |out, abs| {
             try checkWritable(gpa, wf, &cache, r.name, out, abs, problem);
-            if (outputs.get(abs)) |other| return problem.set(gpa, "rules {s} and {s} both produce '{s}'", .{ other, r.name, out });
+            if (outputs.get(abs)) |other| {
+                if (std.mem.eql(u8, other, r.name)) return problem.set(gpa, "rule {s} lists output '{s}' twice", .{ r.name, out });
+                return problem.set(gpa, "rules {s} and {s} both produce '{s}'", .{ other, r.name, out });
+            }
             try outputs.put(gpa, abs, r.name);
             const out_id = try cache.stat(abs);
             if (out_id) |id| {
@@ -870,7 +897,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         }
         for (r.groups) |g| {
             const max = wf.groupMax(g.name) orelse return problem.set(gpa, "rule {s} uses undeclared resource group '{s}'", .{ r.name, g.name });
-            if (g.count < 1 or g.count > max) return problem.set(gpa, "rule {s}: group '{s}' request {d} cannot fit its capacity {d}", .{ r.name, g.name, g.count, max });
+            if (g.count < 1 or g.count > max) return problem.set(gpa, "rule {s}: group '{s}' count {d} must be from 1 to the group's max of {d}", .{ r.name, g.name, g.count, max });
         }
         var services: usize = 0;
         for (r.shared) |s| if (wf.sharedIndex(s)) |si| if (wf.shared[si].isService()) {
@@ -879,10 +906,9 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         };
         if (services > 1) return problem.set(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
         if (r.workdir) |d| {
-            if (!localPath(d) or std.fs.path.isAbsolute(d) or hasParentComponent(d) or !within(wf.root, r.workdir_abs.?) or std.mem.eql(u8, r.workdir_abs.?, wf.root))
+            if (!relativeLocal(d) or !within(wf.root, r.workdir_abs.?) or std.mem.eql(u8, r.workdir_abs.?, wf.root))
                 return problem.set(gpa, "rule {s}: workdir '{s}' must be a directory below the working directory", .{ r.name, d });
-            const rel = r.workdir_abs.?[wf.root.len..];
-            if (std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz"))
+            if (inRecords(wf.root, r.workdir_abs.?))
                 return problem.set(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d });
         }
         for (r.links) |l| {

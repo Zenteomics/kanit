@@ -651,7 +651,9 @@ const PlanExtra = struct {
 };
 
 fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
-    return plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass), c.env);
+    var ctx = try plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass), c.env);
+    ctx.pass_env = pass;
+    return ctx;
 }
 
 fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
@@ -1256,9 +1258,15 @@ fn writeProc(path: [*:0]const u8, text: []const u8) !void {
 /// Internal: maps every file read-only, touches each page so the run's
 /// holder group carries the page-cache charge, reports "ready" on stdout
 /// and keeps the mappings until it is stopped.
+/// `__hold PATH...`: maps every file at or below each path, touches each
+/// page once, says `ready BYTES` and keeps the mappings until killed.
 fn hold(paths: []const [:0]const u8) Exit {
+    const gpa = std.heap.page_allocator;
+    var files: std.ArrayList([]u8) = .empty;
+    for (paths) |p| workz.state.listFiles(gpa, p, &files) catch return fail("cannot list shared input {s}", .{p});
     var total: u64 = 0;
-    for (paths) |p| {
+    for (files.items) |file| {
+        const p = gpa.dupeZ(u8, file) catch return fail("out of memory listing shared input {s}", .{file});
         const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
         if (linux.errno(fd_rc) != .SUCCESS) return fail("cannot open shared input {s}", .{p});
         const fd: i32 = @intCast(fd_rc);

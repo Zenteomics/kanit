@@ -109,7 +109,7 @@ If a recorded output was changed outside workz, for example edited by hand, the 
 
 ```text
 workz: output of completed rule make changed since it was recorded: .../edit/out.txt
-workz: refusing to reuse changed outputs; use --rerun, or --rerun-rule for the affected rules, to run them again (earlier bytes are kept in previous/)
+workz: a recorded output changed outside workz (.../edit/out.txt); run again with --rerun-rule for the affected rules, or --rerun for all (earlier bytes are kept in previous/)
 ```
 
 If a digest is stored for the output (a cutoff rule, or `verify --content`) and the bytes still match it, workz records the new identity and the rule stays reused. Otherwise run the rule again on purpose with `--rerun-rule RULE`, or restore the file.

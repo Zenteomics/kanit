@@ -2,9 +2,11 @@
 //! cancellation, shared-input holders and records.
 //!
 //! One thread waits in ppoll on a signalfd and the shared holders' pipes, with
-//! the nearest timeout as its deadline. Ready rules are tried in priority
-//! order, then by the time they became ready, then by file order; every rule
-//! whose CPU, memory, group, shared-input and job requests fit starts.
+//! the nearest timeout as its deadline. Ready rules are tried by priority,
+//! then, when several are ready, by the estimated chain of work they head
+//! (the critical-path rank), then by the time they became ready, then by
+//! file order; every rule whose CPU, memory, group, shared-input and job
+//! requests fit starts.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -99,6 +101,14 @@ const Task = struct {
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
 
+/// The keys this launch gives its rules, for `state.ruleKey`.
+const TaskKeys = struct {
+    tasks: []const Task,
+    pub fn get(self: TaskKeys, p: usize) ?[]const u8 {
+        return if (self.tasks[p].key) |k| k.key else null;
+    }
+};
+
 /// Without isolation: the `__guard` child that kills the process groups of
 /// running tasks if the engine dies (see `guard` in main).
 const Guard = struct {
@@ -122,7 +132,7 @@ const Guard = struct {
         sys.writeAll(self.fd, text) catch {};
     }
 
-    /// Ends the guard; its list is empty when every task was reaped.
+    /// Ends the guard; it kills the process groups of tasks still noted.
     fn stop(self: Guard) void {
         sys.close(self.fd);
         var status: u32 = 0;
@@ -260,7 +270,6 @@ const Engine = struct {
     cut: *state.Cutoff,
     events: *records.Events,
     journal: *records.Journal,
-    records: []const u8,
     launch_dir: []const u8,
     launch_id: []const u8,
     /// Engine part of every rule key (state.engine_key_text).
@@ -282,6 +291,8 @@ const Engine = struct {
     control_path: []const u8 = "",
     control_watch: sys.Fd = -1,
     control_offset: u64 = 0,
+    /// Inside a control line too long to be a command, skipped to its end.
+    control_skip: bool = false,
     /// Podman, when the selected rules use containers.
     podman: ?[]const u8 = null,
     /// cgroup of the podman clients and conmon processes, when isolated.
@@ -505,28 +516,20 @@ const Engine = struct {
     fn makeReady(self: *Engine, i: usize) !void {
         const t = &self.tasks[i];
         const r = self.rule(i);
-        // Rules not produced by this launch keep their recorded keys.
-        var names: std.ArrayList([]const u8) = .empty;
-        var keys: std.ArrayList([]const u8) = .empty;
-        for (self.g.parents[i]) |p| {
-            try names.append(self.a, self.rule(p).name);
-            const pk = if (self.tasks[p].key) |k| k.key else if (self.st.data.rules.map.get(self.rule(p).name)) |e| e.key else "none";
-            try keys.append(self.a, self.cut.parentKey(p, pk));
-        }
         var missing: ?[]const u8 = null;
-        const key = try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, self.cut, self.extras[i], &missing);
+        const key = try state.ruleKey(self.a, self.ids, self.wf, self.g.parents[i], i, self.st, self.cut, TaskKeys{ .tasks = self.tasks }, self.env_text, self.engine_id, self.extras[i], &missing);
         if (key == null) {
             t.status = .failed;
             t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
             self.finished += 1;
-            self.events.emit("task_failed", .{ .rule = r.name, .reason = t.reason });
+            self.events.emit("task_failed", .{ .rule = r.name, .attempt = @as(?u32, null), .reason = t.reason });
             self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
             if (!self.opts.keep_going) self.beginStop();
             return;
         }
         t.key = key.?;
         if (!self.opts.forced(r.name)) if (self.st.data.rules.map.get(r.name)) |e| {
-            if (std.mem.eql(u8, e.key, key.?.key) and try self.outputsIntact(&e)) {
+            if (try state.reuseCheck(self.gpa, self.ids, &e, &key.?) == .reuse) {
                 // A state from before environments were recorded gains this one.
                 if (!self.st.data.envs.map.contains(e.env)) {
                     const sa = self.st.allocator();
@@ -545,14 +548,6 @@ const Engine = struct {
         t.ready_ns = sys.monoNs();
     }
 
-    fn outputsIntact(self: *Engine, e: *const state.Entry) !bool {
-        for (e.outputs) |o| {
-            const id = (try self.ids.get(o.path)) orelse return false;
-            if (!std.mem.eql(u8, id, o.id)) return false;
-        }
-        return true;
-    }
-
     // ---- admission ----
 
     /// The first resource that keeps a ready rule from starting, or null
@@ -567,8 +562,8 @@ const Engine = struct {
         if (self.jobs_used + 1 > self.max_jobs) return "jobs";
         if (self.threads_used + r.threads > self.max_threads) return "threads";
         var mem = r.memory_mib;
-        for (r.shared) |s| {
-            const h = &self.holders[self.wf.sharedIndex(s).?];
+        for (r.shared_index) |hi| {
+            const h = &self.holders[hi];
             if (!h.held) mem += h.mib;
         }
         if (self.memory_used - freed_mib + mem > self.max_memory) return "memory";
@@ -631,7 +626,7 @@ const Engine = struct {
                 // fits once their memory is returned, which happens when
                 // they have exited; the rule waits until then.
                 const idle = self.idleMib(i);
-                if (std.mem.eql(u8, why, "memory") and idle > 0 and self.blockerFreeing(i, idle) == null) _ = self.releaseIdle(i);
+                if (std.mem.eql(u8, why, "memory") and idle > 0 and self.blockerFreeing(i, idle) == null) self.releaseIdle(i);
                 try self.setWait(i, why);
                 continue;
             }
@@ -642,14 +637,13 @@ const Engine = struct {
             const r = self.rule(i);
             var waiting = false;
             var failure: ?[]const u8 = null;
-            for (r.shared) |s| {
-                const hi = self.wf.sharedIndex(s).?;
+            for (r.shared_index) |hi| {
                 const h = &self.holders[hi];
                 if (!h.held) self.memory_used += h.mib;
                 h.held = true;
                 h.users += 1;
                 if (h.st == .failed and h.failure != null) failure = h.failure;
-                if (h.st == .idle) try self.startHolder(hi);
+                if (h.st == .idle) try self.startHolderOrFail(hi);
                 if (h.st != .ready) waiting = true;
             }
             if (failure) |why| {
@@ -784,7 +778,7 @@ const Engine = struct {
             // the container alone goes into the attempt's cgroup.
             const name = try std.fmt.allocPrint(self.a, "workz-{s}-{d}-{d}", .{ self.launch_id, i, t.attempts });
             var extra_ro: std.ArrayList([]const u8) = .empty;
-            for (r.shared) |sn| if (self.wf.shared[self.wf.sharedIndex(sn).?].path_abs) |p| try extra_ro.append(self.a, p);
+            for (r.shared_index) |hi| if (self.wf.shared[hi].path_abs) |p| try extra_ro.append(self.a, p);
             const argv = try container.runArgv(self.a, .{
                 .podman = self.podman.?,
                 .name = name,
@@ -793,12 +787,7 @@ const Engine = struct {
                 .launch = self.launch_id,
                 .cgroup_parent = if (t.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
                 .mounts = try container.mounts(self.a, self.wf.root, r, extra_ro.items),
-                .env = try self.containerEnv(&.{
-                    try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}),
-                    try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{t.dir}),
-                    try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}),
-                    try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}),
-                }),
+                .env = try self.containerEnv(&try self.ruleVars(r, t.dir)),
                 .ipc_service = self.serviceOf(r),
                 .image_mounts = r.mounts,
                 .workdir = r.workdir_abs,
@@ -849,18 +838,30 @@ const Engine = struct {
 
     /// An attempt that could not start: it fails and gives back what it held.
     fn failToStart(self: *Engine, i: usize, reason: []const u8) void {
+        self.endUnstarted(i, true, self.tasks[i].attempts, .failed, reason);
+    }
+
+    /// Ends a rule whose attempt never ran. An admitted rule gives back its
+    /// reservation and shared inputs. A failure is recorded as `task_failed`
+    /// and stops the launch unless --keep-going; a cancellation is recorded
+    /// as `task_finished` with status `cancelled`, as for a running attempt.
+    fn endUnstarted(self: *Engine, i: usize, admitted: bool, attempt: ?u32, status: Status, reason: []const u8) void {
         const t = &self.tasks[i];
         const r = self.rule(i);
-        t.status = .failed;
-        t.reason = reason;
         if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
         t.cg = null;
-        self.reserve(i, false);
-        self.releaseShared(i);
+        if (admitted) {
+            self.reserve(i, false);
+            self.releaseShared(i);
+        }
+        t.status = status;
+        t.reason = reason;
         self.finished += 1;
-        self.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
-        self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
-        if (!self.opts.keep_going) self.beginStop();
+        if (status == .failed) {
+            self.events.emit("task_failed", .{ .rule = r.name, .attempt = attempt, .reason = reason });
+            self.alert("failed", "{s}: {s}", .{ r.name, reason });
+            if (!self.opts.keep_going) self.beginStop();
+        } else self.events.emit("task_finished", .{ .rule = r.name, .attempt = attempt, .status = "cancelled", .reason = reason });
     }
 
     /// Makes a rule's work directory and its links; the reason it cannot,
@@ -888,7 +889,9 @@ const Engine = struct {
             const kv = std.mem.span(e.?);
             const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
             const name = kv[0..eq];
-            const keep = for ([_][]const u8{ "TZ", "LANG", "LC_ALL" }) |k| {
+            // The keyed variables but PATH, which the image sets.
+            const keep = for (state.keyed_env) |k| {
+                if (std.mem.eql(u8, k, "PATH")) continue;
                 if (std.mem.eql(u8, k, name)) break true;
             } else for (self.opts.pass_env) |k| {
                 if (std.mem.eql(u8, k, name)) break true;
@@ -902,11 +905,18 @@ const Engine = struct {
     fn taskEnv(self: *Engine, r: *const workflow.Rule, dir: []const u8) !process.Vec {
         var list: std.ArrayList([]const u8) = .empty;
         for (self.envp.items) |e| try list.append(self.a, std.mem.span(e.?));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{dir}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}));
-        try list.append(self.a, try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}));
+        try list.appendSlice(self.a, &try self.ruleVars(r, dir));
         return process.Vec.init(self.a, list.items);
+    }
+
+    /// The `WORKZ_*` variables of an attempt of rule `r`.
+    fn ruleVars(self: *Engine, r: *const workflow.Rule, dir: []const u8) ![4][]const u8 {
+        return .{
+            try std.fmt.allocPrint(self.a, "WORKZ_RULE={s}", .{r.name}),
+            try std.fmt.allocPrint(self.a, "WORKZ_ATTEMPT_DIR={s}", .{dir}),
+            try std.fmt.allocPrint(self.a, "WORKZ_THREADS={d}", .{r.threads}),
+            try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}),
+        };
     }
 
     // ---- shared input holders ----
@@ -916,17 +926,9 @@ const Engine = struct {
         if (self.wf.shared[hi].isService()) return self.startService(hi);
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
-        var files: std.ArrayList([]u8) = .empty;
-        defer {
-            for (files.items) |f| self.gpa.free(f);
-            files.deinit(self.gpa);
-        }
-        try state.listFiles(self.gpa, s.path_abs.?, &files);
-        var argv_list: std.ArrayList([]const u8) = .empty;
-        try argv_list.append(self.a, "workz");
-        try argv_list.append(self.a, "__hold");
-        for (files.items) |f| try argv_list.append(self.a, try self.a.dupe(u8, f));
-        const argv = try process.Vec.init(self.a, argv_list.items);
+        // The holder walks a directory itself, so the command line stays one
+        // path long however many files the index has.
+        const argv = try process.Vec.init(self.a, &.{ "workz", "__hold", s.path_abs.? });
         const exe = try sys.selfExe(self.a);
 
         var pipe: [2]i32 = undefined;
@@ -1068,21 +1070,20 @@ const Engine = struct {
 
     /// Container name of the service a rule joins, if any.
     fn serviceOf(self: *Engine, r: *const workflow.Rule) ?[]const u8 {
-        for (r.shared) |s| {
-            const h = self.holders[self.wf.sharedIndex(s).?];
+        for (r.shared_index) |hi| {
+            const h = self.holders[hi];
             if (h.container_name) |name| return name;
         }
         return null;
     }
 
     fn sharedReady(self: *Engine, i: usize) bool {
-        for (self.rule(i).shared) |s| if (self.holders[self.wf.sharedIndex(s).?].st != .ready) return false;
+        for (self.rule(i).shared_index) |hi| if (self.holders[hi].st != .ready) return false;
         return true;
     }
 
     fn releaseShared(self: *Engine, i: usize) void {
-        for (self.rule(i).shared) |s| {
-            const hi = self.wf.sharedIndex(s).?;
+        for (self.rule(i).shared_index) |hi| {
             const h = &self.holders[hi];
             h.users -= 1;
             // A holder outlives a gap between its users, so it is not
@@ -1095,7 +1096,7 @@ const Engine = struct {
     fn holderNeeded(self: *Engine, hi: usize) bool {
         for (self.tasks, 0..) |t, i| {
             if (t.status != .pending and t.status != .ready) continue;
-            for (self.rule(i).shared) |s| if (self.wf.sharedIndex(s).? == hi) return true;
+            if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null) return true;
         }
         return false;
     }
@@ -1117,9 +1118,7 @@ const Engine = struct {
         var mib: u64 = 0;
         for (self.holders, 0..) |h, hi| {
             if (h.users > 0 or !h.held or h.st == .stopping) continue;
-            const uses = for (self.rule(i).shared) |s| {
-                if (self.wf.sharedIndex(s).? == hi) break true;
-            } else false;
+            const uses = std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null;
             if (!uses) mib += h.mib;
         }
         return mib;
@@ -1128,20 +1127,15 @@ const Engine = struct {
     /// Releases holders without users that rule `i` does not use, or every
     /// one without users when `i` is null and none is needed any longer.
     /// True when one was released.
-    fn releaseIdle(self: *Engine, i: ?usize) bool {
-        var any = false;
+    fn releaseIdle(self: *Engine, i: ?usize) void {
         for (self.holders, 0..) |h, hi| {
             if (h.users > 0 or !h.held or h.st == .stopping) continue;
             if (i) |ri| {
-                const uses = for (self.rule(ri).shared) |s| {
-                    if (self.wf.sharedIndex(s).? == hi) break true;
-                } else false;
+                const uses = std.mem.indexOfScalar(usize, self.rule(ri).shared_index, hi) != null;
                 if (uses) continue;
             } else if (!self.stopping and self.holderNeeded(hi)) continue;
             self.releaseHolder(hi);
-            any = true;
         }
-        return any;
     }
 
     fn holderExited(self: *Engine, hi: usize, reaped: process.Reaped) !void {
@@ -1177,7 +1171,7 @@ const Engine = struct {
             h.st = .idle;
             self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped) });
             // A rule admitted while the holder stopped needs it again.
-            if (h.users > 0) try self.startHolder(hi);
+            if (h.users > 0) try self.startHolderOrFail(hi);
             return;
         }
         h.st = .failed;
@@ -1201,32 +1195,37 @@ const Engine = struct {
             h.failed_starts += 1;
             self.events.emit("shared_retry", .{ .name = s.name, .reason = why, .next_start = h.starts + 1 });
             self.alert("restarting", "shared service {s}: {s}", .{ s.name, why });
-            try self.startHolder(hi);
+            try self.startHolderOrFail(hi);
             return;
         }
+        try self.failHolder(hi, why, peak);
+    }
+
+    /// Starts a holder; one that cannot start fails as if it had ended.
+    fn startHolderOrFail(self: *Engine, hi: usize) !void {
+        self.startHolder(hi) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => try self.failHolder(hi, try std.fmt.allocPrint(self.a, "could not start: {s}", .{@errorName(err)}), null),
+        };
+    }
+
+    /// Marks a shared input failed for the rest of the launch and fails the
+    /// rules admitted to use it.
+    fn failHolder(self: *Engine, hi: usize, why: []const u8, peak: ?u64) !void {
+        const h = &self.holders[hi];
+        const s = self.wf.shared[hi];
+        h.st = .failed;
         h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
         self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });
-        // Rules waiting on this input cannot start.
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .staging) continue;
-            for (self.rule(i).shared) |sn| if (self.wf.sharedIndex(sn).? == hi) {
-                self.failStaged(i, h.failure.?);
-                break;
-            };
+            if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null) self.failStaged(i, h.failure.?);
         }
     }
 
     /// Fails an admitted rule that cannot start because a shared input failed.
     fn failStaged(self: *Engine, i: usize, reason: []const u8) void {
-        const t = &self.tasks[i];
-        t.status = .failed;
-        t.reason = reason;
-        self.reserve(i, false);
-        self.releaseShared(i);
-        self.finished += 1;
-        self.events.emit("task_failed", .{ .rule = self.rule(i).name, .reason = reason });
-        self.alert("failed", "{s}: {s}", .{ self.rule(i).name, reason });
-        if (!self.opts.keep_going) self.beginStop();
+        self.endUnstarted(i, true, null, .failed, reason);
     }
 
     // ---- finishing attempts ----
@@ -1317,7 +1316,7 @@ const Engine = struct {
             .finished = finished_text,
             .wall_s = wall_s,
             .cpu_s = taskCpu(counters, reaped),
-            .cpu_source = if (counters != null and counters.?.cpu_usage_usec != null) "cgroup" else "rusage",
+            .cpu_source = if (cgroupCpu(counters) != null) "cgroup" else "rusage",
             .rusage = .{
                 .cpu_s = reaped.cpuSeconds(),
                 .maxrss_kib = reaped.usage.maxrss,
@@ -1349,6 +1348,11 @@ const Engine = struct {
                 .attempt = try sa.dupe(u8, t.dir),
                 .finished = try sa.dupe(u8, finished_text),
                 .wall_s = wall_s,
+                .input_ids = ids: {
+                    const out = try sa.alloc(state.InputId, k.input_ids.len);
+                    for (out, k.input_ids) |*o, x| o.* = .{ .path = try sa.dupe(u8, x.path), .id = try sa.dupe(u8, x.id) };
+                    break :ids out;
+                },
             });
             if (!self.st.data.envs.map.contains(k.env))
                 try self.st.data.envs.map.put(sa, try sa.dupe(u8, k.env), try sa.dupe(u8, self.env_text));
@@ -1457,19 +1461,38 @@ const Engine = struct {
         const fd = sys.openRead(self.gpa, self.control_path) catch return;
         defer sys.close(fd);
         var buf: [4096]u8 = undefined;
-        const n = sys.check(linux.pread(fd, &buf, buf.len, @intCast(self.control_offset))) catch return;
-        // Only complete lines are applied; a partial one waits.
-        const end = (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse return) + 1;
-        self.control_offset += end;
-        var it = std.mem.splitScalar(u8, buf[0..end], '\n');
-        while (it.next()) |line| {
-            if (line.len == 0) continue;
-            var words = std.mem.tokenizeScalar(u8, line, ' ');
-            const cmd = words.next() orelse continue;
-            const name = words.next() orelse "";
-            const result = try self.control(cmd, name);
-            self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
-            self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
+        // Every complete line is applied; a partial last one waits.
+        while (true) {
+            const n = sys.check(linux.pread(fd, &buf, buf.len, @intCast(self.control_offset))) catch return;
+            if (n == 0) return;
+            if (self.control_skip) {
+                const nl = std.mem.indexOfScalar(u8, buf[0..n], '\n') orelse {
+                    self.control_offset += n;
+                    continue;
+                };
+                self.control_offset += nl + 1;
+                self.control_skip = false;
+                continue;
+            }
+            const end = (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse {
+                // A line longer than the buffer cannot be a command.
+                if (n < buf.len) return;
+                self.alert("control", "ignored a line of over {d} bytes", .{buf.len});
+                self.control_offset += n;
+                self.control_skip = true;
+                continue;
+            }) + 1;
+            self.control_offset += end;
+            var it = std.mem.splitScalar(u8, buf[0..end], '\n');
+            while (it.next()) |line| {
+                if (line.len == 0) continue;
+                var words = std.mem.tokenizeScalar(u8, line, ' ');
+                const cmd = words.next() orelse continue;
+                const name = words.next() orelse "";
+                const result = try self.control(cmd, name);
+                self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
+                self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
+            }
         }
     }
 
@@ -1493,16 +1516,9 @@ const Engine = struct {
                 return "stopping";
             },
             .pending, .ready, .staging => {
-                // A staged rule holds its reservation and its shared inputs.
-                if (t.status == .staging) {
-                    self.reserve(i, false);
-                    self.releaseShared(i);
-                }
                 try self.setWait(i, null);
-                t.status = .cancelled;
-                t.reason = "stopped on request";
-                self.finished += 1;
-                self.events.emit("task_failed", .{ .rule = name, .reason = t.reason });
+                // A staged rule holds its reservation and its shared inputs.
+                self.endUnstarted(i, t.status == .staging, null, .cancelled, "stopped on request");
                 return "cancelled before it started";
             },
             else => return "not running",
@@ -1542,16 +1558,10 @@ const Engine = struct {
                 self.terminate(t, grace);
                 self.events.emit("task_cancelling", .{ .rule = self.rule(i).name });
             },
-            .staging => {
-                t.status = .cancelled;
-                t.reason = "cancelled before start";
-                self.reserve(i, false);
-                self.releaseShared(i);
-                self.finished += 1;
-            },
+            .staging => self.endUnstarted(i, true, null, .cancelled, "cancelled before start"),
             else => {},
         };
-        _ = self.releaseIdle(null);
+        self.releaseIdle(null);
     }
 
     /// Asks a running attempt to stop: SIGTERM to its process group, and for
@@ -1559,6 +1569,8 @@ const Engine = struct {
     /// the grace period. The group is killed later if the attempt is still
     /// running: after the grace period, or ten seconds more for a container.
     fn terminate(self: *Engine, t: *Task, grace: i128) void {
+        // A stopped attempt can no longer time out.
+        t.deadline_ns = null;
         process.signalGroup(t.pid, .TERM);
         if (t.container_name) |name| {
             container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull);
@@ -1595,7 +1607,6 @@ const Engine = struct {
             if (t.deadline_ns) |d| if (now >= d and !t.timed_out) {
                 t.timed_out = true;
                 self.terminate(t, grace);
-                t.deadline_ns = null;
                 self.events.emit("task_timeout", .{ .rule = self.rule(i).name, .attempt = t.attempts });
             };
         }
@@ -1693,7 +1704,7 @@ const Engine = struct {
         while (true) {
             try self.updateReadiness();
             // Holders kept for rules that can no longer run are released.
-            _ = self.releaseIdle(null);
+            self.releaseIdle(null);
             try self.admit();
             try self.saveState(false);
             if (self.running() == 0) {
@@ -1771,13 +1782,43 @@ fn protectScope(gpa: Allocator, a: Allocator, tree: cgroup.Tree, mib: u64, path_
 /// CPU seconds of an attempt: its cgroup's usage when it has one, which
 /// includes containers and processes that left the task; otherwise the
 /// `wait4` usage of the command and its waited children.
+/// CPU seconds of an attempt: its cgroup's usage, which covers every
+/// process of the task, else the rusage of the processes it waited for.
 fn taskCpu(counters: ?cgroup.Counters, reaped: process.Reaped) f64 {
-    if (counters) |c| if (c.cpu_usage_usec) |us| return @as(f64, @floatFromInt(us)) / 1e6;
-    return reaped.cpuSeconds();
+    return cgroupCpu(counters) orelse reaped.cpuSeconds();
+}
+
+fn cgroupCpu(counters: ?cgroup.Counters) ?f64 {
+    const c = counters orelse return null;
+    const us = c.cpu_usage_usec orelse return null;
+    return @as(f64, @floatFromInt(us)) / 1e6;
 }
 
 /// The engine's own CPU time and peak memory, without its tasks.
-fn engineCost() struct { cpu_s: f64, max_rss_mib: f64 } {
+const EngineCost = struct { cpu_s: f64, max_rss_mib: f64 };
+
+/// `summary.json`, the record of how a launch ended.
+const Summary = struct {
+    engine: []const u8,
+    engine_key: u32 = state.engine_key,
+    launch: []const u8,
+    status: []const u8,
+    counts: struct { completed: usize = 0, reused: usize = 0, failed: usize = 0, blocked: usize = 0, cancelled: usize = 0, not_started: usize = 0 },
+    selected: usize,
+    elapsed_s: f64,
+    finished: []const u8,
+    @"error": ?[]const u8,
+    engine_cost: EngineCost,
+    launch_dir: []const u8,
+};
+
+/// Ends a launch's records: the `launch_finished` event and `summary.json`.
+fn writeSummary(gpa: Allocator, a: Allocator, events: *records.Events, s: Summary) !void {
+    events.emit("launch_finished", .{ .status = s.status, .counts = s.counts, .elapsed_s = s.elapsed_s, .@"error" = s.@"error" });
+    try records.writeJson(gpa, try std.fs.path.join(a, &.{ s.launch_dir, "summary.json" }), s);
+}
+
+fn engineCost() EngineCost {
     var ru: linux.rusage = undefined;
     _ = linux.getrusage(linux.rusage.SELF, &ru);
     const cpu = @as(f64, @floatFromInt(ru.utime.sec + ru.stime.sec)) + @as(f64, @floatFromInt(ru.utime.usec + ru.stime.usec)) / 1e6;
@@ -1799,21 +1840,20 @@ const Refusal = struct {
 
     fn refuse(self: Refusal, outcome: Outcome, reason: []const u8) !Outcome {
         std.debug.print("workz: {s}\n", .{reason});
-        const elapsed = @as(f64, @floatFromInt(sys.monoNs() - self.t0)) / 1e9;
         self.events.emit("launch_refused", .{ .reason = reason });
-        const summary = .{
+        const summary: Summary = .{
             .engine = self.engine,
             .launch = self.launch,
             .status = "refused",
-            .counts = .{ .completed = 0, .reused = 0, .failed = 0, .blocked = 0, .cancelled = 0, .not_started = self.selected },
+            .counts = .{ .not_started = self.selected },
             .selected = self.selected,
-            .elapsed_s = elapsed,
+            .elapsed_s = @as(f64, @floatFromInt(sys.monoNs() - self.t0)) / 1e9,
             .finished = try records.timeText(self.a, sys.realNs()),
             .@"error" = reason,
+            .engine_cost = engineCost(),
             .launch_dir = self.dir,
         };
-        self.events.emit("launch_finished", .{ .status = "refused", .elapsed_s = elapsed, .@"error" = reason });
-        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.dir, "summary.json" }), summary);
+        try writeSummary(self.gpa, self.a, self.events, summary);
         var w: std.Io.Writer.Allocating = .init(self.gpa);
         defer w.deinit();
         try w.writer.print("{f}\n", .{std.json.fmt(summary, .{})});
@@ -1821,8 +1861,6 @@ const Refusal = struct {
         return outcome;
     }
 };
-
-const env_allow = [_][]const u8{ "PATH", "HOME", "USER", "LOGNAME", "LANG", "LC_ALL", "TZ", "TMPDIR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TERM" };
 
 fn findBash(gpa: Allocator) ?[:0]const u8 {
     for ([_][:0]const u8{ "/bin/bash", "/usr/bin/bash", "/usr/local/bin/bash" }) |p| {
@@ -1905,7 +1943,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
         var need = r.memory_mib;
-        for (r.shared) |s| need += holders[wf.sharedIndex(s).?].mib;
+        for (r.shared_index) |hi| need += holders[hi].mib;
         if (r.threads > max_threads)
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}", .{ r.name, r.threads, max_threads }));
         if (need > max_memory)
@@ -1916,14 +1954,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         }
     }
 
-    var st = state.load(gpa, rec) catch |err| switch (err) {
+    var st = state.loadRecorded(gpa, a, rec) catch |err| switch (err) {
         error.UnsupportedState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json has an unsupported format version", .{rec})),
         error.CorruptState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json cannot be read", .{rec})),
         else => return err,
     };
     defer st.deinit();
-    // Rules dispatched by an interrupted launch without a saved result run again.
-    for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
 
     // A recorded output that changed outside the engine is refused unless
     // --rerun, except when it has a stored digest and its bytes still match:
@@ -1934,17 +1970,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         if (!mask[i]) continue;
         const e = st.data.rules.map.getPtr(r.name) orelse continue;
         for (e.outputs, 0..) |o, k| {
-            const now = (try ids.get(o.path)) orelse continue;
-            if (std.mem.eql(u8, now, o.id)) continue;
-            if (o.sha256) |want| {
-                const d = try sys.sha256File(gpa, o.path);
-                if (std.mem.eql(u8, want, &d)) {
+            switch (try state.checkOutput(gpa, &ids, o)) {
+                // A missing output makes its rule run again.
+                .intact, .missing => continue,
+                .refreshed => |now| {
                     const outs = try st.allocator().dupe(state.Output, e.outputs);
                     outs[k].id = try st.allocator().dupe(u8, now);
                     e.outputs = outs;
                     events.emit("output_identity_refreshed", .{ .rule = r.name, .path = o.path });
                     continue;
-                }
+                },
+                .changed => {},
             }
             // A rule run on request keeps its changed outputs in previous/.
             if (opts.forced(r.name)) continue;
@@ -1957,8 +1993,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         }
     }
     if (changed > 0) {
-        std.debug.print("workz: refusing to reuse changed outputs; use --rerun, or --rerun-rule for the affected rules, to run them again (earlier bytes are kept in previous/)\n", .{});
-        return refusal.refuse(.failed, try std.fmt.allocPrint(a, "{d} recorded outputs changed outside workz, first {s}; use --rerun", .{ changed, first_changed }));
+        const which = if (changed == 1) "a recorded output" else try std.fmt.allocPrint(a, "{d} recorded outputs", .{changed});
+        return refusal.refuse(.failed, try std.fmt.allocPrint(a, "{s} changed outside workz ({s}{s}); run again with --rerun-rule for the affected rules, or --rerun for all (earlier bytes are kept in previous/)", .{ which, if (changed == 1) "" else "first ", first_changed }));
     }
 
     // Input manifest: authoritative digests for external inputs.
@@ -1975,25 +2011,20 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     var tree: ?cgroup.Tree = null;
     if (opts.isolation) {
-        tree = cgroup.setup(gpa, a) catch
-            return refusal.refuse(.invalid, "the run's cgroup is not delegated; start workz without WORKZ_STAGE set, or use --no-isolation");
+        tree = cgroup.setup(gpa, a) catch |err| return refusal.refuse(.invalid, switch (err) {
+            error.NotDelegated => "the run's scope cannot create task cgroups: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation",
+            else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{@errorName(err)}),
+        });
     }
 
-    var env_list: std.ArrayList([]const u8) = .empty;
     const env_text = try state.envText(a, environ, opts.pass_env);
-    for (env_allow) |name| if (environ.get(name)) |v| {
-        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
-    };
-    for (opts.pass_env) |name| if (environ.get(name)) |v| {
-        try env_list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
-    };
 
     const shared_info = try a.alloc(struct { name: []const u8, path: ?[]const u8, container: ?[]const u8, bytes: u64 }, wf.shared.len);
     for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .container = s.container, .bytes = h.bytes };
 
     const devnull = try sys.openRead(gpa, "/dev/null");
     defer sys.close(devnull);
-    const host_envp = try process.Vec.init(a, env_list.items);
+    const host_envp = try process.Vec.init(a, try state.hostEnv(a, environ, opts.pass_env));
 
     // Shared inputs are protected from reclaim by other work on the machine:
     // the run's scope gets a memory.low of their size.
@@ -2023,8 +2054,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const extras = try container.ruleExtras(a, wf, &images);
     var containers_cg: ?[]const u8 = null;
     if (podman != null) if (tree) |t| {
-        containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch
-            return refusal.refuse(.invalid, "cannot create the cgroup for container clients");
+        containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch |err|
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{@errorName(err)}));
     };
     const sigfd = try process.setupSignals();
     defer sys.close(sigfd);
@@ -2052,7 +2083,6 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .cut = &cut,
         .events = &events,
         .journal = &journal,
-        .records = rec,
         .launch_dir = launch.dir,
         .launch_id = launch.id,
         .engine_id = state.engine_key_text,
@@ -2077,7 +2107,10 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
     }
     defer if (engine.network) |n| n.stop();
-    if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch null;
+    if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch |err| guard: {
+        std.debug.print("workz: cannot start the guard of --no-isolation tasks ({s}); they may outlive a killed engine\n", .{@errorName(err)});
+        break :guard null;
+    };
     defer if (engine.guard) |gd| gd.stop();
     defer engine.pending_done.deinit(gpa);
     defer engine.leftover_cgroups.deinit(gpa);
@@ -2090,13 +2123,23 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.last_save_ns = sys.monoNs();
     // The control file of this launch, watched for appended commands.
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
-    sys.writeFile(gpa, engine.control_path, "") catch {};
-    if (sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK))) |ifd| {
+    control: {
+        sys.writeFile(gpa, engine.control_path, "") catch |err| {
+            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, @errorName(err) });
+            break :control;
+        };
+        const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            break :control;
+        };
         const pz = try a.dupeZ(u8, engine.control_path);
         if (sys.check(linux.inotify_add_watch(@intCast(ifd), pz, linux.IN.MODIFY))) |_| {
             engine.control_watch = @intCast(ifd);
-        } else |_| sys.close(@intCast(ifd));
-    } else |_| {}
+        } else |err| {
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            sys.close(@intCast(ifd));
+        }
+    }
     defer if (engine.control_watch >= 0) sys.close(engine.control_watch);
     engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
     engine.last_sample_ns = engine.last_save_ns;
@@ -2134,14 +2177,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         const t = &engine.tasks[i];
         if (t.status != .completed) continue;
         const k = t.key orelse continue;
-        var names: std.ArrayList([]const u8) = .empty;
-        var keys: std.ArrayList([]const u8) = .empty;
-        for (g.parents[i]) |p| {
-            try names.append(a, wf.rules[p].name);
-            try keys.append(a, post_cut.parentKey(p, if (engine.tasks[p].key) |pk| pk.key else "none"));
-        }
         var missing: ?[]const u8 = null;
-        const again = try state.computeKey(a, &post, r, env_text, names.items, keys.items, state.engine_key_text, &post_cut, engine.extras[i], &missing);
+        const again = try state.ruleKey(a, &post, wf, g.parents[i], i, engine.st, &post_cut, TaskKeys{ .tasks = engine.tasks }, env_text, state.engine_key_text, engine.extras[i], &missing);
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
             _ = engine.st.data.rules.map.swapRemove(r.name);
@@ -2162,9 +2199,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const failed = counts[@intFromEnum(Status.failed)] + counts[@intFromEnum(Status.blocked)] + counts[@intFromEnum(Status.not_started)];
     const outcome: Outcome = if (engine.interrupted) .interrupted else if (failed > 0 or engine.fatal != null) .failed else .ok;
     const elapsed = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
-    const summary = .{
+    const summary: Summary = .{
         .engine = engine_id,
-        .engine_key = state.engine_key,
         .launch = launch.id,
         .status = switch (outcome) {
             .ok => "completed",
@@ -2186,8 +2222,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .engine_cost = engineCost(),
         .launch_dir = launch.dir,
     };
-    events.emit("launch_finished", .{ .status = summary.status, .counts = summary.counts, .elapsed_s = elapsed, .@"error" = engine.fatal });
-    try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "summary.json" }), summary);
+    try writeSummary(gpa, a, &events, summary);
     engine.clearStatus();
     // A person at a terminal gets the readable summary; scripts get JSON.
     if (!opts.json and term.isTerminal(1)) {

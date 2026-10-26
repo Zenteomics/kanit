@@ -7,6 +7,7 @@
 //! contents are read only for the input manifest and explicit verification.
 const std = @import("std");
 const sys = @import("sys.zig");
+const records = @import("records.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
@@ -45,7 +46,12 @@ pub const Entry = struct {
     /// Wall seconds of the recorded attempt; ranks ready rules by the work
     /// that follows them. 0 when unknown.
     wall_s: f64 = 0,
+    /// Each input as the key saw it: its content digest where one is
+    /// stored, else its identity; for `explain`. Empty in older records.
+    input_ids: []const InputId = &.{},
 };
+
+pub const InputId = struct { path: []const u8, id: []const u8 };
 
 pub const ManifestEntry = struct { id: []const u8, sha256: []const u8 };
 
@@ -91,14 +97,23 @@ pub const State = struct {
     }
 };
 
-pub const LoadError = error{ UnsupportedState, CorruptState };
+/// `state.json` as the next launch decides from it: a rule that an
+/// interrupted launch dispatched without saving its result has no record,
+/// so it runs again. `clean` reads the plain file instead, to keep every
+/// launch that a record names.
+pub fn loadRecorded(gpa: Allocator, a: Allocator, rec: []const u8) !State {
+    var st = try load(gpa, rec);
+    errdefer st.deinit();
+    for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
+    return st;
+}
 
-/// Loads `<records>/state.json`, or returns an empty state when it is absent.
-pub fn load(gpa: Allocator, records: []const u8) !State {
+/// Loads `<rec>/state.json`, or returns an empty state when it is absent.
+pub fn load(gpa: Allocator, rec: []const u8) !State {
     var s: State = .{ .arena = std.heap.ArenaAllocator.init(gpa), .data = .{}, .path = undefined };
     errdefer s.arena.deinit();
     const a = s.arena.allocator();
-    s.path = try std.fs.path.join(a, &.{ records, "state.json" });
+    s.path = try std.fs.path.join(a, &.{ rec, "state.json" });
     const bytes = sys.readFile(gpa, s.path, 1 << 30) catch |err| switch (err) {
         error.FileNotFound => return s,
         else => return err,
@@ -109,8 +124,9 @@ pub fn load(gpa: Allocator, records: []const u8) !State {
     probe.deinit();
     if (v < 1 or v > format_version) return error.UnsupportedState;
     s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
-    // Format 1 lacks only `envs`, which this engine adds as rules run, so
-    // the file is saved as the current format.
+    // Format 1 lacks `envs`, which this engine adds as rules run; formats 1
+    // and 2 record identities with the device number. Once read, the file
+    // is saved as the current format.
     if (v < 3) try dropDevice(a, &s.data);
     s.data.format_version = format_version;
     return s;
@@ -204,27 +220,17 @@ fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList(
     defer gpa.free(p);
     const fd: sys.Fd = @intCast(try sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
     defer sys.close(fd);
-    var buf: [16384]u8 align(8) = undefined;
-    while (true) {
-        const n = try sys.check(linux.getdents64(fd, &buf, buf.len));
-        if (n == 0) break;
-        var off: usize = 0;
-        while (off < n) {
-            const reclen = std.mem.readInt(u16, buf[off + 16 ..][0..2], .little);
-            const dtype = buf[off + 18];
-            const name = std.mem.sliceTo(buf[off + 19 .. off + reclen], 0);
-            off += reclen;
-            if (std.mem.eql(u8, name, ".") or std.mem.eql(u8, name, "..")) continue;
-            const child = try std.fs.path.join(gpa, &.{ dir, name });
-            defer gpa.free(child);
-            // DT_DIR = 4; DT_UNKNOWN = 0 needs a stat.
-            const is_dir = dtype == 4 or (dtype == 0 and ((try sys.lstat(gpa, child)) orelse continue).isDir());
-            if (is_dir) {
-                try walk(gpa, child, base_len, lines, depth + 1);
-            } else {
-                const id = (try sys.stat(gpa, child)) orelse continue;
-                try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\t{f}\n", .{ child[base_len..], id }));
-            }
+    var entries: sys.DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| {
+        const child = try std.fs.path.join(gpa, &.{ dir, e.name });
+        defer gpa.free(child);
+        // A file system that gives no type needs a stat.
+        const is_dir = e.kind == 4 or (e.kind == 0 and ((try sys.lstat(gpa, child)) orelse continue).isDir());
+        if (is_dir) {
+            try walk(gpa, child, base_len, lines, depth + 1);
+        } else {
+            const id = (try sys.stat(gpa, child)) orelse continue;
+            try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\t{f}\n", .{ child[base_len..], id }));
         }
     }
 }
@@ -269,6 +275,20 @@ pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !v
 /// to the rule key. Session variables (HOME, USER, TERM, XDG_RUNTIME_DIR,
 /// DBUS_SESSION_BUS_ADDRESS) and TMPDIR are passed to rules but not keyed.
 pub const keyed_env = [_][]const u8{ "PATH", "LANG", "LC_ALL", "TZ" };
+
+/// Variables host rules and Podman receive: the keyed ones and the session
+/// variables. Names given with --pass-env are added to them.
+pub const passed_env = keyed_env ++ [_][]const u8{ "HOME", "USER", "LOGNAME", "TMPDIR", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TERM" };
+
+/// The environment of host rules and of Podman, as NAME=VALUE: each of
+/// `passed_env` and of `pass_env` that is set.
+pub fn hostEnv(a: Allocator, environ: *const std.process.Environ.Map, pass_env: []const []const u8) ![]const []const u8 {
+    var list: std.ArrayList([]const u8) = .empty;
+    for ([_][]const []const u8{ &passed_env, pass_env }) |names| for (names) |name| if (environ.get(name)) |v| {
+        try list.append(a, try std.fmt.allocPrint(a, "{s}={s}", .{ name, v }));
+    };
+    return list.items;
+}
 
 /// The environment part of rule keys: each keyed variable and each name
 /// passed with --pass-env (sorted), with its value or as unset.
@@ -320,7 +340,8 @@ pub fn describeEnvChange(w: *std.Io.Writer, c: EnvChange) !void {
         .dropped => return w.writeAll("no longer passed"),
         .both => {},
     }
-    if (c.was != null and c.now != null and std.mem.indexOfScalar(u8, c.was.?, ':') != null) {
+    // A list such as PATH on either side is described entry by entry.
+    if (c.was != null and c.now != null and (std.mem.indexOfScalar(u8, c.was.?, ':') != null or std.mem.indexOfScalar(u8, c.now.?, ':') != null)) {
         var any = false;
         for ([_]struct { []const u8, []const u8, []const u8 }{ .{ c.now.?, c.was.?, "added" }, .{ c.was.?, c.now.?, "removed" } }) |dir| {
             var it = std.mem.splitScalar(u8, dir[0], ':');
@@ -420,6 +441,8 @@ pub const Key = struct {
     request: []const u8,
     writes: []const u8,
     inputs: []const u8,
+    /// What `inputs` covers, one entry per input in `input_abs` order.
+    input_ids: []const InputId,
     parents: []const u8,
     engine: []const u8,
     key: []const u8,
@@ -436,8 +459,6 @@ pub fn requestText(a: Allocator, r: *const workflow.Rule) ![]const u8 {
     for (r.shared) |s| try w.writer.print(" shared:{s}", .{s});
     return w.toOwnedSlice();
 }
-
-pub const MissingInput = struct { path: []const u8 };
 
 /// Computes a rule's key. `parent_keys` are the producing rules' keys in
 /// `graph.parents` order. Returns null and sets `missing` when an input is absent.
@@ -485,15 +506,18 @@ pub fn computeKey(
     {
         var w: std.Io.Writer.Allocating = .init(a);
         defer w.deinit();
-        for (r.input_abs) |in| {
+        const input_ids = try a.alloc(InputId, r.input_abs.len);
+        for (r.input_abs, input_ids) |in, *iid| {
             const digest = if (cut) |c| c.digests.get(in) else null;
             const id = digest orelse (try ids.get(in)) orelse {
                 missing.* = in;
                 return null;
             };
+            iid.* = .{ .path = in, .id = id };
             try w.writer.print("{s}\t{s}\n", .{ in, id });
         }
         k.inputs = try hex(a, w.written());
+        k.input_ids = input_ids;
     }
     {
         var w: std.Io.Writer.Allocating = .init(a);
@@ -519,4 +543,74 @@ pub fn firstDifference(e: *const Entry, k: *const Key) ?[]const u8 {
     if (!std.mem.eql(u8, e.parents, k.parents)) return "a producing rule";
     if (!std.mem.eql(u8, e.engine, k.engine)) return "engine key";
     return null;
+}
+
+/// What became of a recorded output.
+pub const OutputCheck = union(enum) {
+    /// The file has the identity recorded for it.
+    intact,
+    /// Its identity changed but its bytes still match the stored digest;
+    /// the payload is the identity to record.
+    refreshed: []const u8,
+    missing,
+    changed,
+};
+
+/// Whether a recorded output is still the file its rule wrote: the recorded
+/// identity, or, for an output with a stored digest, the same bytes. Reads
+/// the file only when its identity differs and a digest is stored.
+pub fn checkOutput(gpa: Allocator, ids: *Identities, o: Output) !OutputCheck {
+    const now = (try ids.get(o.path)) orelse return .missing;
+    if (std.mem.eql(u8, now, o.id)) return .intact;
+    const want = o.sha256 orelse return .changed;
+    const d = try sys.sha256File(gpa, o.path);
+    return if (std.mem.eql(u8, want, &d)) .{ .refreshed = now } else .changed;
+}
+
+/// The key of rule `i`. Each producer contributes the key it has in this
+/// launch (`launch.get(p)`), else its recorded key, else "none"; a cutoff
+/// producer contributes the digests of its outputs instead.
+pub fn ruleKey(
+    a: Allocator,
+    ids: *Identities,
+    wf: *const workflow.Workflow,
+    parents: []const usize,
+    i: usize,
+    st: *const State,
+    cut: *const Cutoff,
+    launch: anytype,
+    env_text: []const u8,
+    engine: []const u8,
+    extra: []const u8,
+    missing: *?[]const u8,
+) !?Key {
+    const names = try a.alloc([]const u8, parents.len);
+    const keys = try a.alloc([]const u8, parents.len);
+    for (parents, names, keys) |p, *n, *k| {
+        n.* = wf.rules[p].name;
+        const recorded = if (st.data.rules.map.get(n.*)) |e| e.key else "none";
+        k.* = cut.parentKey(p, launch.get(p) orelse recorded);
+    }
+    return computeKey(a, ids, &wf.rules[i], env_text, names, keys, engine, cut, extra, missing);
+}
+
+/// Why a recorded rule cannot be reused with key `k`, or `.reuse`.
+pub const Reuse = union(enum) {
+    reuse,
+    /// The first key part that differs, as `firstDifference` names it.
+    key: []const u8,
+    output_missing: []const u8,
+    output_changed: []const u8,
+};
+
+/// The reuse decision `plan` reports and `run` acts on: the same key, and
+/// every recorded output intact (`checkOutput`).
+pub fn reuseCheck(gpa: Allocator, ids: *Identities, e: *const Entry, k: *const Key) !Reuse {
+    if (firstDifference(e, k)) |part| return .{ .key = part };
+    for (e.outputs) |o| switch (try checkOutput(gpa, ids, o)) {
+        .intact, .refreshed => {},
+        .missing => return .{ .output_missing = o.path },
+        .changed => return .{ .output_changed = o.path },
+    };
+    return .reuse;
 }

@@ -29,6 +29,8 @@ pub const Context = struct {
     rerun_rules: []const []const u8 = &.{},
     cut: ?state.Cutoff = null,
     environ: *const std.process.Environ.Map,
+    /// Names passed with --pass-env, which Podman also receives.
+    pass_env: []const []const u8 = &.{},
     /// Per rule: key text beyond the command, as the run computes it.
     extras: []const []const u8 = &.{},
 
@@ -47,7 +49,9 @@ pub const Context = struct {
     }
 
     /// Decides every selected rule in graph order. A rule whose producer
-    /// runs also runs: its inputs will change.
+    /// runs also runs, since its inputs will change; when the producer has
+    /// `cutoff = true`, the run may still reuse it if the producer's outputs
+    /// come out the same.
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
         self.extras = try self.resolveExtras(mask);
@@ -70,10 +74,8 @@ pub const Context = struct {
                 std.debug.print("workz: podman is not on PATH; container rules cannot be planned exactly\n", .{});
                 return container.ruleExtras(self.a, self.wf, &images);
             };
-            var list: std.ArrayList([]const u8) = .empty;
-            var it = self.environ.iterator();
-            while (it.next()) |e| try list.append(self.a, try std.fmt.allocPrint(self.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
-            const envp = try process.Vec.init(self.a, list.items);
+            // Podman sees the environment a run gives it.
+            const envp = try process.Vec.init(self.a, try state.hostEnv(self.a, self.environ, self.pass_env));
             const devnull = try sys.openRead(self.gpa, "/dev/null");
             defer sys.close(devnull);
             var missing: ?[]const u8 = null;
@@ -94,32 +96,33 @@ pub const Context = struct {
             return .{ .run = true, .reason = reason };
         };
         const e = self.st.data.rules.map.get(r.name) orelse return .{ .run = true, .reason = "no completed record" };
-        var names: std.ArrayList([]const u8) = .empty;
-        var keys: std.ArrayList([]const u8) = .empty;
-        for (self.g.parents[i]) |p| {
-            try names.append(self.a, self.wf.rules[p].name);
-            try keys.append(self.a, self.cut.?.parentKey(p, if (prior[p].key) |k| k.key else if (self.st.data.rules.map.get(self.wf.rules[p].name)) |pe| pe.key else "none"));
-        }
         var missing: ?[]const u8 = null;
-        const k = (try state.computeKey(self.a, self.ids, r, self.env_text, names.items, keys.items, self.engine_id, &self.cut.?, self.extras[i], &missing)) orelse
+        const k = (try state.ruleKey(self.a, self.ids, self.wf, self.g.parents[i], i, self.st, &self.cut.?, Prior{ .ds = prior }, self.env_text, self.engine_id, self.extras[i], &missing)) orelse
             return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{missing.?}) };
         const asked = self.rerun or for (self.rerun_rules) |n| {
             if (std.mem.eql(u8, n, r.name)) break true;
         } else false;
         if (asked) return .{ .run = true, .reason = "rerun requested", .key = k };
-        if (state.firstDifference(&e, &k)) |what| {
-            if (std.mem.eql(u8, what, "environment")) if (self.st.data.envs.map.get(e.env)) |was| {
+        const reason = switch (try state.reuseCheck(self.gpa, self.ids, &e, &k)) {
+            .reuse => return .{ .run = false, .reason = "unchanged", .key = k },
+            .key => |what| if (std.mem.eql(u8, what, "environment")) env: {
+                const was = self.st.data.envs.map.get(e.env) orelse break :env "environment changed";
                 var changed: std.Io.Writer.Allocating = .init(self.a);
                 for (try state.envChanges(self.a, was, self.env_text), 0..) |c, n| try changed.writer.print("{s}{s}", .{ if (n > 0) ", " else "", c.name });
-                return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "environment changed: {s}", .{changed.written()}), .key = k };
-            };
-            return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "{s} changed", .{what}), .key = k };
-        }
-        for (e.outputs) |o| {
-            const id = (try self.ids.get(o.path)) orelse return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "output missing: {s}", .{o.path}), .key = k };
-            if (!std.mem.eql(u8, id, o.id)) return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "output changed: {s} (run refuses without --rerun)", .{o.path}), .key = k };
-        }
-        return .{ .run = false, .reason = "unchanged", .key = k };
+                break :env try std.fmt.allocPrint(self.a, "environment changed: {s}", .{changed.written()});
+            } else try std.fmt.allocPrint(self.a, "{s} changed", .{what}),
+            .output_missing => |p| try std.fmt.allocPrint(self.a, "output missing: {s}", .{p}),
+            .output_changed => |p| try std.fmt.allocPrint(self.a, "output changed: {s} (run refuses without --rerun)", .{p}),
+        };
+        return .{ .run = true, .reason = reason, .key = k };
+    }
+};
+
+/// The keys this plan gives the rules it decided, for `state.ruleKey`.
+const Prior = struct {
+    ds: []const Decision,
+    pub fn get(self: Prior, p: usize) ?[]const u8 {
+        return if (self.ds[p].key) |k| k.key else null;
     }
 };
 
@@ -127,7 +130,7 @@ pub const Context = struct {
 /// "producer X runs" is "a producer runs", "output missing: P" is
 /// "output missing", and so on.
 pub fn reasonClass(reason: []const u8) []const u8 {
-    if (std.mem.startsWith(u8, reason, "producer ")) return "a producer runs";
+    if (std.mem.startsWith(u8, reason, "producer ")) return if (std.mem.endsWith(u8, reason, "; reused if its outputs repeat")) "a cutoff producer runs; reused if its outputs repeat" else "a producer runs";
     for ([_][]const u8{ "input missing", "output missing", "output changed" }) |p| if (std.mem.startsWith(u8, reason, p)) return p;
     return reason;
 }
@@ -204,13 +207,26 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
         if (!std.mem.eql(u8, e.request, k.request)) try w.print("    was: {s}\n    now: {s}\n", .{ e.request, k.request });
         if (!std.mem.eql(u8, e.engine, k.engine)) try w.print("    was: {s}\n    now: {s}\n", .{ e.engine, k.engine });
     }
-    for (r.input_abs) |in| {
-        const now = (try ctx.ids.get(in)) orelse {
+    // Each input against what this rule's record saw; older records lack
+    // that, and are compared with the last identity any rule recorded.
+    for (r.input_abs, 0..) |in, n| {
+        const now = if (d.key) |k| k.input_ids[n].id else (try ctx.ids.get(in)) orelse {
             try w.print("  input missing: {s}\n", .{in});
             continue;
         };
-        const was = ctx.st.data.files.map.get(in) orelse continue;
+        const was = for (e.input_ids) |x| {
+            if (std.mem.eql(u8, x.path, in)) break x.id;
+        } else if (e.input_ids.len == 0) ctx.st.data.files.map.get(in) orelse continue else {
+            try w.print("  input added: {s}\n", .{in});
+            continue;
+        };
         if (!std.mem.eql(u8, was, now)) try w.print("  input changed: {s}\n    was {s}\n    now {s}\n", .{ in, was, now });
+    }
+    for (e.input_ids) |x| {
+        const still = for (r.input_abs) |in| {
+            if (std.mem.eql(u8, in, x.path)) break true;
+        } else false;
+        if (!still) try w.print("  input removed: {s}\n", .{x.path});
     }
     for (ctx.g.parents[i]) |p| if (ds[p].run) try w.print("  producer runs: {s} ({s})\n", .{ ctx.wf.rules[p].name, ds[p].reason });
     return true;
@@ -222,11 +238,13 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
     var ok = true;
     var checked: usize = 0;
     var stored: usize = 0;
+    var unrecorded: usize = 0;
     const sa = st.allocator();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
         const e = st.data.rules.map.getPtr(r.name) orelse {
             try w.print("unrecorded {s}\n", .{r.name});
+            unrecorded += 1;
             continue;
         };
         const outs = try sa.dupe(state.Output, e.outputs);
@@ -258,15 +276,13 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
     }
     try w.print("{d} outputs checked{s}", .{ checked, if (content) " by content" else "" });
     if (stored > 0) try w.print(", {d} digests stored", .{stored});
-    try w.print(": {s}\n", .{if (ok) "all match" else "differences found"});
+    try w.print(": {s}", .{if (ok) "all match" else "differences found"});
+    if (unrecorded > 0) try w.print("; {d} selected {s} no record to check", .{ unrecorded, if (unrecorded == 1) "rule has" else "rules have" });
+    try w.writeAll("\n");
     if (stored > 0) try st.save(gpa);
     return ok;
 }
 
 pub fn loadState(gpa: Allocator, root: []const u8, a: Allocator) !state.State {
-    const rec = try records.recordsDir(a, root);
-    var st = try state.load(gpa, rec);
-    errdefer st.deinit();
-    for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
-    return st;
+    return state.loadRecorded(gpa, a, try records.recordsDir(a, root));
 }

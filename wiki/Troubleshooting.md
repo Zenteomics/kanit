@@ -4,7 +4,7 @@ The errors you are most likely to meet, what each means, and what to do about it
 
 - `systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)`: workz isolates a run in a systemd user scope. Run it in a session with a systemd user manager, or use `--no-isolation` and give up per-task limits ([Without isolation](Running-Workflows.md#without-isolation)).
 
-- `the run's cgroup is not delegated; start workz without WORKZ_STAGE set, or use --no-isolation`: The run's scope did not get the `cpu`, `memory` and `pids` controllers. Delegate them to the user manager as shown in [Installation](Installation.md#check-isolation).
+- `the run's scope cannot create task cgroups: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation`: The run's scope did not get the `cpu`, `memory` and `pids` controllers. Delegate them to the user manager as shown in [Installation](Installation.md#check-isolation).
 
 - `cannot create the run's network namespace: ...`: Unprivileged user namespaces are disabled or restricted on this system. Check `sysctl user.max_user_namespaces`, ask your administrator, or use `--no-isolation`.
 
