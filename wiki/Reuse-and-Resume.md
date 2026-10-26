@@ -77,6 +77,7 @@ workz run workflow.toml
 ```
 
 ```text
+[0/2] page .workz/launches/.../report.html, drawn again every 5 s while the launch runs
 [0/2] started sort_calls (attempt 1)
 [1/2] completed sort_calls (0.0 s)
 ```

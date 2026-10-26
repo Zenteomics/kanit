@@ -16,4 +16,6 @@ pub const html = @import("html.zig");
 pub const clean = @import("clean.zig");
 pub const logs = @import("logs.zig");
 pub const report = @import("report.zig");
+pub const model = @import("model.zig");
+pub const units = @import("units.zig");
 pub const container = @import("container.zig");

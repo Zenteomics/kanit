@@ -14,6 +14,7 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
       events.jsonl                  the event stream
       control                       commands from workz control
       summary.json                  the result, written at the end
+      report.html                   the launch as one page, drawn again while it runs
       shared/                       service scripts and their standard error
       attempts/
         align_S1/

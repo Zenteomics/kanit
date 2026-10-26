@@ -229,12 +229,12 @@ new container-sizing
 { header container-sizing; crule big '[]' '["b.txt"]' '"x=$(head -c 200000000 /dev/zero | tr \"\\\\0\" a); touch b.txt"'; } > wf.toml
 sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
-"$workz" report -d . --bottlenecks > report.txt
-# STEP N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
-check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
 "$workz" report -d . --suggest > suggest.tsv
 "$workz" report -d . --suggest --format json > suggest.json
-check "report --suggest gives the same sizing as tsv and json" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 >= $7 && $7 > 300) }'"'"' suggest.tsv && jq -e ".[0].step == \"big\" and .[0].suggest_mib >= .[0].peak_mib" suggest.json > /dev/null'
+# step runs threads threads_used suggest_threads memory_mib used_mib used_basis peak_mib suggest_mib note:
+# a container rule is sized by its cgroup peak, not the client's RSS.
+check "a container rule's suggested request covers its cgroup peak" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 == "cgroup" && $10 >= $7 && $7 > 300) }'"'"' suggest.tsv'
+check "report --suggest gives the same sizing as tsv and json" 'jq -e ".[0].step == \"big\" and .[0].used_basis == \"cgroup\" and .[0].suggest_mib >= .[0].used_mib" suggest.json > /dev/null'
 
 new container-mounts
 echo "workz-check release" > os-release
@@ -606,7 +606,8 @@ new delegated
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report -d . > r.tsv
 "$workz" report -d . --bottlenecks > b.txt
-check "work handed to another supervisor is reported as delegated, without sizing advice" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt'
+"$workz" report -d . --suggest > g.tsv
+check "work handed to another supervisor is reported as delegated and keeps its request" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt && awk -F"\t" "NR == 2 { exit !(\$11 == \"delegated\" && \$10 == \$6 && \$5 == \$3) }" g.tsv'
 
 new slice
 { header slice; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
@@ -629,7 +630,11 @@ base=$(basename "$(last_launch)")
 check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun-rule c3 -q > s3.json
 "$workz" report -d . --compare "$base" > compare-one.txt
-check "report --compare marks a step with no completed attempt on one side" 'grep -q "^  short1 *0 .*no completed attempt in the launch" compare-one.txt && ! grep -q "%.*no completed attempt" compare-one.txt'
+check "report --compare compares a step reused in the launch with the run it reused" 'grep -q "^  short1 *1 .*[0-9]%.*  reused in the launch$" compare-one.txt && grep -q "^  c3 *1 .*[0-9]%" compare-one.txt && ! grep -q "^  c3 .*reused" compare-one.txt'
+sed -i 's/sleep 0.3; touch c3.txt/exit 1/' wf.toml
+"$workz" run wf.toml --max-threads 2 --max-memory 1G -q > s4.json
+"$workz" report -d . --compare "$base" > compare-failed.txt
+check "report --compare marks a step with no completed run on one side" 'grep -q "^  c3 .*no completed run in the launch" compare-failed.txt && ! grep -q "%.*no completed run" compare-failed.txt'
 
 # ---------------------------------------------------------------- inputs and formats
 new manifest
@@ -739,9 +744,11 @@ new watch
 "$workz" run wf.toml "${iso[@]}" -q > s.json &
 runner=$!
 sleep 1.2
+cp "$(last_launch)/report.html" live.html
 "$workz" watch -d . --once > view.txt
 wait $runner
 check "watch shows the running task with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " Mi\| Ki" view.txt'
+check "a launch keeps its page, which reloads while the launch runs and stops once it ends" 'grep -q "http-equiv=\"refresh\"" live.html && grep -q "live\">running</span>" live.html && ! grep -q "http-equiv=\"refresh\"" "$(last_launch)/report.html" && grep -q "s-ok\">completed</span>" "$(last_launch)/report.html"'
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
 
@@ -814,9 +821,10 @@ new report-html
   rule ok '[]' '["ok.txt"]' '"touch ok.txt"'
   rule bad '[]' '["bad.txt"]' '"echo \"<boom & stuff>\" >&2; exit 4"'
 } > wf.toml
-"$workz" run wf.toml "${iso[@]}" -k -q > s.json
+"$workz" run wf.toml "${iso[@]}" -k > s.json 2> err.txt
 "$workz" report -d . --format html > r.html
-check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -Eq "class=\"(st-[a-z]+|g[0-9]) crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
+check "run names the launch's page when it starts" 'grep -q "^\[0/2\] page \.workz/launches/[^/]*/report\.html, drawn again every 5 s" err.txt'
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -q "stroke:var(--ink);stroke-width:1.5" r.html && grep -Eq "text-anchor=\"end\"( style=\"[^\"]*\")?>bad</text>" r.html && grep -q "id=\"pipeline\"" r.html && grep -q "class=\"st-failed\"" r.html'
 check "the html report has no scripts or remote assets, and has dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html'
 
 new labels
@@ -834,7 +842,7 @@ sed -i 's/category = "report"/category = "summary"/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "changing a label reruns nothing" '[ "$(status_of s2.json reused)" = 3 ]'
 "$workz" report -d . --launch "$first" --bottlenecks > bn.txt
-check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (completed attempts)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
+check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (the latest run of every rule)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
 "$workz" report -d . --launch "$first" --format html > r.html
 check "the html report draws samples by step" 'grep -q "Samples by step" r.html && grep -q "<td class=\"row\">s1</td>" r.html && grep -q ">MERGE</th>" r.html'
 

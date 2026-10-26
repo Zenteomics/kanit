@@ -17,7 +17,8 @@ const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const container = @import("container.zig");
-const report = @import("report.zig");
+const model = @import("model.zig");
+const html = @import("html.zig");
 const monitor = @import("monitor.zig");
 const term = @import("term.zig");
 const Allocator = std.mem.Allocator;
@@ -313,6 +314,10 @@ const Engine = struct {
     next_sample_ns: i128 = 0,
     last_sample_ns: i128 = 0,
     last_cpu_us: ?u64 = null,
+    /// The launch's page, drawn again while it runs; null once it cannot
+    /// be written.
+    page_path: ?[]const u8 = null,
+    next_page_ns: i128 = 0,
     leftover_cgroups: std.ArrayList([]const u8) = .empty,
     finished: usize = 0,
     selected: usize = 0,
@@ -677,7 +682,7 @@ const Engine = struct {
             est[i] = 1;
             if (by_step.get(r.labels.step)) |list| {
                 std.mem.sort(f64, list.items, {}, std.sort.asc(f64));
-                est[i] = report.median(list.items);
+                est[i] = model.median(list.items);
             }
         };
         const ranks = try self.a.alloc(f64, n);
@@ -1628,6 +1633,7 @@ const Engine = struct {
             best = if (best) |b| @min(b, save_at) else save_at;
         }
         best = if (best) |b| @min(b, self.next_sample_ns) else self.next_sample_ns;
+        if (self.page_path != null) best = @min(best.?, self.next_page_ns);
         if (self.console.on) best = @min(best.?, self.console.next_ns);
         return best;
     }
@@ -1663,6 +1669,22 @@ const Engine = struct {
         });
         self.last_sample_ns = now;
         self.next_sample_ns = now + sample_interval_ns;
+    }
+
+    /// Draws the launch's page from the records written so far. Drawing
+    /// reads every attempt record, so the next page waits at least twenty
+    /// times as long as this one took: the page costs at most a twentieth of
+    /// the engine's time.
+    fn drawPage(self: *Engine) void {
+        const path = self.page_path orelse return;
+        const t0 = sys.monoNs();
+        writePage(self.gpa, path, self.launch_dir) catch |err| {
+            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, @errorName(err) });
+            self.page_path = null;
+            return;
+        };
+        const now = sys.monoNs();
+        self.next_page_ns = now + @max(sample_interval_ns, (now - t0) * 20);
     }
 
     fn saveState(self: *Engine, force: bool) !void {
@@ -1754,6 +1776,7 @@ const Engine = struct {
             try self.reapAll();
             self.checkTimers();
             self.sample();
+            if (self.page_path != null and sys.monoNs() >= self.next_page_ns) self.drawPage();
             self.drawStatus(false);
         }
     }
@@ -1811,6 +1834,17 @@ const Summary = struct {
     engine_cost: EngineCost,
     launch_dir: []const u8,
 };
+
+/// Writes a launch's page, replacing the file in one step so a browser
+/// never reads half of it.
+fn writePage(gpa: Allocator, path: []const u8, launch_dir: []const u8) !void {
+    var arena: std.heap.ArenaAllocator = .init(gpa);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(gpa);
+    defer out.deinit();
+    try html.write(gpa, arena.allocator(), &out.writer, launch_dir);
+    try sys.writeFileReplace(gpa, path, out.written());
+}
 
 /// Ends a launch's records: the `launch_finished` event and `summary.json`.
 fn writeSummary(gpa: Allocator, a: Allocator, events: *records.Events, s: Summary) !void {
@@ -2151,6 +2185,11 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var selected_names: std.ArrayList([]const u8) = .empty;
     for (wf.rules, 0..) |r, ri| if (mask[ri]) try selected_names.append(a, r.name);
     events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .rules = selected_names.items, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation, .cgroup = if (tree) |t| t.root else null, .shared = shared_info, .checks_s = @as(f64, @floatFromInt(sys.monoNs() - t_open)) / 1e9 });
+    // The launch's page, drawn now, again while the launch runs, and once
+    // more when it ends.
+    engine.page_path = try std.fs.path.join(a, &.{ launch.dir, "report.html" });
+    engine.drawPage();
+    if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every 5 s while the launch runs", .{monitor.shownPath(a, p)});
 
     engine.loop() catch |err| {
         engine.fatal = @errorName(err);
@@ -2223,6 +2262,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .launch_dir = launch.dir,
     };
     try writeSummary(gpa, a, &events, summary);
+    engine.drawPage();
     engine.clearStatus();
     // A person at a terminal gets the readable summary; scripts get JSON.
     if (!opts.json and term.isTerminal(1)) {

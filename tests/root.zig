@@ -504,9 +504,9 @@ test "pressure totals are read from their some and full lines" {
 }
 
 test "[edge] - [report]: the median of an even count averages the middle values" {
-    try testing.expectEqual(@as(f64, 0), workz.report.median(&.{}));
-    try testing.expectEqual(@as(f64, 3), workz.report.median(&.{ 1, 3, 9 }));
-    try testing.expectEqual(@as(f64, 2.5), workz.report.median(&.{ 1, 2, 3, 40 }));
+    try testing.expectEqual(@as(f64, 0), workz.model.median(&.{}));
+    try testing.expectEqual(@as(f64, 3), workz.model.median(&.{ 1, 3, 9 }));
+    try testing.expectEqual(@as(f64, 2.5), workz.model.median(&.{ 1, 2, 3, 40 }));
 }
 
 test "[unit] - [workflow]: undeclared labels are derived from the rule name and image" {
@@ -561,7 +561,7 @@ test "[failure] - [workflow]: a label must be a short string without control cha
 }
 
 test "an attempt that ran but used almost none of its requests is delegated" {
-    const base: workz.report.Attempt = .{ .rule = "r", .attempt = 1, .status = "completed", .reason = "", .wall_s = 30, .cpu_s = 29, .threads = 1, .request_mib = 3072, .peak_mib = 900, .rss_mib = 880, .oom_kill = 0, .limit_events = 0, .waited_s = 0, .wait_reason = "", .cpu_stall = null, .memory_stall = null, .io_stall = null, .uses_shared = false };
+    const base: workz.model.Attempt = .{ .rule = "r", .attempt = 1, .status = "completed", .reason = "", .wall_s = 30, .cpu_s = 29, .threads = 1, .request_mib = 3072, .peak_mib = 900, .rss_mib = 880, .oom_kill = 0, .limit_events = 0, .waited_s = 0, .wait_reason = "", .cpu_stall = null, .memory_stall = null, .io_stall = null, .uses_shared = false };
     try testing.expect(!base.delegated());
     var client = base;
     client.cpu_s = 0.04;
@@ -1093,23 +1093,27 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
         }
     }.f;
     try testing.expect(!has(page, "<script") and !has(page, "<boom"));
-    try testing.expect(has(page, "rnaseq <span class=\"badge\"><i class=\"dot d-fail\"></i>failed</span>"));
-    try testing.expect(has(page, "started 2026-01-01 00:00:00 UTC &middot; workz 9.9.9</p>"));
+    try testing.expect(has(page, "<h1>rnaseq</h1>") and has(page, "<span class=\"stamp s-fail\">failed</span>"));
+    try testing.expect(has(page, "<span class=\"k\">started</span>2026-01-01 00:00:00 UTC</div>") and has(page, "<span class=\"k\">engine</span>workz 9.9.9</div>"));
     // A long rule name keeps both ends in the timeline; the table has it whole.
-    try testing.expect(has(page, ">align_sample...3_paired_end</text>"));
+    try testing.expect(has(page, ">align_sample_...3_paired_end</text>"));
     try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>" ++ long ++ "</td><td>align</td><td>s42</td>"));
     try testing.expect(has(page, "&lt;boom &amp; stuff&gt;"));
     try testing.expect(has(page, "Failures (1)") and has(page, "Attempts (2)"));
-    // Declared labels: colors go to categories by CPU time, and the rule
-    // without a sample gets the whole-run row of the matrix.
-    try testing.expect(has(page, "<div class=\"v\">1 sample</div><div class=\"s\">2 steps in 2 categories, 1 tool</div>"));
+    // Without a workflow snapshot the steps come from the records. Colors go
+    // to categories in pipeline order, and the rule without a sample gets
+    // the whole-run row of the matrix.
+    try testing.expect(has(page, "id=\"pipeline\"") and has(page, "class=\"st-failed\""));
+    try testing.expect(has(page, "<div class=\"big\">1 &times; 2</div><div class=\"sub\">samples by steps, 2 categories</div>"));
     try testing.expect(has(page, "<li><i class=\"g1\"></i><b>alignment</b>&nbsp; 17.0 s, 100%</li>"));
     try testing.expect(has(page, "<td class=\"row\">s42</td>") and has(page, "whole run</span></td>"));
     try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>align<small>alignment &middot; star &middot; 1 sample</small></td>"));
     try testing.expect(has(page, "<td class=\"n\">1.7 of 2</td>"));
     try testing.expect(has(page, ">1.0 GiB</text>") and has(page, "<td class=\"n\">512 MiB</td>"));
-    try testing.expect(has(page, "<td>threads</td>") and has(page, "<span>1.0</span>"));
+    try testing.expect(has(page, "<td>threads</td>") and has(page, "<span>1.0 s</span>"));
     try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
+    // A finished launch's page does not reload itself.
+    try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
 }
 
@@ -1144,7 +1148,7 @@ test "[regression] - [report]: a launch that reused rules shows them with the ru
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const launch = try std.fs.path.join(arena.allocator(), &.{ s.path, second });
-    const reused = try workz.report.reusedAttempts(testing.allocator, arena.allocator(), launch);
+    const reused = try workz.model.reusedAttempts(testing.allocator, arena.allocator(), launch, &.{"s1__ALIGN"});
     try testing.expectEqual(@as(usize, 1), reused.len);
     try testing.expectEqualStrings("s1__ALIGN", reused[0].rule);
     try testing.expectEqual(@as(i64, 2), reused[0].attempt);
@@ -1163,8 +1167,45 @@ test "[regression] - [report]: a launch that reused rules shows them with the ru
     try testing.expect(has(page, "<td class=\"row\">s1</td><td class=\"cell solo reused\""));
     try testing.expect(has(page, ", reused from launch 20260101T000000.000-aaaaaaaa"));
     try testing.expect(has(page, "<small class=\"sub\">1 reused</small>"));
-    try testing.expect(has(page, "This launch ran 1.0 s of it;"));
+    try testing.expect(has(page, "of which this launch ran 1.0 s;"));
     try testing.expect(has(page, "Attempts (1)"));
+}
+
+test "[regression] - [report]: a step killed for its memory is sized above the request it exceeded" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/index", "launch/attempts/index/001", "launch/attempts/count", "launch/attempts/count/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":4096}
+        \\
+    );
+    _ = try s.file("launch/attempts/index/001/record.json",
+        \\{"rule":"index","attempt":1,"status":"failed","reason":"out of memory","wall_s":3.0,"cpu_s":2.0,"request":{"threads":1,"memory_mib":256},
+        \\"rusage":{"maxrss_kib":262144},"cgroup":{"memory_peak":268435456,"oom_kill":1}}
+    );
+    // 100 MiB of process memory and 200 MiB of page cache in the cgroup.
+    _ = try s.file("launch/attempts/count/001/record.json",
+        \\{"rule":"count","attempt":1,"status":"completed","reason":"","wall_s":10.0,"cpu_s":9.0,"request":{"threads":1,"memory_mib":2048},
+        \\"rusage":{"maxrss_kib":102400},"cgroup":{"memory_peak":314572800,"oom_kill":0}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var l = try workz.model.load(testing.allocator, arena.allocator(), try std.fs.path.join(arena.allocator(), &.{ s.path, "launch" }));
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 2), l.steps.len);
+    for (l.steps) |st| {
+        if (std.mem.eql(u8, st.name, "index")) {
+            // Half again the 256 MiB it exceeded, never the memory it reached.
+            try testing.expect(st.sizing.note == .out_of_memory);
+            try testing.expectEqual(@as(f64, 384), st.sizing.memory_mib);
+        } else {
+            try testing.expect(st.sizing.note == .measured);
+            try testing.expect(!st.used_is_peak);
+            try testing.expectEqual(@as(f64, 100), st.used_mib);
+            try testing.expectEqual(@as(f64, 300), st.peak_mib);
+            try testing.expectEqual(@as(f64, 128), st.sizing.memory_mib);
+        }
+    }
 }
 
 test "[regression] - [sys]: a recorded file identity does not change when only the device number does" {

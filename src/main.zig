@@ -237,8 +237,10 @@ const commands = [_]Command{
         .group = .watch,
         .common = .workdir,
         .about =
-        \\Reports on the newest launch, or on --launch ID: one row per attempt as TSV
-        \\or JSON by default, or one of the reports below.
+        \\Reports on the newest launch, or on --launch ID. Without a report option it
+        \\prints one row per attempt: TSV by default, JSON with --format json, or the
+        \\launch as one self-contained HTML page with --format html. --suggest prints
+        \\TSV or JSON; --bottlenecks and --compare print text.
         ,
         .options = &.{
             .{ .flag = "--bottlenecks", .desc = "critical path, waiting, request sizing, utilization" },
@@ -246,10 +248,11 @@ const commands = [_]Command{
             .{ .flag = "--compare OTHER", .desc = "compare with a launch ID or directory, or a working directory" },
             .{ .flag = "--format FORMAT", .desc = "tsv (default), json, or html for one self-contained page" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
+            .{ .flag = "-o, --output FILE", .desc = "write to FILE instead of standard output" },
         },
         .examples =
         \\workz report --bottlenecks
-        \\workz report --format html > report.html
+        \\workz report --format html -o report.html
         \\workz report --compare 20261026T033653.780-bb9b10ee
         ,
     },
@@ -948,11 +951,16 @@ const ReportFormat = enum { tsv, json, html };
 
 const ReportExtra = struct {
     launch: *?[]const u8,
-    format: *ReportFormat,
+    format: *?ReportFormat,
     bottlenecks: *bool,
     compare: *?[]const u8,
     suggest: *bool,
+    output: *?[]const u8,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            self.output.* = value orelse return missingValue(arg);
+            return 2;
+        }
         if (std.mem.eql(u8, arg, "--suggest")) {
             self.suggest.* = true;
             return 1;
@@ -993,30 +1001,48 @@ fn resolveLaunch(c: Ctx, rec: []const u8, name: []const u8) !?[]const u8 {
 fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var launch: ?[]const u8 = null;
-    var format: ReportFormat = .tsv;
+    var format: ?ReportFormat = null;
     var bottlenecks = false;
     var compare: ?[]const u8 = null;
     var suggest = false;
-    if (try parseArgs(c, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest })) |e| return e;
+    var output: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest, .output = &output })) |e| return e;
+    // One report at a time, in a format it has.
+    if (@as(u8, @intFromBool(suggest)) + @intFromBool(compare != null) + @intFromBool(bottlenecks) > 1)
+        return fail("choose one of --suggest, --compare and --bottlenecks", .{});
+    if (format) |f| {
+        if (bottlenecks or compare != null) return fail("--bottlenecks and --compare print text; --format applies to the attempt table and --suggest", .{});
+        if (suggest and f == .html) return fail("--suggest prints tsv or json, not html", .{});
+    }
+    const kind = format orelse .tsv;
+    if (output == null and kind == .html and !suggest and term.isTerminal(1))
+        return fail("the HTML page is for a browser: write it with -o report.html, or redirect standard output", .{});
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}", .{rec});
-    if (!sys.exists(c.gpa, dir)) return fail("no launch {s}", .{dir});
-    var buf: [65536]u8 = undefined;
-    var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
+    if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
+    var text: std.Io.Writer.Allocating = .init(c.gpa);
+    defer text.deinit();
+    const w = &text.writer;
     if (suggest) {
-        try report.writeSuggestions(&w.interface, try report.suggestions(c.a, try report.attempts(c.gpa, c.a, dir)), format == .json);
+        var l = try workz.model.load(c.gpa, c.a, dir);
+        defer l.deinit();
+        try report.writeSuggestions(w, &l, kind == .json);
     } else if (compare) |other| {
-        const base = (try resolveLaunch(c, rec, other)) orelse return fail("no launch found for {s}", .{other});
-        try report.writeCompare(c.gpa, c.a, &w.interface, base, dir);
+        const base = (try resolveLaunch(c, rec, other)) orelse return failed("no launch found for {s}", .{other});
+        try report.writeCompare(c.gpa, c.a, w, base, dir);
     } else if (bottlenecks) {
-        try report.writeBottlenecks(c.gpa, c.a, &w.interface, dir);
-    } else switch (format) {
-        .html => try workz.html.write(c.gpa, c.a, &w.interface, dir),
-        .json => try report.writeJson(&w.interface, try report.attempts(c.gpa, c.a, dir)),
-        .tsv => try report.writeTsv(&w.interface, try report.attempts(c.gpa, c.a, dir)),
+        try report.writeBottlenecks(c.gpa, c.a, w, dir);
+    } else switch (kind) {
+        .html => try workz.html.write(c.gpa, c.a, w, dir),
+        .json => try report.writeJson(c.a, w, try workz.model.attempts(c.gpa, c.a, dir)),
+        .tsv => try report.writeTsv(w, try workz.model.attempts(c.gpa, c.a, dir)),
     }
-    try w.interface.flush();
+    if (output) |path| {
+        sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, @errorName(err) });
+        return .ok;
+    }
+    try sys.writeAll(1, text.written());
     return .ok;
 }
 

@@ -14,9 +14,11 @@ workz run workflow.toml --max-threads 16 --max-memory 60G
 
 On a terminal, `run` prints a line for each rule that completes, retries, fails or is blocked, and keeps one status line below them: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the names of the running rules. A failure's line is followed by the last lines of the attempt's standard error. When the launch ends, a short summary follows on standard output:
 
-![workz run on a terminal: one line for each completed rule, a retry of trim_S4 after a temporary failure, and a summary naming the three slowest rules, the launch directory and the reports to read next.](images/run.png)
+![workz run on a terminal: one line for each completed rule, a retry of trim_S4 after a temporary failure, and a summary naming the three slowest rules, the launch's page and the report to read next.](images/run.png)
 
 Off a terminal, such as in a script or a log file, each start, completion and failure is one plain line on standard error, prefixed with the count of finished rules, and the summary is one line of JSON on standard output, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)). `--json` prints the JSON summary on a terminal too, and `--no-color` or `NO_COLOR=1` turns colors off.
+
+Every launch keeps a page of its own, `report.html` in its launch directory ([The HTML report](Reports.md#the-html-report)). `run` prints its path when the launch starts, unless `--quiet` is given, and draws the page again every 5 s, so a browser that has it open follows the launch: the pipeline fills in rule by rule and the timeline grows. On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time. When the launch ends, the page is drawn once more and stops reloading.
 
 Only one launch runs in a working directory at a time; a second one stops at once with `another run holds .../.workz/lock`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
 
@@ -63,6 +65,7 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
+    0/5  page       .workz/launches/20261026T052452.447-796d3243/report.html, drawn again every 5 s while the launch runs
     1/5  failed     exits: exited with status 1
                     | sort: cannot read: samples.tsv: No such file or directory
     2/5  failed     no_output: exited 0 without output d.txt
@@ -76,7 +79,7 @@ An attempt fails when its command exits with a non-zero status, is killed, runs 
            no_output  exited 0 without output d.txt
            slow       timed out after 2 s
            too_big    out of memory: could not stay within its 64 MiB request
- records   .workz/launches/20261026T052452.447-796d3243
+ page      .workz/launches/20261026T052452.447-796d3243/report.html
  next      workz logs exits   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```

@@ -8,6 +8,7 @@
 //!   .workz/launches/<id>/launch.json options, engine identity, shared sizes
 //!   .workz/launches/<id>/events.jsonl typed events, append-only
 //!   .workz/launches/<id>/summary.json final counts and status
+//!   .workz/launches/<id>/report.html  the launch's page (html.zig), redrawn while it runs
 //!   .workz/launches/<id>/control      commands for the running launch
 //!   .workz/launches/<id>/shared/      service scripts, logs and stop pipes
 //!   .workz/launches/<id>/attempts/<rule>/<NNN>/ command.sh, request.json,

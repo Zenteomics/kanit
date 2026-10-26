@@ -106,18 +106,19 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
+[0/4] page .workz/launches/20261026T221243.941-80c7a25e/report.html, drawn again every 5 s while the launch runs
 [0/4] started gc_s1 (attempt 1)
 [0/4] started gc_s2 (attempt 1)
 [1/4] completed gc_s1 (0.0 s)
+[1/4] started gc_s3 (attempt 1)
 [2/4] completed gc_s2 (0.0 s)
-[2/4] started gc_s3 (attempt 1)
 [3/4] completed gc_s3 (0.0 s)
 [3/4] started summary (attempt 1)
 [4/4] completed summary (0.0 s)
-{"engine":"workz 0.3.0 sha256:85d2...","engine_key":2,"launch":"20261026T034055.284-855c8427","status":"completed","counts":{"completed":4,...}
+{"engine":"workz 0.3.0 sha256:3ac3...","engine_key":2,"launch":"20261026T221243.941-80c7a25e","status":"completed","counts":{"completed":4,...}
 ```
 
-The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here). Without `--max-threads` and `--max-memory`, the budget is every online CPU and three quarters of the machine's memory.
+The first line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here). Without `--max-threads` and `--max-memory`, the budget is every online CPU and three quarters of the machine's memory.
 
 ```sh
 cat summary.tsv
@@ -192,6 +193,7 @@ workz run workflow.toml
 ```
 
 ```text
+[0/4] page .workz/launches/20261026T221244.010-e42904d2/report.html, drawn again every 5 s while the launch runs
 [2/4] started gc_s2 (attempt 1)
 [3/4] completed gc_s2 (0.0 s)
 [3/4] started summary (attempt 1)

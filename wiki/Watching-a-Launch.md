@@ -69,13 +69,13 @@ Failed rules follow under `FAILED`, each with its reason and the path of its sta
 
 ## status
 
-`workz status` prints the newest launch's summary once it has ended. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch directory, and the commands to look further:
+`workz status` prints the newest launch's summary once it has ended. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch's page, and the commands to look further:
 
 ```text
  failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked
  failures  align_S1  exited with status 3
                      | align: reference index is truncated
- records   .workz/launches/20261026T051434.360-95f2e7d0
+ page      .workz/launches/20261026T051434.360-95f2e7d0/report.html
  next      workz logs align_S1   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```

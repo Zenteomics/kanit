@@ -9,7 +9,7 @@ const records = @import("records.zig");
 const cgroup = @import("cgroup.zig");
 const tui = @import("tui.zig");
 const term = @import("term.zig");
-const report = @import("report.zig");
+const model = @import("model.zig");
 const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 
@@ -66,12 +66,37 @@ pub const RuleView = struct {
 pub const SharedView = struct {
     name: []const u8,
     state: []const u8,
+    /// The largest memory peak of any of its holders.
     memory_peak: ?u64 = null,
     /// cgroup of the current holder, for live counters.
     cg: ?[]const u8 = null,
     /// Memory the holder uses, sampled by the interactive view.
     live_memory: ?u64 = null,
+    /// A container service, not mapped files.
+    service: bool = false,
+    /// Holders started, and the seconds they took to become ready.
+    starts: u32 = 0,
+    load_s: f64 = 0,
+    loading_ns: i128 = 0,
+    /// Memory the input is counted for: a service's declared memory, or the
+    /// pages of its files.
+    declared_mib: f64 = 0,
+    failed: bool = false,
 };
+
+/// One run sample, taken every 5 s while rules run.
+pub const Sample = struct {
+    ns: i128,
+    threads_reserved: f64,
+    memory_reserved_mib: f64,
+    /// The run cgroup's memory in use and CPU cores used, when isolated.
+    memory_current: ?u64,
+    cpu_cores: ?f64,
+};
+
+/// The time a ready rule waited for a resource group, for the advice on
+/// whether a larger group would have started it earlier.
+pub const GroupWait = struct { rule: usize, group: []const u8, from_ns: i128, to_ns: i128 = 0 };
 
 /// The state of one launch, kept up to date from its event stream.
 pub const Tracker = struct {
@@ -87,7 +112,10 @@ pub const Tracker = struct {
     /// it cannot be read.
     workdir_name: []const u8 = "",
     selected: u32 = 0,
+    /// Time of the first event, and of `launch_started`, when the launch
+    /// began its rules after its checks.
     started_ns: i128 = 0,
+    launch_ns: i128 = 0,
     max_threads: u32 = 0,
     max_memory_mib: u64 = 0,
     /// The run's cgroup, when isolated.
@@ -103,6 +131,12 @@ pub const Tracker = struct {
     rules: std.ArrayList(RuleView) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
     shared: std.ArrayList(SharedView) = .empty,
+    /// Every run sample, oldest first.
+    samples: std.ArrayList(Sample) = .empty,
+    /// Waits for resource groups; one still open has `to_ns` 0.
+    group_waits: std.ArrayList(GroupWait) = .empty,
+    /// The open group wait of each rule, by rule index.
+    open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
     pub fn init(gpa: Allocator, launch_dir: []const u8) !Tracker {
         var t: Tracker = .{ .arena = std.heap.ArenaAllocator.init(gpa), .gpa = gpa, .events_path = "" };
@@ -184,6 +218,7 @@ pub const Tracker = struct {
         if (self.started_ns == 0) self.started_ns = at;
         const eql = std.mem.eql;
         if (eql(u8, ev, "launch_started")) {
+            self.launch_ns = at;
             self.selected = @intCast(int(v, "selected") orelse 0);
             self.max_threads = @intCast(int(v, "max_threads") orelse 0);
             self.max_memory_mib = @intCast(int(v, "max_memory_mib") orelse 0);
@@ -201,17 +236,44 @@ pub const Tracker = struct {
         } else if (eql(u8, ev, "sample")) {
             self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
             self.cpu_cores = float(v, "cpu_cores_used");
+            try self.samples.append(a, .{
+                .ns = at,
+                .threads_reserved = float(v, "threads_reserved") orelse 0,
+                .memory_reserved_mib = float(v, "memory_reserved_mib") orelse 0,
+                .memory_current = self.memory_current,
+                .cpu_cores = self.cpu_cores,
+            });
         } else if (std.mem.startsWith(u8, ev, "shared_")) {
             const s = try self.sharedView(str(v, "name") orelse "?");
             s.state = if (eql(u8, ev, "shared_loading")) "loading" else if (eql(u8, ev, "shared_loaded")) "ready" else if (eql(u8, ev, "shared_released")) "released" else if (eql(u8, ev, "shared_failed")) "failed" else s.state;
-            if (int(v, "memory_peak")) |m| s.memory_peak = @intCast(m);
-            if (eql(u8, ev, "shared_loading")) s.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
+            if (int(v, "memory_peak")) |m| s.memory_peak = @max(s.memory_peak orelse 0, @as(u64, @intCast(m)));
+            if (eql(u8, ev, "shared_loading")) {
+                s.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
+                s.starts += 1;
+                s.loading_ns = at;
+                if (float(v, "memory_mib")) |m| {
+                    s.service = true;
+                    s.declared_mib = m;
+                } else if (float(v, "bytes")) |b| s.declared_mib = b / 1048576.0;
+            } else if (eql(u8, ev, "shared_loaded")) {
+                if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;
+            } else if (eql(u8, ev, "shared_failed")) s.failed = true;
         } else if (str(v, "rule")) |name| {
             const r = try self.rule(name);
+            const ri = self.index.get(name).?;
+            // A rule's wait for a resource group ends when it waits for
+            // something else or starts.
+            if (eql(u8, ev, "task_waiting") or eql(u8, ev, "task_started")) {
+                if (self.open_wait.fetchRemove(ri)) |kv| self.group_waits.items[kv.value].to_ns = at;
+            }
             if (eql(u8, ev, "task_waiting")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .waiting;
                 r.reason = try a.dupe(u8, str(v, "reason") orelse "");
+                if (std.mem.startsWith(u8, r.reason, "group:")) {
+                    try self.open_wait.put(a, ri, self.group_waits.items.len);
+                    try self.group_waits.append(a, .{ .rule = ri, .group = r.reason["group:".len..], .from_ns = at });
+                }
             } else if (eql(u8, ev, "task_started")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .running;
@@ -547,8 +609,8 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     }
 
     // The last attempt of each rule, from the attempt records.
-    const rows = report.attempts(gpa, a, launch_dir) catch &.{};
-    var last: std.ArrayList(report.Attempt) = .empty;
+    const rows = model.attempts(gpa, a, launch_dir) catch &.{};
+    var last: std.ArrayList(model.Attempt) = .empty;
     for (rows, 0..) |r, i| {
         if (i + 1 < rows.len and std.mem.eql(u8, rows[i + 1].rule, r.rule)) continue;
         try last.append(a, r);
@@ -583,8 +645,8 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         try w.print("and {d} more; workz report lists every attempt\n", .{failures - shown});
     }
     if (shown == 0 and last.items.len > 0) {
-        std.mem.sort(report.Attempt, last.items, {}, struct {
-            fn gt(_: void, x: report.Attempt, y: report.Attempt) bool {
+        std.mem.sort(model.Attempt, last.items, {}, struct {
+            fn gt(_: void, x: model.Attempt, y: model.Attempt) bool {
                 return x.wall_s > y.wall_s;
             }
         }.gt);
@@ -592,13 +654,19 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         for (last.items[0..@min(last.items.len, 3)], 0..) |r, i| try w.print("{s}{s} {d:.1} s", .{ if (i == 0) "" else ", ", r.rule, r.wall_s });
         try w.writeAll("\n");
     }
-    try label(w, s, col, "records");
-    try w.print("{s}\n", .{shownPath(a, launch_dir)});
+    // The launch's own page sits among its records; a launch without one
+    // shows its directory.
+    const page = try std.fs.path.join(a, &.{ launch_dir, "report.html" });
+    const has_page = sys.exists(gpa, page);
+    try label(w, s, col, if (has_page) "page" else "records");
+    try w.print("{s}\n", .{shownPath(a, if (has_page) page else launch_dir)});
     try label(w, s, col, "next");
     if (std.mem.eql(u8, outcome, "completed")) {
         try w.print("{s}workz report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
-        try label(w, s, col, "");
-        try w.print("{s}workz report --format html > report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
+        if (!has_page) {
+            try label(w, s, col, "");
+            try w.print("{s}workz report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
+        }
     } else if (std.mem.eql(u8, outcome, "refused")) {
         try w.writeAll("fix the cause above and run the same command again\n");
     } else {

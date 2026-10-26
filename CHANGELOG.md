@@ -6,14 +6,16 @@ All notable changes to workz will be documented in this file. The format follows
 
 ## Unreleased
 
-Rules can now say what they are, by step, sample, category and tool, and the reports and a rebuilt HTML page group by those labels. The terminal output is rebuilt too: `run` keeps a status line and ends with a summary, `watch` draws gauges, and every command explains itself with `--help`. Reuse also survives a reboot on btrfs.
+Rules can now say what they are, by step, sample, category and tool, and the reports and a rebuilt HTML page group by those labels; every launch keeps that page up to date while it runs. The terminal output is rebuilt too: `run` keeps a status line and ends with a summary, `watch` draws gauges, and every command explains itself with `--help`. Reuse also survives a reboot on btrfs.
 
 Three changes need action:
 
 - **Expect every rule to run once.** Recorded file identities no longer include the device number, and a rule that uses a shared file input now counts that file as an input.
 - **Pass `--json` for the JSON summary on a terminal.** On a terminal, `run` and `status` print a short readable summary; standard output that goes to a file or a pipe still gets JSON.
 - **Update scripts that read reports, events or exit statuses.**
-  - `report --suggest` names its first column and JSON field `step` instead of `kind`, and `--compare` and `--bottlenecks` group by step.
+  - `report --suggest` names its first column and JSON field `step` instead of `kind`, counts `runs` instead of `attempts`, and replaces `peak_mib` and `delegated` with `used_mib` (the memory it sizes), `used_basis` (`process` or `cgroup`), `peak_mib` (the cgroup peak) and `note` (`measured`, `delegated` or `out_of_memory`). A delegated step keeps its current request instead of a suggestion from memory it did not use.
+  - `report --format json` uses the TSV's field names (`memory_mib`, `max_rss_mib`, `oom_kills` and so on) and adds `started_ns` and `directory`.
+  - `--compare` and `--bottlenecks` group by step, and a step's figures come from the latest run of every rule, this launch's or the one it reused.
   - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
   - A rule cancelled before its attempt started is recorded as `task_finished` with status `cancelled`, not as `task_failed`, and `task_failed` always has an `attempt` field, null when no attempt started.
 
@@ -25,6 +27,11 @@ Three changes need action:
 - **Reports by label.**
   - `report --bottlenecks` adds the CPU time per category and per tool, and each sample's slowest step, marked when it took at least 1.5 times the step's median.
   - The TSV and JSON attempt reports carry each attempt's labels.
+- **A page for every launch.** `run` writes `report.html` in the launch directory as the launch starts and prints its path.
+  - The engine draws the page again every 5 s while the launch runs, and the page reloads itself, so a browser follows the pipeline rule by rule.
+  - On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time.
+  - The page is drawn once more when the launch ends and then stops reloading; the summary names it.
+- **`report -o FILE`** writes the report to a file; `--format html` refuses to print the page onto a terminal and says to use it.
 - **Run output on a terminal.**
   - `run` keeps a status line under its progress lines: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the rules running.
   - A failure line shows the last lines of the attempt's standard error, and each rule blocked by a failure gets a line.
@@ -37,14 +44,14 @@ Three changes need action:
 
 ### Changed
 
-- **The HTML report** is built around the labels.
-  - Cards give the elapsed time, rules, pipeline, attempts, CPU, memory and the engine's cost.
-  - The CPU time is split by category and by tool.
-  - A table of samples by steps shades each run by its wall time against its step's median, so a slow sample stands out in any column.
-  - The steps follow the workflow's graph, each with the spread of its wall times, the cores and memory it used against its request, and the suggested request.
-  - The timeline is colored by category, the budget charts have axes, and what limited the launch is laid out as the critical path rule by rule and the time ready rules waited for each resource.
-  - A launch that reused rules still shows the whole pipeline: each reused rule is marked and shown with the run that made its outputs.
-  - The page follows the reader's light or dark color scheme and prints cleanly.
+- **The HTML report** is drawn as one engineering sheet, on grid paper in light mode and as a blueprint in dark mode.
+  - A title block gives the status, elapsed time, rules done, the pipeline's samples and steps, CPU and memory against the budget, and the engine's own cost.
+  - FIG. 1 draws the pipeline: a box for each step in the order of the workflow's graph, wired to the steps it reads from, with a cell for each rule showing whether it is done, reused, running, waiting, failed or blocked.
+  - Further figures show where the CPU time went, each sample's run of each step, the steps with their suggested requests, the timeline, the use of the budget and what limited the launch.
+  - Tables list the failures and every attempt.
+  - The pipeline, CPU, samples and steps figures cover the latest run of every rule, so a launch that reused rules still shows the whole pipeline; the rest cover the launch itself.
+  - A page written while the launch runs reloads itself every 5 s.
+  - The page follows the reader's light or dark color scheme, prints cleanly, and has no scripts and nothing loaded from elsewhere.
 - **The live view** shows the launch in gauges.
   - A progress bar is split by state, and the threads and memory reserved against the budget sit beside the cores and memory in use.
   - Each running rule shows its CPU use against its threads and a memory bar against its request, yellow from 70% and red from 90%.
@@ -75,9 +82,18 @@ Three changes need action:
   - A mount below another mount is left out even when a sibling directory sorts between them.
 - **Start order.** A rule that never completed is estimated by the median wall time of its step, as the reports compute it.
 - **Labels.** A rule named with a trailing `__` keeps its whole name as its step.
+- **Reports agree.** The text reports and the HTML page compute each figure once, from the same records.
+  - A step whose attempt was killed for exceeding its memory is suggested half again the request it exceeded, not the memory it reached before the kill.
+  - Memory sizing names its basis, process memory or cgroup peak, and the HTML steps table shows page cache apart, so a suggestion no longer sits below the peak printed beside it.
+  - The critical path counts the final attempt's own wait; an earlier cancelled attempt no longer counts as waiting.
+  - `--bottlenecks` shows each step's median wall time, as `--compare` and the HTML page do, instead of a total under the same name.
+  - The HTML page marks a failure that a later attempt recovered from, and counts blocked rules apart from failed attempts.
+  - A launch without a summary takes its elapsed time from its events, and reused rules whose records were cleaned up are counted.
+  - CPU shares are left out when all the CPU time adds up to less than a second.
 - **Comparisons.**
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.
-  - A step with no completed attempt on one side shows `-` and says on which side it did not run, instead of a change of -100%.
+  - A step with no completed run on one side shows `-` and says on which side, instead of a change of -100%; a step reused in the launch compares the run it reused.
+  - Each metric has its own BASELINE, LAUNCH and CHANGE columns.
 - **Messages.**
   - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
   - A rule that fails because its shared input could not be loaded prints a failure line with the reason.

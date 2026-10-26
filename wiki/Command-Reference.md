@@ -143,15 +143,16 @@ workz report [WORKFLOW] [options]
 
 Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 
-| Option          | Argument              | Default | Meaning                                 |
-| --------------- | --------------------- | ------- | --------------------------------------- |
-| `--launch`      | ID                    | newest  | the launch to report on                 |
-| `--format`      | `tsv`, `json`, `html` | `tsv`   | attempt table, or a self-contained page |
-| `--bottlenecks` |                       |         | what limited the launch                 |
-| `--suggest`     |                       |         | suggested threads and memory per step   |
-| `--compare`     | OTHER                 |         | compare with a launch ID or directory   |
+| Option           | Argument              | Default | Meaning                                 |
+| ---------------- | --------------------- | ------- | --------------------------------------- |
+| `--launch`       | ID                    | newest  | the launch to report on                 |
+| `--format`       | `tsv`, `json`, `html` | `tsv`   | attempt table, or a self-contained page |
+| `-o`, `--output` | FILE                  | stdout  | write the report to FILE                |
+| `--bottlenecks`  |                       |         | what limited the launch                 |
+| `--suggest`      |                       |         | suggested threads and memory per step   |
+| `--compare`      | OTHER                 |         | compare with a launch ID or directory   |
 
-`--suggest`, `--compare` and `--bottlenecks` each print one report; given together, the first in that order wins. `--suggest` accepts `--format json`.
+Give at most one of `--suggest`, `--compare` and `--bottlenecks`. `--format` applies to the attempt table and to `--suggest`, which prints `tsv` or `json`; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
 
 ## verify
 
