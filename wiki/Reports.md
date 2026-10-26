@@ -135,16 +135,17 @@ Kinds whose work ran outside workz in either launch are marked, and their memory
 
 ## The HTML report
 
-`workz report --format html > report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message:
+`workz report --format html > report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. It follows the reader's light or dark color scheme and prints cleanly.
 
-![The top of an HTML report: launch facts, a timeline of every attempt with waiting shown before each bar and the critical path outlined, and charts of threads and memory reserved against cores and memory in use.](images/report.png)
+![The top of an HTML report: the launch's name and status, cards for elapsed time, rules done, attempts, CPU, memory and the engine's cost, and a timeline with one labelled row per attempt, its wait drawn before its run and the critical path outlined.](images/report.png)
 
 The page holds, in order:
 
-1. The launch's status, elapsed time, rule counts, the engine's own cost, the budget and the number of attempts.
-2. A timeline with one bar per attempt, waiting drawn before it, colored by result, the critical path outlined; hovering a bar names its rule.
-3. Threads reserved against CPU cores used, and memory reserved against memory in use, over the launch.
-4. Memory request against largest peak for each kind of rule, with the suggested request.
-5. The bottleneck report, as above.
-6. Every failed or cancelled attempt with the last 40 lines of its standard error.
-7. The attempt table.
+1. The launch's name, status, ID and start time, and any launch error.
+2. Cards for the elapsed time, the rules done, the attempts and retries, the CPU cores in use against the threads reserved, the peak memory in use, and the engine's own cost.
+3. A timeline with one labelled row per attempt: the wait for resources as a thin bar, then the run in the color of its result, with the critical path outlined. Hovering a bar gives its times.
+4. Charts of threads reserved against CPU cores in use, and memory reserved against memory in use, over the launch, with the budget as a dashed line.
+5. What limited the launch: the critical path step by step, the rule-seconds that ready rules waited for each resource, and the full bottleneck report folded below them.
+6. For each kind of rule, the threads and memory requested against what its attempts used, with the suggested requests.
+7. Every failed or cancelled attempt with the last 40 lines of its standard error.
+8. The attempt table, which scrolls under a fixed header.

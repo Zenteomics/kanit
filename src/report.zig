@@ -602,7 +602,8 @@ fn character(stall_n: usize, cpu: f64, mem: f64, io: f64, eff: f64) []const u8 {
     return "mixed";
 }
 
-fn sortByValue(map: *std.StringArrayHashMapUnmanaged(f64)) void {
+/// Sorts totals by value, largest first.
+pub fn sortByValue(map: *std.StringArrayHashMapUnmanaged(f64)) void {
     const Ctx = struct {
         values: []const f64,
         pub fn lessThan(c: @This(), x: usize, y: usize) bool {
@@ -612,8 +613,9 @@ fn sortByValue(map: *std.StringArrayHashMapUnmanaged(f64)) void {
     map.sort(Ctx{ .values = map.values() });
 }
 
-/// Total seconds of waiting per reason, from every attempt record.
-fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded: *bool) !std.StringArrayHashMapUnmanaged(f64) {
+/// Total seconds of waiting per reason, from every attempt record;
+/// `recorded` is set when any attempt recorded its queue.
+pub fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded: *bool) !std.StringArrayHashMapUnmanaged(f64) {
     var totals: std.StringArrayHashMapUnmanaged(f64) = .empty;
     var files: std.ArrayList([]u8) = .empty;
     defer {

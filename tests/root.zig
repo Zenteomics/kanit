@@ -982,3 +982,61 @@ test "[unit] - [run]: the readable summary names each failure with its last erro
     try testing.expect(std.mem.indexOf(u8, text, "\n next      workz logs align_S1") != null);
     try testing.expect(std.mem.indexOf(u8, text, "prep") == null);
 }
+
+test "[unit] - [report]: the html page labels every attempt, escapes its records and needs no scripts" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try s.dir("launch");
+    _ = try s.dir("launch/attempts");
+    const long = "align_sample_0042_lane_3_paired_end";
+    _ = try s.dir("launch/attempts/" ++ long);
+    _ = try s.dir("launch/attempts/" ++ long ++ "/001");
+    _ = try s.dir("launch/attempts/bad");
+    _ = try s.dir("launch/attempts/bad/001");
+    _ = try s.file("launch/launch.json",
+        \\{"workdir":"/data/rnaseq","started":"2026-01-01T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+    );
+    _ = try s.file("launch/summary.json",
+        \\{"status":"failed","elapsed_s":12.0,"selected":2,"engine":"workz 9.9.9 sha256:ab","counts":{"completed":1,"failed":1},"engine_cost":{"cpu_s":0.1,"max_rss_mib":5}}
+    );
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"sample","threads_reserved":2,"cpu_cores_used":1.5,"memory_current":104857600,"memory_reserved_mib":512}
+        \\{"time":"2026-01-01T00:00:10.000Z","event":"sample","threads_reserved":2,"cpu_cores_used":1.8,"memory_current":209715200,"memory_reserved_mib":512}
+        \\
+    );
+    _ = try s.file("launch/attempts/" ++ long ++ "/001/record.json",
+        \\{"rule":"align_sample_0042_lane_3_paired_end","attempt":1,"status":"completed","reason":"","wall_s":10.0,"cpu_s":17.0,
+        \\"started":"2026-01-01T00:00:02.000Z","request":{"threads":2,"memory_mib":512},"cgroup":{"memory_peak":209715200},
+        \\"queue":{"waited_s":1.0,"reasons":[{"reason":"threads","seconds":1.0}]}}
+    );
+    _ = try s.file("launch/attempts/bad/001/record.json",
+        \\{"rule":"bad","attempt":1,"status":"failed","reason":"exited with status 4","wall_s":0.5,"cpu_s":0.0,
+        \\"started":"2026-01-01T00:00:01.000Z","request":{"threads":1,"memory_mib":64}}
+    );
+    _ = try s.file("launch/attempts/bad/001/stderr.log", "<boom & stuff>\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    const page = out.written();
+    const has = struct {
+        fn f(text: []const u8, part: []const u8) bool {
+            return std.mem.indexOf(u8, text, part) != null;
+        }
+    }.f;
+    try testing.expect(!has(page, "<script") and !has(page, "<boom"));
+    try testing.expect(has(page, "rnaseq <span class=\"badge c-fail\">failed</span>"));
+    try testing.expect(has(page, "started 2026-01-01 00:00:00 UTC &middot; workz 9.9.9</p>"));
+    // A long rule name keeps both ends in the timeline; the table has it whole.
+    try testing.expect(has(page, ">align_sample...3_paired_end</text>"));
+    try testing.expect(has(page, "<td class=\"name\">" ++ long ++ "</td>"));
+    try testing.expect(has(page, "&lt;boom &amp; stuff&gt;"));
+    try testing.expect(has(page, "Failures (1)") and has(page, "Attempts (2)"));
+    try testing.expect(has(page, "<th colspan=\"3\" class=\"grp\">threads</th>"));
+    try testing.expect(has(page, ">1.0 GiB</text>") and has(page, "<td class=\"n\">512 MiB</td>"));
+    try testing.expect(has(page, "<td>threads</td><td class=\"n\">1.0</td>"));
+    try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
+    for (page) |c| try testing.expect(c < 0x80);
+}

@@ -24,6 +24,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - The live `watch` view shows the launch in gauges: a progress bar split by state, the threads and memory reserved against the budget beside the cores and memory in use, and for each running rule its CPU use against its threads and a memory bar against its request, yellow from 70% and red from 90%. The timeline has a time axis, the details view gauges, and the log view shows error lines in red and warnings in yellow. Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
 - `X` in the live view cancels the launch only when pressed a second time within 3 s.
 - The selection in the live view stays on the top row as rules finish, until a key moves it.
+- The HTML report opens with cards for the elapsed time, rules, attempts, CPU, memory and engine cost. Its timeline labels every attempt with its rule and has a time axis, the budget charts have axes and the budget line, what limited the launch is laid out as the critical path step by step and the time ready rules waited for each resource, the requests per kind of rule form a table with memory bars, and the attempt table scrolls under a fixed header. The page follows a light or dark color scheme and prints cleanly.
 
 ### Fixed
 
@@ -37,6 +38,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - The starter workflow from `workz init` describes a resource group as units that rules take, not as a limit on rules of a kind.
 - `report --compare` shows `-` for a kind with no completed attempt on one side, and says on which side it did not run, instead of a change of -100%.
 - `workz completion bash` completes every option of every command, including `report --suggest` and `--compare`, and the `control` commands with rule names after `stop` and `retry`.
+- The HTML report shows kind names and request figures in full; they were cut off at the edge of the memory chart.
 
 ## 0.3.0 - 2026-10-25
 
