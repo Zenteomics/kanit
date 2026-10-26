@@ -260,7 +260,6 @@ fn contains(list: []const []const u8, key: []const u8) bool {
     return false;
 }
 
-/// Allowed key within edit distance 3 of `key`, for hints.
 /// Writes line `line` of `source` under a gutter, with a caret under
 /// column `col` when it is known.
 pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void {
@@ -285,6 +284,7 @@ pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void
     }
 }
 
+/// Allowed key within edit distance 3 of `key`, for hints.
 pub fn closest(allowed: []const []const u8, key: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_d: usize = 4;

@@ -673,8 +673,6 @@ const Engine = struct {
         return r.timeout_s orelse self.opts.timeout_s;
     }
 
-    /// A container's environment: the image's own, plus locale, time zone,
-    /// passed names and the WORKZ_* variables; never the host PATH.
     /// An attempt that could not start: it fails and gives back what it held.
     fn failToStart(self: *Engine, i: usize, reason: []const u8) void {
         const t = &self.tasks[i];

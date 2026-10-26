@@ -628,8 +628,6 @@ fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded: *b
     return totals;
 }
 
-/// Follows the run back from the last task to finish: each step's producer
-/// is the parent that finished last, the one it was waiting for.
 /// Names of the rules on the critical path: from the attempt that finished
 /// last back through the producer that finished last before it.
 pub fn criticalPathNames(gpa: Allocator, a: Allocator, launch_dir: []const u8, rows: []const Attempt) ![]const []const u8 {
@@ -670,6 +668,8 @@ pub fn criticalPathNames(gpa: Allocator, a: Allocator, launch_dir: []const u8, r
     return names.items;
 }
 
+/// Follows the run back from the last task to finish: each step's producer
+/// is the parent that finished last, the one it was waiting for.
 fn criticalPath(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, timing: *std.StringHashMapUnmanaged(Timing), t0: i128) !void {
     const launch_json = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return;
     defer gpa.free(launch_json);
