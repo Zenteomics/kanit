@@ -816,7 +816,7 @@ new report-html
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -k -q > s.json
 "$workz" report -d . --format html > r.html
-check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "Requests per step" r.html && grep -Eq "class=\"st-[a-z]+ crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -Eq "class=\"(st-[a-z]+|g[0-9]) crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
 check "the html report has no scripts or remote assets, and has dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html'
 
 new labels
@@ -835,6 +835,8 @@ sed -i 's/category = "report"/category = "summary"/' wf.toml
 check "changing a label reruns nothing" '[ "$(status_of s2.json reused)" = 3 ]'
 "$workz" report -d . --launch "$first" --bottlenecks > bn.txt
 check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (completed attempts)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
+"$workz" report -d . --launch "$first" --format html > r.html
+check "the html report draws samples by step" 'grep -q "Samples by step" r.html && grep -q "<td class=\"row\">s1</td>" r.html && grep -q ">MERGE</th>" r.html'
 
 if command -v tmux > /dev/null; then
 # Interactive watch on a terminal: a private tmux server gives it a real

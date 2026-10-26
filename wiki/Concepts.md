@@ -53,9 +53,10 @@ A rule declares its labels with the keys `step`, `sample`, `category` and `tool`
 > [!TIP]
 > A generator knows each rule's step and sample, so let it write them ([Writing workflows](Writing-Workflows.md#label-every-rule)). Names then stay free: without a declared step, `count_genes` is read as the step `count`.
 
-Labels are not part of the [rule key](#rule-keys-and-reuse): adding or changing one reruns nothing. Each attempt records them, and they are used in two places:
+Labels are not part of the [rule key](#rule-keys-and-reuse): adding or changing one reruns nothing. Each attempt records them, and they are used in three places:
 
 - [Reports](Reports.md) size and compare steps, add up time per category and tool, and find the slow sample of each step.
+- The [HTML report](Reports.md#the-html-report) colors attempts by category and draws a table of samples by steps.
 - The scheduler estimates a rule that has never completed by the median wall time of its step ([Resources and scheduling](Resources-and-Scheduling.md#which-rule-starts-first)).
 
 ## Launches and attempts

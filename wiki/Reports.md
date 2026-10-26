@@ -166,15 +166,21 @@ Steps whose work ran outside workz in either launch are marked, and their memory
 
 `workz report --format html > report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. It follows the reader's light or dark color scheme and prints cleanly.
 
-![The top of an HTML report: the launch's name and status, cards for elapsed time, rules done, attempts, CPU, memory and the engine's cost, and a timeline with one labelled row per attempt, its wait drawn before its run and the critical path outlined.](images/report.png)
+![The top of an HTML report: the launch's name and status; cards for elapsed time, rules, pipeline, attempts, CPU, memory and engine cost; the CPU time split by category and per tool; and a table of six samples by five steps, each cell shaded by the run's wall time against its step's median.](images/report.png)
 
 The page holds, in order:
 
 1. The launch's name, status, ID and start time, and any launch error.
-2. Cards for the elapsed time, the rules done, the attempts and retries, the CPU cores in use against the threads reserved, the peak memory in use, and the engine's own cost.
-3. A timeline with one labelled row per attempt: the wait for resources as a thin bar, then the run in the color of its result, with the critical path outlined. Hovering a bar gives its times.
-4. Charts of threads reserved against CPU cores in use, and memory reserved against memory in use, over the launch, with the budget as a dashed line.
-5. What limited the launch: the critical path step by step, the rule-seconds that ready rules waited for each resource, and the full bottleneck report folded below them.
-6. For each step, the threads and memory requested against what its attempts used, with the suggested requests.
-7. Every failed or cancelled attempt with the last 40 lines of its standard error.
-8. The attempt table, which scrolls under a fixed header.
+2. Cards for the elapsed time, the rules done, the pipeline's samples, steps, categories and tools, the attempts and retries, the CPU cores in use against the threads reserved, the peak memory in use, and the engine's own cost.
+3. Where the time went: the CPU time of the completed attempts as one bar split by category, or by step when no rule declares a category, then per tool.
+4. Samples by step, when rules have samples: a row per sample and a column per step in pipeline order. Each cell is shaded by the run's wall time against the median of its step, so a dark cell is a slow sample in any column. `!` marks a run at least 1.5 times its median and 2 s longer, `x` a failed one. Rules without a sample share the last row.
+5. Steps: each step in the order of the workflow's graph, producers before consumers, with its category, tool and samples, its runs and median wall time, the spread of its wall times as dots, the cores it used of the threads it requested, its largest memory peak against its request, and the suggested request.
+6. A timeline with one labelled row per attempt: the wait for resources as a thin bar, then the run in the color of its category, or red if it failed, with the critical path outlined. Hovering a bar gives its times.
+7. Charts of threads reserved against CPU cores in use, and memory reserved against memory in use, over the launch, with the budget as a dashed line.
+8. What limited the launch: the critical path rule by rule, the rule-seconds that ready rules waited for each resource, and the full bottleneck report folded below them.
+9. Every failed or cancelled attempt with the last 40 lines of its standard error.
+10. The attempt table with each attempt's step and sample, which scrolls under a fixed header.
+
+A launch that reused rules still shows the whole pipeline. Sections 3 to 5 include each reused rule with the attempt that made its outputs, from the earlier launch that ran it, marked as reused; the timeline, budget, limits, failures and attempt table cover what the launch itself ran. After changing one script and running again, the page still has every sample and step.
+
+Each category, or each step when no rule declares a category, keeps one color across the page. Up to eight get a color each, most CPU time first; with more, the seven largest keep theirs and the rest share gray as "other". Hovering a cell, dot or bar gives its numbers.

@@ -9,6 +9,7 @@ const state = @import("state.zig");
 const workflow = @import("workflow.zig");
 const graph = @import("graph.zig");
 const monitor = @import("monitor.zig");
+const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 const Value = std.json.Value;
 
@@ -47,6 +48,9 @@ pub const Attempt = struct {
     sample: ?[]const u8 = null,
     /// Directory of the attempt's files.
     dir: []const u8 = "",
+    /// For a rule reused in a launch, the earlier launch whose attempt made
+    /// its outputs; null for an attempt of the launch itself.
+    reused_from: ?[]const u8 = null,
 
     pub fn cpuEfficiency(self: Attempt) f64 {
         if (self.wall_s <= 0 or self.threads <= 0) return 0;
@@ -127,50 +131,105 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
     for (files.items) |f| {
         // attempts/<rule>/<NNN>/record.json; files under previous/ are outputs.
         if (!std.mem.endsWith(u8, f, "/record.json") or std.mem.indexOf(u8, f, "/previous/") != null) continue;
-        const bytes = sys.readFile(gpa, f, 16 << 20) catch continue;
-        defer gpa.free(bytes);
-        const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch continue;
-        const wall = num(get(v, "wall_s")) orelse 0;
-        const req = get(v, "request");
-        const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
-        const queue = get(v, "queue");
-        var top_reason: []const u8 = "";
-        var top_s: f64 = 0;
-        if (queue) |q| if (get(q, "reasons")) |rs| if (rs == .array) for (rs.array.items) |w| {
-            const s = num(get(w, "seconds")) orelse 0;
-            if (s > top_s) {
-                top_s = s;
-                top_reason = str(w, "reason");
-            }
-        };
-        const labels = labelsOf(v);
-        try out.append(a, .{
-            .rule = str(v, "rule"),
-            .attempt = @intFromFloat(num(get(v, "attempt")) orelse 0),
-            .status = str(v, "status"),
-            .reason = str(v, "reason"),
-            .wall_s = wall,
-            .cpu_s = num(get(v, "cpu_s")) orelse if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
-            .threads = if (req) |q| num(get(q, "threads")) orelse 1 else 1,
-            .request_mib = if (req) |q| num(get(q, "memory_mib")) orelse 0 else 0,
-            .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,
-            .rss_mib = if (get(v, "rusage")) |ru| (num(get(ru, "maxrss_kib")) orelse 0) / 1024.0 else 0,
-            .oom_kill = if (cg) |c| num(get(c, "oom_kill")) orelse 0 else 0,
-            .limit_events = if (cg) |c| num(get(c, "memory_max_events")) orelse 0 else 0,
-            .waited_s = if (queue) |q| num(get(q, "waited_s")) orelse 0 else 0,
-            .wait_reason = top_reason,
-            .cpu_stall = stall(cg, "cpu_some_us", wall),
-            .memory_stall = stall(cg, "memory_some_us", wall),
-            .io_stall = stall(cg, "io_some_us", wall),
-            .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
-            .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
-            .started_ns = monitor.parseTime(str(v, "started")) orelse 0,
-            .step = labels.step,
-            .category = labels.category,
-            .tool = labels.tool,
-            .sample = labels.sample,
-            .dir = try a.dupe(u8, std.fs.path.dirname(f).?),
-        });
+        if (try readRecord(gpa, a, f)) |r| try out.append(a, r);
+    }
+    return out.items;
+}
+
+/// The attempt in record file `path`, or null when it cannot be read.
+fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
+    const bytes = sys.readFile(gpa, path, 16 << 20) catch return null;
+    defer gpa.free(bytes);
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch return null;
+    const wall = num(get(v, "wall_s")) orelse 0;
+    const req = get(v, "request");
+    const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
+    const queue = get(v, "queue");
+    var top_reason: []const u8 = "";
+    var top_s: f64 = 0;
+    if (queue) |q| if (get(q, "reasons")) |rs| if (rs == .array) for (rs.array.items) |w| {
+        const s = num(get(w, "seconds")) orelse 0;
+        if (s > top_s) {
+            top_s = s;
+            top_reason = str(w, "reason");
+        }
+    };
+    const labels = labelsOf(v);
+    return .{
+        .rule = str(v, "rule"),
+        .attempt = @intFromFloat(num(get(v, "attempt")) orelse 0),
+        .status = str(v, "status"),
+        .reason = str(v, "reason"),
+        .wall_s = wall,
+        .cpu_s = num(get(v, "cpu_s")) orelse if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
+        .threads = if (req) |q| num(get(q, "threads")) orelse 1 else 1,
+        .request_mib = if (req) |q| num(get(q, "memory_mib")) orelse 0 else 0,
+        .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,
+        .rss_mib = if (get(v, "rusage")) |ru| (num(get(ru, "maxrss_kib")) orelse 0) / 1024.0 else 0,
+        .oom_kill = if (cg) |c| num(get(c, "oom_kill")) orelse 0 else 0,
+        .limit_events = if (cg) |c| num(get(c, "memory_max_events")) orelse 0 else 0,
+        .waited_s = if (queue) |q| num(get(q, "waited_s")) orelse 0 else 0,
+        .wait_reason = top_reason,
+        .cpu_stall = stall(cg, "cpu_some_us", wall),
+        .memory_stall = stall(cg, "memory_some_us", wall),
+        .io_stall = stall(cg, "io_some_us", wall),
+        .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
+        .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
+        .started_ns = monitor.parseTime(str(v, "started")) orelse 0,
+        .step = labels.step,
+        .category = labels.category,
+        .tool = labels.tool,
+        .sample = labels.sample,
+        .dir = try a.dupe(u8, std.fs.path.dirname(path).?),
+    };
+}
+
+/// For each rule a launch reused, the attempt that made the outputs it
+/// reused: the rule's last completed attempt in an earlier launch of the same
+/// working directory. Launch IDs begin with their start time, so earlier
+/// launches sort first. A rule whose earlier launch was cleaned up is left
+/// out.
+pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt {
+    var wanted: std.StringArrayHashMapUnmanaged(void) = .empty;
+    {
+        const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "events.jsonl" }), 1 << 30) catch return &.{};
+        defer gpa.free(text);
+        var it = std.mem.splitScalar(u8, text, '\n');
+        while (it.next()) |line| {
+            if (std.mem.indexOf(u8, line, "\"task_reused\"") == null) continue;
+            const v = std.json.parseFromSliceLeaky(Value, a, line, .{ .allocate = .alloc_always }) catch continue;
+            if (std.mem.eql(u8, str(v, "event"), "task_reused")) try wanted.put(a, str(v, "rule"), {});
+        }
+    }
+    if (wanted.count() == 0) return &.{};
+
+    const launches_dir = std.fs.path.dirname(launch_dir) orelse return &.{};
+    const id = std.fs.path.basename(launch_dir);
+    const names = try clean.launchNames(gpa, a, std.fs.path.dirname(launches_dir) orelse return &.{});
+
+    var out: std.ArrayList(Attempt) = .empty;
+    // Newest earlier launch first, so each rule takes its last completed attempt.
+    var k = names.len;
+    while (k > 0 and wanted.count() > 0) {
+        k -= 1;
+        const launch = names[k];
+        if (!std.mem.lessThan(u8, launch, id)) continue;
+        var i: usize = 0;
+        while (i < wanted.count()) {
+            const rule = wanted.keys()[i];
+            // A rule has at most four attempts in a launch: one and three retries.
+            const found = for ([_][]const u8{ "004", "003", "002", "001" }) |n| {
+                const path = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts", rule, n, "record.json" });
+                const r = (try readRecord(gpa, a, path)) orelse continue;
+                if (std.mem.eql(u8, r.status, "completed")) break r;
+            } else null;
+            if (found) |r| {
+                var reused = r;
+                reused.reused_from = launch;
+                try out.append(a, reused);
+                wanted.swapRemoveAt(i);
+            } else i += 1;
+        }
     }
     return out.items;
 }
@@ -767,6 +826,35 @@ pub fn waitTotals(gpa: Allocator, a: Allocator, launch_dir: []const u8, recorded
         }
     }
     return totals;
+}
+
+/// The pipeline position of each step in the launch's workflow: steps whose
+/// rules sit fewer producers deep come first, then by the first rule of the
+/// step in the file. Empty when the workflow snapshot cannot be read.
+pub fn stepOrder(gpa: Allocator, a: Allocator, launch_dir: []const u8) !std.StringHashMapUnmanaged(u64) {
+    var rank: std.StringHashMapUnmanaged(u64) = .empty;
+    const launch_json = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return rank;
+    defer gpa.free(launch_json);
+    const lv = std.json.parseFromSliceLeaky(Value, a, launch_json, .{ .allocate = .alloc_always }) catch return rank;
+    var problem: workflow.Problem = .{};
+    var wf = workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), str(lv, "workdir"), &problem) catch {
+        if (problem.message.len > 0) gpa.free(problem.message);
+        return rank;
+    };
+    defer wf.deinit();
+    var g = graph.build(gpa, &wf, &problem) catch return rank;
+    defer g.deinit();
+    const depth = try a.alloc(u64, wf.rules.len);
+    for (g.order) |i| {
+        depth[i] = 0;
+        for (g.parents[i]) |pi| depth[i] = @max(depth[i], depth[pi] + 1);
+    }
+    for (wf.rules, 0..) |r, i| {
+        const key = depth[i] << 32 | @as(u64, @intCast(i));
+        const gop = try rank.getOrPut(a, try a.dupe(u8, r.labels.step));
+        if (!gop.found_existing or key < gop.value_ptr.*) gop.value_ptr.* = key;
+    }
+    return rank;
 }
 
 /// Names of the rules on the critical path: from the attempt that finished

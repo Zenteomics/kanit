@@ -1073,6 +1073,7 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     _ = try s.file("launch/attempts/" ++ long ++ "/001/record.json",
         \\{"rule":"align_sample_0042_lane_3_paired_end","attempt":1,"status":"completed","reason":"","wall_s":10.0,"cpu_s":17.0,
         \\"started":"2026-01-01T00:00:02.000Z","request":{"threads":2,"memory_mib":512},"cgroup":{"memory_peak":209715200},
+        \\"labels":{"step":"align","category":"alignment","tool":"star","sample":"s42"},
         \\"queue":{"waited_s":1.0,"reasons":[{"reason":"threads","seconds":1.0}]}}
     );
     _ = try s.file("launch/attempts/bad/001/record.json",
@@ -1092,18 +1093,78 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
         }
     }.f;
     try testing.expect(!has(page, "<script") and !has(page, "<boom"));
-    try testing.expect(has(page, "rnaseq <span class=\"badge c-fail\">failed</span>"));
+    try testing.expect(has(page, "rnaseq <span class=\"badge\"><i class=\"dot d-fail\"></i>failed</span>"));
     try testing.expect(has(page, "started 2026-01-01 00:00:00 UTC &middot; workz 9.9.9</p>"));
     // A long rule name keeps both ends in the timeline; the table has it whole.
     try testing.expect(has(page, ">align_sample...3_paired_end</text>"));
-    try testing.expect(has(page, "<td class=\"name\">" ++ long ++ "</td>"));
+    try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>" ++ long ++ "</td><td>align</td><td>s42</td>"));
     try testing.expect(has(page, "&lt;boom &amp; stuff&gt;"));
     try testing.expect(has(page, "Failures (1)") and has(page, "Attempts (2)"));
-    try testing.expect(has(page, "<th colspan=\"3\" class=\"grp\">threads</th>"));
+    // Declared labels: colors go to categories by CPU time, and the rule
+    // without a sample gets the whole-run row of the matrix.
+    try testing.expect(has(page, "<div class=\"v\">1 sample</div><div class=\"s\">2 steps in 2 categories, 1 tool</div>"));
+    try testing.expect(has(page, "<li><i class=\"g1\"></i><b>alignment</b>&nbsp; 17.0 s, 100%</li>"));
+    try testing.expect(has(page, "<td class=\"row\">s42</td>") and has(page, "whole run</span></td>"));
+    try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>align<small>alignment &middot; star &middot; 1 sample</small></td>"));
+    try testing.expect(has(page, "<td class=\"n\">1.7 of 2</td>"));
     try testing.expect(has(page, ">1.0 GiB</text>") and has(page, "<td class=\"n\">512 MiB</td>"));
-    try testing.expect(has(page, "<td>threads</td><td class=\"n\">1.0</td>"));
+    try testing.expect(has(page, "<td>threads</td>") and has(page, "<span>1.0</span>"));
     try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
     for (page) |c| try testing.expect(c < 0x80);
+}
+
+test "[regression] - [report]: a launch that reused rules shows them with the run that made their outputs" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const first = ".workz/launches/20260101T000000.000-aaaaaaaa";
+    const second = ".workz/launches/20260102T000000.000-bbbbbbbb";
+    for ([_][]const u8{ ".workz", ".workz/launches", first, first ++ "/attempts", first ++ "/attempts/s1__ALIGN", first ++ "/attempts/s1__ALIGN/001", first ++ "/attempts/s1__ALIGN/002", second, second ++ "/attempts", second ++ "/attempts/merge", second ++ "/attempts/merge/001" }) |d| _ = try s.dir(d);
+    // The first launch completed the alignment on its second attempt.
+    _ = try s.file(first ++ "/attempts/s1__ALIGN/001/record.json",
+        \\{"rule":"s1__ALIGN","attempt":1,"status":"failed","reason":"exited with status 1","wall_s":2.0,"cpu_s":1.0,"request":{"threads":2,"memory_mib":512}}
+    );
+    _ = try s.file(first ++ "/attempts/s1__ALIGN/002/record.json",
+        \\{"rule":"s1__ALIGN","attempt":2,"status":"completed","reason":"","wall_s":30.0,"cpu_s":50.0,"started":"2026-01-01T00:00:01.000Z","request":{"threads":2,"memory_mib":512}}
+    );
+    // The second launch reused it and ran only the merge.
+    _ = try s.file(second ++ "/launch.json",
+        \\{"workdir":"/data/rnaseq","started":"2026-01-02T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+    );
+    _ = try s.file(second ++ "/summary.json",
+        \\{"status":"completed","elapsed_s":1.5,"selected":2,"counts":{"completed":1,"reused":1}}
+    );
+    _ = try s.file(second ++ "/events.jsonl",
+        \\{"time":"2026-01-02T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
+        \\{"time":"2026-01-02T00:00:00.100Z","event":"task_reused","rule":"s1__ALIGN"}
+        \\
+    );
+    _ = try s.file(second ++ "/attempts/merge/001/record.json",
+        \\{"rule":"merge","attempt":1,"status":"completed","reason":"","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-02T00:00:00.200Z","request":{"threads":1,"memory_mib":64}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const launch = try std.fs.path.join(arena.allocator(), &.{ s.path, second });
+    const reused = try workz.report.reusedAttempts(testing.allocator, arena.allocator(), launch);
+    try testing.expectEqual(@as(usize, 1), reused.len);
+    try testing.expectEqualStrings("s1__ALIGN", reused[0].rule);
+    try testing.expectEqual(@as(i64, 2), reused[0].attempt);
+    try testing.expectEqualStrings("20260101T000000.000-aaaaaaaa", reused[0].reused_from.?);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    const page = out.written();
+    const has = struct {
+        fn f(text: []const u8, part: []const u8) bool {
+            return std.mem.indexOf(u8, text, part) != null;
+        }
+    }.f;
+    // The pipeline sections show both rules; the attempt table only the merge.
+    try testing.expect(has(page, "<td class=\"row\">s1</td><td class=\"cell solo reused\""));
+    try testing.expect(has(page, ", reused from launch 20260101T000000.000-aaaaaaaa"));
+    try testing.expect(has(page, "<small class=\"sub\">1 reused</small>"));
+    try testing.expect(has(page, "This launch ran 1.0 s of it;"));
+    try testing.expect(has(page, "Attempts (1)"));
 }
 
 test "[regression] - [sys]: a recorded file identity does not change when only the device number does" {

@@ -41,6 +41,7 @@ workz creates the directory of every output before an attempt starts, and moves 
 Give each rule its `step`, its `sample` when it works on one, and a `category` and `tool` where they help ([Concepts](Concepts.md#steps-samples-categories-and-tools)). The labels are what the reports group by:
 
 - `workz report --suggest` turns six `align` rules into one row with its request, largest peak and suggested request.
+- The HTML report draws a table of samples by steps that points at the sample a step was slow on, and colors every attempt by its category.
 - The scheduler estimates a rule that has never run from the other rules of its step.
 
 Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
