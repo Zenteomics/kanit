@@ -176,7 +176,7 @@ Writes a commented starter workflow to `FILE` (default `workflow.toml`) and neve
 workz completion bash
 ```
 
-Prints a bash completion script: `source <(workz completion bash)`. It completes the commands, the options of each command except `report --suggest` and `--compare`, and rule names after `--target` and `--rerun-rule` and for `explain` and `logs`.
+Prints a bash completion script: `source <(workz completion bash)`. It completes the commands, the options of each command, the `control` commands, and rule names after `--target` and `--rerun-rule` and for `explain`, `logs` and `control`.
 
 ## version and help
 

@@ -37,7 +37,7 @@ The examples in this guide call `workz` and assume it is on your `PATH`.
 
 ## Shell completion
 
-`workz completion bash` prints a completion script for commands, most options and the rule names of a workflow. Load it in the current shell, or install it for every new one:
+`workz completion bash` prints a completion script for commands, options and the rule names of a workflow. Load it in the current shell, or install it for every new one:
 
 ```sh
 source <(workz completion bash)

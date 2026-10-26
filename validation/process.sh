@@ -701,6 +701,9 @@ check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 
 words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run workflow.toml -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
 opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz plan --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers rule names and command options" '[ "$words" = "count report" ] && [ "$opts" = "--summary" ]'
+ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz control ""); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
 
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
