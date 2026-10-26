@@ -14,7 +14,7 @@ workz runs a prepared graph of file-producing rules on one Linux workstation. It
 
 ## Requirements
 
-Linux on x86-64 with cgroup v2 and a systemd user manager. Container rules and shared services also need rootless Podman. Building needs Zig 0.16.0 and a checkout of the z-toml library; [Installation](wiki/Installation.md) has the details.
+Linux on x86-64 with cgroup v2 and a systemd user manager. Container rules and shared services also need rootless Podman. Building needs Zig 0.16.0, which downloads the one library workz uses; [Installation](wiki/Installation.md) has the details.
 
 ## Quick start
 

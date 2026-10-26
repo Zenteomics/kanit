@@ -5,7 +5,8 @@
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .z_toml = .{
-            .path = "../../../tools/z-toml",
+            .url = "git+https://github.com/eneskemalergin/z-toml#74a8915cf1301c848c728a9d245892c3b5d14e25",
+            .hash = "z_toml-0.4.0-QKon8xw2CABxiUmkgbN-Wx4v7ur-oXk6JZTQBhbAaK78",
         },
     },
     .paths = .{

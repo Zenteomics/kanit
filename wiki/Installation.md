@@ -14,7 +14,7 @@ Without a systemd user manager or cgroup v2, `workz run --no-isolation` still ru
 
 ## Build
 
-workz reads TOML with [z-toml](https://github.com/eneskemalergin/z-toml) 0.4.0, which `build.zig.zon` names as a path dependency: check it out at `../../../tools/z-toml`, relative to the workz checkout. Then build from the root of the workz checkout:
+workz reads TOML with [z-toml](https://github.com/eneskemalergin/z-toml) 0.4.0. `build.zig.zon` pins it by URL and hash, so the first build downloads it; nothing else is needed. From the root of a workz checkout:
 
 ```sh
 zig build -Doptimize=ReleaseSafe
