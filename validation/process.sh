@@ -373,11 +373,12 @@ new service-failures
   srule b2 '["p.txt"]' '["b2.txt"]' '"touch b2.txt"' broken
   srule f1 '[]' '["f1.txt"]' '"touch f1.txt"' fat
 } > wf.toml
-timeout 60 "$workz" run wf.toml "${iso[@]}" -k -q > s.json
+timeout 60 "$workz" run wf.toml "${iso[@]}" -k -q > s.json 2> err.txt
 rc=$?
 reason() { jq -r "select(.event == \"task_failed\") | select(.rule == \"$1\") | .reason" "$(last_launch)/events.jsonl"; }
 check "a service that fails before it is ready fails its rule with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ]'
 check "a rule admitted after its service failed fails at once" '[ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ]'
+check "a rule failed by its shared input says so on stderr" 'grep -q "failed b1: shared input broken could not be loaded" err.txt && grep -q "failed b2: shared input broken could not be loaded" err.txt'
 check "a service above its memory is reported as out of memory" 'reason f1 | grep -q "^shared input fat could not be loaded: out of memory"'
 check "failed services leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
 

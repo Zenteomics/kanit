@@ -1053,6 +1053,7 @@ const Engine = struct {
         self.releaseShared(i);
         self.finished += 1;
         self.events.emit("task_failed", .{ .rule = self.rule(i).name, .reason = reason });
+        self.alert("failed {s}: {s}", .{ self.rule(i).name, reason });
         if (!self.opts.keep_going) self.beginStop();
     }
 

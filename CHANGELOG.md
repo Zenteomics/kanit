@@ -18,6 +18,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - A `state.json` upgraded from an earlier version is saved with the current format version.
 - A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
+- A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
 
 ## 0.3.0 - 2026-10-25
 
