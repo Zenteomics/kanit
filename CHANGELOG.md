@@ -19,6 +19,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
 - A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
+- The starter workflow from `workz init` describes a resource group as units that rules take, not as a limit on rules of a kind.
 
 ## 0.3.0 - 2026-10-25
 

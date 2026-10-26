@@ -10,7 +10,8 @@
 name = "example"
 version = "1"
 
-# At most this many rules of a kind run at once.
+# A resource group: rules take units of it with `groups = { disk = 1 }`, and
+# at most `max` units are in use at once.
 [resource_groups.disk]
 max = 2
 
