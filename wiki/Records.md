@@ -90,6 +90,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `rusage`               | `cpu_s` and `maxrss_kib` of the process tree               |
 | `cgroup`               | the attempt's cgroup counters, or `null` without isolation |
 | `request`              | `threads`, `memory_mib`, `groups`, `shared`, `container`   |
+| `labels`               | `step`, `sample`, `category`, `tool`; `declared` for each  |
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |

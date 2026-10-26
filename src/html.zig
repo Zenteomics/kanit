@@ -1,7 +1,7 @@
 //! `workz report --format html`: one self-contained page for a launch, from
 //! its records: summary cards, a timeline of every attempt with the critical
 //! path marked, use of the budget over time, what limited the launch, the
-//! requests per kind of rule, the failures with the end of their standard
+//! requests per step, the failures with the end of their standard
 //! error, and the attempt table. Light and dark color schemes follow the
 //! reader's setting, and the page prints. No scripts and no remote assets.
 const std = @import("std");
@@ -604,20 +604,20 @@ fn writeLimits(gpa: Allocator, a: Allocator, w: *std.Io.Writer, l: *const Launch
     try w.writeAll("</pre></details>\n</section>\n");
 }
 
-/// Per kind of rule: the threads and memory requested against what the
+/// Per step: the threads and memory requested against what the
 /// attempts used, and the suggested requests, with the memory as bars on
 /// one scale.
 fn writeKinds(a: Allocator, w: *std.Io.Writer, rows: []const report.Attempt) !void {
     const list = try report.suggestions(a, rows);
-    try w.writeAll("<section id=\"kinds\"><h2>Requests per kind of rule</h2>\n");
+    try w.writeAll("<section id=\"kinds\"><h2>Requests per step</h2>\n");
     if (list.len == 0) return w.writeAll("<p class=\"muted\">No attempt completed.</p></section>\n");
     var top: f64 = 1;
     for (list) |s| top = @max(top, @max(s.memory_mib, s.peak_mib));
-    try w.writeAll("<p class=\"lead\">Completed attempts by kind of rule, the rule name without its sample part. Suggested requests cover the largest peak with a fifth to spare, as <code>workz report --suggest</code> prints them.</p>\n");
-    try w.writeAll("<div class=\"wide\"><table><thead><tr><th rowspan=\"2\">kind</th><th rowspan=\"2\" class=\"n\">attempts</th><th colspan=\"3\" class=\"grp\">threads</th><th colspan=\"3\" class=\"grp\">memory</th><th rowspan=\"2\">memory against request</th></tr>\n<tr><th class=\"n\">request</th><th class=\"n\">most used</th><th class=\"n\">suggested</th><th class=\"n\">request</th><th class=\"n\">peak</th><th class=\"n\">suggested</th></tr></thead><tbody>\n");
+    try w.writeAll("<p class=\"lead\">Completed attempts by step. Suggested requests cover the largest peak with a fifth to spare, as <code>workz report --suggest</code> prints them.</p>\n");
+    try w.writeAll("<div class=\"wide\"><table><thead><tr><th rowspan=\"2\">step</th><th rowspan=\"2\" class=\"n\">attempts</th><th colspan=\"3\" class=\"grp\">threads</th><th colspan=\"3\" class=\"grp\">memory</th><th rowspan=\"2\">memory against request</th></tr>\n<tr><th class=\"n\">request</th><th class=\"n\">most used</th><th class=\"n\">suggested</th><th class=\"n\">request</th><th class=\"n\">peak</th><th class=\"n\">suggested</th></tr></thead><tbody>\n");
     for (list) |s| {
         try w.writeAll("<tr><td class=\"name\">");
-        try escape(w, s.kind);
+        try escape(w, s.step);
         try w.print("</td><td class=\"n\">{d}</td><td class=\"n\">{d:.0}</td><td class=\"n\">{d:.1}</td><td class=\"n\">", .{ s.attempts, s.threads, s.threads_used });
         if (s.delegated) try w.writeAll("-") else try w.print("{d:.0}", .{s.suggest_threads});
         try w.writeAll("</td><td class=\"n\">");

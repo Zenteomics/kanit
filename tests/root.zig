@@ -509,11 +509,55 @@ test "[edge] - [report]: the median of an even count averages the middle values"
     try testing.expectEqual(@as(f64, 2.5), workz.report.median(&.{ 1, 2, 3, 40 }));
 }
 
-test "kinds of rules drop their sample part" {
-    try testing.expectEqualStrings("STAR_ALIGN", workz.report.pattern("pool_01_baseline__STAR_ALIGN"));
-    try testing.expectEqualStrings("classify", workz.report.pattern("classify_03JW"));
-    try testing.expectEqualStrings("merge", workz.report.pattern("merge"));
-    try testing.expectEqualStrings("_x", workz.report.pattern("_x"));
+test "[unit] - [workflow]: undeclared labels are derived from the rule name and image" {
+    const derive = workz.workflow.deriveLabels;
+    const nf = derive("pool_01_baseline__STAR_ALIGN", null);
+    try testing.expectEqualStrings("STAR_ALIGN", nf.step);
+    try testing.expectEqualStrings("pool_01_baseline", nf.sample.?);
+    // A single "_" names the step only: the rest is too ambiguous for a sample.
+    const one = derive("classify_03JW", null);
+    try testing.expectEqualStrings("classify", one.step);
+    try testing.expect(one.sample == null);
+    try testing.expectEqualStrings("merge", derive("merge", null).step);
+    try testing.expectEqualStrings("_x", derive("_x", null).step);
+    try testing.expectEqualStrings("star", derive("align_s1", "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8").tool.?);
+    try testing.expectEqualStrings("multiqc", derive("report", "multiqc@sha256:0123").tool.?);
+    try testing.expect(derive("report", null).tool == null);
+    try testing.expect(derive("report", null).category == null);
+}
+
+test "[unit] - [workflow]: declared labels replace the derived ones and are not part of the rule key" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rule = "[[rules]]\nname = \"s1__align\"\noutput = [\"a.txt\"]\nshell = \"touch a.txt\"\nmemory = \"64M\"\n";
+    var problem: workflow.Problem = .{};
+    var plain = try loadText(&s, head ++ rule, &problem);
+    defer plain.deinit();
+    var labelled = try loadText(&s, head ++ rule ++ "step = \"STAR_ALIGN\"\ncategory = \"alignment\"\ntool = \"STAR 2.7.11b\"\n", &problem);
+    defer labelled.deinit();
+    const l = labelled.rules[0].labels;
+    try testing.expectEqualStrings("STAR_ALIGN", l.step);
+    try testing.expectEqualStrings("alignment", l.category.?);
+    try testing.expectEqualStrings("STAR 2.7.11b", l.tool.?);
+    try testing.expectEqualStrings("s1", l.sample.?);
+    try testing.expect(l.declared.step and l.declared.category and l.declared.tool and !l.declared.sample);
+    try testing.expectEqualStrings("align", plain.rules[0].labels.step);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+    var missing: ?[]const u8 = null;
+    const ka = (try state.computeKey(arena.allocator(), &ids, &plain.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const kb = (try state.computeKey(arena.allocator(), &ids, &labelled.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    try testing.expectEqualStrings(ka.key, kb.key);
+}
+
+test "[failure] - [workflow]: a label must be a short string without control characters" {
+    const rule = head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n";
+    try expectInvalid(rule ++ "step = \"\"\n", "step must be 1 to 200 characters");
+    try expectInvalid(rule ++ "tool = \"a\\tb\"\n", "tool must be 1 to 200 characters without control characters");
+    try expectInvalid(rule ++ "sample = 3\n", "sample must be a string");
+    try expectInvalid(rule ++ "categry = \"qc\"\n", "did you mean 'category'?");
 }
 
 test "an attempt that ran but used almost none of its requests is delegated" {

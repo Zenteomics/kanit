@@ -31,6 +31,10 @@ retries = 1
 
 [[rules]]
 name = "align_s1"
+step = "align"
+sample = "s1"
+category = "alignment"
+tool = "bowtie2 2.5.4"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
 shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
@@ -142,6 +146,10 @@ An entry with `container` is a service:
 | `links`     | table    | none                   | link name = input, in `workdir`     |
 | `container` | image    | none                   | run in this local image             |
 | `mounts`    | table    | none                   | host path = path in the image       |
+| `step`      | string   | from `name`            | pipeline step it is an instance of  |
+| `sample`    | string   | from `name`            | data it works on                    |
+| `category`  | string   | none                   | group of steps it belongs to        |
+| `tool`      | string   | from `container`       | program it runs                     |
 | `resources` | table    | none                   | the request, below                  |
 
 - `priority` is between -1,000,000 and 1,000,000.
@@ -150,6 +158,7 @@ An entry with `container` is a service:
 - An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
 - `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
+- `step`, `sample`, `category` and `tool` are labels of 1 to 200 characters without control characters. They are not part of the rule key, so changing one reruns nothing. [Concepts](Concepts.md#steps-samples-categories-and-tools) defines them and says how undeclared ones are derived.
 
 ## [rules.resources]
 

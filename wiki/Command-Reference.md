@@ -148,7 +148,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 | `--launch`      | ID                    | newest  | the launch to report on                 |
 | `--format`      | `tsv`, `json`, `html` | `tsv`   | attempt table, or a self-contained page |
 | `--bottlenecks` |                       |         | what limited the launch                 |
-| `--suggest`     |                       |         | suggested threads and memory per kind   |
+| `--suggest`     |                       |         | suggested threads and memory per step   |
 | `--compare`     | OTHER                 |         | compare with a launch ID or directory   |
 
 `--suggest`, `--compare` and `--bottlenecks` each print one report; given together, the first in that order wins. `--suggest` accepts `--format json`.

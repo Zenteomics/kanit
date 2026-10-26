@@ -46,7 +46,57 @@ pub const Rule = struct {
     links: []const Link = &.{},
     groups: []const GroupUse,
     shared: []const []const u8,
+    /// What the rule is, for reports and the live view; not part of its key.
+    labels: Labels = .{ .step = "" },
 };
+
+/// What a rule is: the step it is an instance of, the category of that
+/// step, the tool it runs and the sample it works on. Each is declared in
+/// the workflow or derived (see `deriveLabels`); none is part of the rule
+/// key, so changing one reruns nothing.
+pub const Labels = struct {
+    step: []const u8,
+    category: ?[]const u8 = null,
+    tool: ?[]const u8 = null,
+    sample: ?[]const u8 = null,
+    /// Which of the four the workflow declared.
+    declared: Declared = .{},
+
+    pub const Declared = struct { step: bool = false, category: bool = false, tool: bool = false, sample: bool = false };
+};
+
+pub const label_keys = [_][]const u8{ "step", "category", "tool", "sample" };
+
+/// The labels of a rule that declares none: the step is the part of the
+/// name after the last "__" ("s1__STAR_ALIGN" is "STAR_ALIGN"), else before
+/// the last "_" ("align_s1" is "align"), else the whole name; the sample is
+/// the part before the last "__", the convention of preparers that name
+/// rules SAMPLE__STEP; the tool of a container rule is its image's
+/// repository name without registry, path or tag. Declared labels replace
+/// the derived ones one by one.
+pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
+    var l: Labels = .{ .step = name };
+    if (std.mem.lastIndexOf(u8, name, "__")) |i| {
+        l.step = name[i + 2 ..];
+        if (i > 0) l.sample = name[0..i];
+    } else if (std.mem.lastIndexOfScalar(u8, name, '_')) |i| {
+        if (i > 0) l.step = name[0..i];
+    }
+    if (container) |image| {
+        var repo = image;
+        if (std.mem.lastIndexOfScalar(u8, repo, '/')) |i| repo = repo[i + 1 ..];
+        if (std.mem.indexOfAny(u8, repo, ":@")) |i| repo = repo[0..i];
+        if (repo.len > 0) l.tool = repo;
+    }
+    return l;
+}
+
+/// A label value: 1 to 200 bytes without control characters.
+fn validLabel(value: []const u8) bool {
+    if (value.len == 0 or value.len > 200) return false;
+    for (value) |c| if (c < 0x20 or c == 0x7f) return false;
+    return true;
+}
 
 pub const Link = struct { name: []const u8, target: []const u8, target_abs: []const u8 };
 
@@ -125,7 +175,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{ "max", "wait" };
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -640,6 +690,25 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             }
         }
 
+        const container = try p.str(r, "container", &at, name);
+        var labels = deriveLabels(name, container);
+        for (label_keys) |key| if (try p.str(r, key, &at, name)) |value| {
+            if (!validLabel(value)) return p.failKey(&at, key, "rule {s}: {s} must be 1 to 200 characters without control characters", .{ name, key });
+            if (std.mem.eql(u8, key, "step")) {
+                labels.step = value;
+                labels.declared.step = true;
+            } else if (std.mem.eql(u8, key, "category")) {
+                labels.category = value;
+                labels.declared.category = true;
+            } else if (std.mem.eql(u8, key, "tool")) {
+                labels.tool = value;
+                labels.declared.tool = true;
+            } else {
+                labels.sample = value;
+                labels.declared.sample = true;
+            }
+        };
+
         rules[i] = .{
             .index = i,
             .line = p.line(&at),
@@ -660,13 +729,14 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .retries = retries,
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
-            .container = try p.str(r, "container", &at, name),
+            .container = container,
             .mounts = mounts,
             .workdir = workdir,
             .workdir_abs = if (workdir) |d| try sys.absolute(arena, root, d) else null,
             .links = links.items,
             .groups = group_uses.items,
             .shared = shared_uses,
+            .labels = labels,
         };
     }
     wf.rules = rules;

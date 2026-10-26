@@ -230,11 +230,11 @@ new container-sizing
 sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report -d . --bottlenecks > report.txt
-# KIND N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
+# STEP N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
 check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
 "$workz" report -d . --suggest > suggest.tsv
 "$workz" report -d . --suggest --format json > suggest.json
-check "report --suggest gives the same sizing as tsv and json" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 >= $7 && $7 > 300) }'"'"' suggest.tsv && jq -e ".[0].kind == \"big\" and .[0].suggest_mib >= .[0].peak_mib" suggest.json > /dev/null'
+check "report --suggest gives the same sizing as tsv and json" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 >= $7 && $7 > 300) }'"'"' suggest.tsv && jq -e ".[0].step == \"big\" and .[0].suggest_mib >= .[0].peak_mib" suggest.json > /dev/null'
 
 new container-mounts
 echo "workz-check release" > os-release
@@ -629,7 +629,7 @@ base=$(basename "$(last_launch)")
 check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun-rule c3 -q > s3.json
 "$workz" report -d . --compare "$base" > compare-one.txt
-check "report --compare marks a kind with no completed attempt on one side" 'grep -q "^  short1 *0 .*no completed attempt in the launch" compare-one.txt && ! grep -q "%.*no completed attempt" compare-one.txt'
+check "report --compare marks a step with no completed attempt on one side" 'grep -q "^  short1 *0 .*no completed attempt in the launch" compare-one.txt && ! grep -q "%.*no completed attempt" compare-one.txt'
 
 # ---------------------------------------------------------------- inputs and formats
 new manifest
@@ -816,8 +816,25 @@ new report-html
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -k -q > s.json
 "$workz" report -d . --format html > r.html
-check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "Requests per kind of rule" r.html && grep -Eq "class=\"st-[a-z]+ crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "Requests per step" r.html && grep -Eq "class=\"st-[a-z]+ crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
 check "the html report has no scripts or remote assets, and has dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html'
+
+new labels
+{ header labels
+  rule s1__ALIGN '[]' '["s1.txt"]' '"echo s1 > s1.txt"'
+  rule s2__ALIGN '[]' '["s2.txt"]' '"echo s2 > s2.txt"'
+  rule merge_all '["s1.txt", "s2.txt"]' '["all.txt"]' '"cat s1.txt s2.txt > all.txt"' 'step = "MERGE"
+category = "report"
+tool = "coreutils"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+first=$(basename "$(last_launch)")
+check "an attempt records its labels, derived from its name or declared" 'jq -e ".labels.step == \"ALIGN\" and .labels.sample == \"s1\" and (.labels.declared.step | not)" .workz/launches/$first/attempts/s1__ALIGN/001/record.json > /dev/null && jq -e ".labels.step == \"MERGE\" and .labels.category == \"report\" and .labels.tool == \"coreutils\" and .labels.declared.step" .workz/launches/$first/attempts/merge_all/001/record.json > /dev/null'
+sed -i 's/category = "report"/category = "summary"/' wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+check "changing a label reruns nothing" '[ "$(status_of s2.json reused)" = 3 ]'
+"$workz" report -d . --launch "$first" --bottlenecks > bn.txt
+check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (completed attempts)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
 
 if command -v tmux > /dev/null; then
 # Interactive watch on a terminal: a private tmux server gives it a real

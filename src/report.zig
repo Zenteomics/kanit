@@ -39,6 +39,12 @@ pub const Attempt = struct {
     in_container: bool = false,
     /// Start time, nanoseconds since the epoch; 0 when not recorded.
     started_ns: i128 = 0,
+    /// What the rule is: its step, and its category, tool and sample when
+    /// known, as the workflow declared them or as derived from its name.
+    step: []const u8 = "",
+    category: ?[]const u8 = null,
+    tool: ?[]const u8 = null,
+    sample: ?[]const u8 = null,
     /// Directory of the attempt's files.
     dir: []const u8 = "",
 
@@ -76,6 +82,25 @@ fn get(v: Value, key: []const u8) ?Value {
 fn str(v: Value, key: []const u8) []const u8 {
     const x = get(v, key) orelse return "";
     return if (x == .string) x.string else "";
+}
+
+fn optStr(v: ?Value) ?[]const u8 {
+    const x = v orelse return null;
+    return if (x == .string and x.string.len > 0) x.string else null;
+}
+
+/// An attempt's labels as its record holds them; records written before
+/// labels existed get the labels derived from the rule name and image.
+fn labelsOf(v: Value) workflow.Labels {
+    const image: ?[]const u8 = if (get(v, "request")) |q| optStr(get(q, "container")) else null;
+    var l = workflow.deriveLabels(str(v, "rule"), image);
+    if (get(v, "labels")) |lv| if (lv == .object) {
+        if (optStr(get(lv, "step"))) |s| l.step = s;
+        l.category = optStr(get(lv, "category"));
+        l.tool = optStr(get(lv, "tool"));
+        l.sample = optStr(get(lv, "sample"));
+    };
+    return l;
 }
 
 fn stall(cg: ?Value, key: []const u8, wall: f64) ?f64 {
@@ -118,6 +143,7 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
                 top_reason = str(w, "reason");
             }
         };
+        const labels = labelsOf(v);
         try out.append(a, .{
             .rule = str(v, "rule"),
             .attempt = @intFromFloat(num(get(v, "attempt")) orelse 0),
@@ -139,6 +165,10 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
             .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
             .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
             .started_ns = monitor.parseTime(str(v, "started")) orelse 0,
+            .step = labels.step,
+            .category = labels.category,
+            .tool = labels.tool,
+            .sample = labels.sample,
             .dir = try a.dupe(u8, std.fs.path.dirname(f).?),
         });
     }
@@ -155,7 +185,7 @@ fn opt(w: *std.Io.Writer, v: ?f64, comptime fmt: []const u8) !void {
 
 /// One row per attempt, tab-separated, with a header.
 pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
-    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tdelegated\treason\n");
+    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tdelegated\treason\tstep\tsample\tcategory\ttool\n");
     for (rows) |r| {
         try w.print("{s}\t{d}\t{s}\t{d:.3}\t{d:.3}\t{d:.2}\t{d:.0}\t{d:.0}\t", .{ r.rule, r.attempt, r.status, r.wall_s, r.cpu_s, r.cpuEfficiency(), r.threads, r.request_mib });
         try opt(w, r.peak_mib, "{d:.1}");
@@ -167,7 +197,7 @@ pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
         try opt(w, r.memory_stall, "{d:.3}");
         try w.writeAll("\t");
         try opt(w, r.io_stall, "{d:.3}");
-        try w.print("\t{}\t{s}\n", .{ r.delegated(), if (r.reason.len > 0) r.reason else "-" });
+        try w.print("\t{}\t{s}\t{s}\t{s}\t{s}\t{s}\n", .{ r.delegated(), if (r.reason.len > 0) r.reason else "-", r.step, r.sample orelse "-", r.category orelse "-", r.tool orelse "-" });
     }
 }
 
@@ -175,18 +205,8 @@ pub fn writeJson(w: *std.Io.Writer, rows: []const Attempt) !void {
     try w.print("{f}\n", .{std.json.fmt(rows, .{ .whitespace = .indent_2 })});
 }
 
-/// The kind of rule an attempt belongs to, so samples of one step can be
-/// compared: the part after the last "__" ("s1__STAR_ALIGN" is
-/// "STAR_ALIGN"), otherwise the part before the last "_" ("classify_03JW"
-/// is "classify"), otherwise the whole name.
-pub fn pattern(name: []const u8) []const u8 {
-    if (std.mem.lastIndexOf(u8, name, "__")) |i| return name[i + 2 ..];
-    if (std.mem.lastIndexOfScalar(u8, name, '_')) |i| if (i > 0) return name[0..i];
-    return name;
-}
-
 pub const Suggestion = struct {
-    kind: []const u8,
+    step: []const u8,
     attempts: usize,
     delegated: bool,
     threads: f64,
@@ -197,20 +217,20 @@ pub const Suggestion = struct {
     suggest_mib: f64,
 };
 
-/// Request suggestions per kind of rule from completed attempts: memory
+/// Request suggestions per step from completed attempts: memory
 /// from the largest peak plus a fifth in 64 MiB steps (the cgroup peak for
 /// rules with shared inputs or a container, else the process RSS), threads
 /// from the most cores an attempt used, rounded up and at most the request.
-/// Kinds whose work ran outside workz get none.
+/// Steps whose work ran outside workz get none.
 pub fn suggestions(a: Allocator, rows: []const Attempt) ![]Suggestion {
-    var kinds: std.StringArrayHashMapUnmanaged(Suggestion) = .empty;
+    var steps: std.StringArrayHashMapUnmanaged(Suggestion) = .empty;
     var basis_peak: std.StringHashMapUnmanaged(bool) = .empty;
     var deleg: std.StringHashMapUnmanaged(usize) = .empty;
     for (rows) |r| {
         if (!std.mem.eql(u8, r.status, "completed")) continue;
-        const k = pattern(r.rule);
-        const gop = try kinds.getOrPut(a, k);
-        if (!gop.found_existing) gop.value_ptr.* = .{ .kind = k, .attempts = 0, .delegated = false, .threads = 0, .threads_used = 0, .suggest_threads = 0, .memory_mib = 0, .peak_mib = 0, .suggest_mib = 0 };
+        const k = r.step;
+        const gop = try steps.getOrPut(a, k);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .step = k, .attempts = 0, .delegated = false, .threads = 0, .threads_used = 0, .suggest_threads = 0, .memory_mib = 0, .peak_mib = 0, .suggest_mib = 0 };
         const s = gop.value_ptr;
         s.attempts += 1;
         s.threads = @max(s.threads, r.threads);
@@ -223,13 +243,13 @@ pub fn suggestions(a: Allocator, rows: []const Attempt) ![]Suggestion {
         if (!d.found_existing) d.value_ptr.* = 0;
         d.value_ptr.* += @intFromBool(r.delegated());
     }
-    for (kinds.values()) |*s| {
-        s.delegated = (deleg.get(s.kind) orelse 0) * 2 > s.attempts;
+    for (steps.values()) |*s| {
+        s.delegated = (deleg.get(s.step) orelse 0) * 2 > s.attempts;
         if (s.delegated) continue;
         s.suggest_mib = @max(@ceil(s.peak_mib * 1.2 / 64.0) * 64.0, 64);
         s.suggest_threads = @min(@max(@ceil(s.threads_used - 0.05), 1), @max(s.threads, 1));
     }
-    return kinds.values();
+    return steps.values();
 }
 
 pub fn writeSuggestions(w: *std.Io.Writer, list: []const Suggestion, json: bool) !void {
@@ -237,17 +257,17 @@ pub fn writeSuggestions(w: *std.Io.Writer, list: []const Suggestion, json: bool)
         try w.print("{f}\n", .{std.json.fmt(list, .{})});
         return;
     }
-    try w.writeAll("kind\tattempts\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tpeak_mib\tsuggest_mib\tdelegated\n");
-    for (list) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{d:.0}\t{}\n", .{ s.kind, s.attempts, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.peak_mib, s.suggest_mib, s.delegated });
+    try w.writeAll("step\tattempts\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tpeak_mib\tsuggest_mib\tdelegated\n");
+    for (list) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{d:.0}\t{}\n", .{ s.step, s.attempts, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.peak_mib, s.suggest_mib, s.delegated });
 }
 
-const KindStats = struct { n: usize = 0, delegated: usize = 0, walls: std.ArrayList(f64) = .empty, peak: f64 = 0, cpu: f64 = 0 };
+const StepStats = struct { n: usize = 0, delegated: usize = 0, walls: std.ArrayList(f64) = .empty, peak: f64 = 0, cpu: f64 = 0 };
 
-fn kindStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanaged(KindStats) {
-    var kinds: std.StringArrayHashMapUnmanaged(KindStats) = .empty;
+fn stepStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanaged(StepStats) {
+    var steps: std.StringArrayHashMapUnmanaged(StepStats) = .empty;
     for (rows) |r| {
         if (!std.mem.eql(u8, r.status, "completed")) continue;
-        const gop = try kinds.getOrPut(a, pattern(r.rule));
+        const gop = try steps.getOrPut(a, r.step);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         const k = gop.value_ptr;
         k.n += 1;
@@ -256,8 +276,8 @@ fn kindStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanag
         k.peak = @max(k.peak, r.peak_mib orelse r.rss_mib);
         k.cpu += r.cpu_s;
     }
-    for (kinds.values()) |*k| std.mem.sort(f64, k.walls.items, {}, std.sort.asc(f64));
-    return kinds;
+    for (steps.values()) |*k| std.mem.sort(f64, k.walls.items, {}, std.sort.asc(f64));
+    return steps;
 }
 
 /// The median of `xs`, which must be sorted ascending; 0 when empty.
@@ -273,7 +293,7 @@ fn change(w: *std.Io.Writer, was: f64, now: f64) !void {
 }
 
 /// Compares launch `now_dir` with the baseline `was_dir`: session totals,
-/// then per kind of rule the completed attempts, median wall time, largest
+/// then per step the completed attempts, median wall time, largest
 /// peak memory and total CPU time of each, with the change.
 pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8) !void {
     const was_rows = try attempts(gpa, a, was_dir);
@@ -290,17 +310,17 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     try change(w, was_s, now_s);
     try w.print("\n  attempts              {d:>10} {d:>10}\n  reserved thread-s     {d:>10.0} {d:>10.0}", .{ was_rows.len, now_rows.len, was_task, now_task });
     try change(w, was_task, now_task);
-    try w.writeAll("\n\nper kind of rule (completed attempts)\n");
-    try w.writeAll("  KIND                             N   WALL S (MEDIAN)          PEAK MiB (MAX)           CPU S (TOTAL)\n");
-    const was_k = try kindStats(a, was_rows);
-    const now_k = try kindStats(a, now_rows);
+    try w.writeAll("\n\nper step (completed attempts)\n");
+    try w.writeAll("  STEP                             N   WALL S (MEDIAN)          PEAK MiB (MAX)           CPU S (TOTAL)\n");
+    const was_k = try stepStats(a, was_rows);
+    const now_k = try stepStats(a, now_rows);
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     for (was_k.keys()) |k| try names.put(a, k, {});
     for (now_k.keys()) |k| try names.put(a, k, {});
     for (names.keys()) |name| {
-        const x = was_k.get(name) orelse KindStats{};
-        const y = now_k.get(name) orelse KindStats{};
-        // A kind reused, or not selected, on one side has nothing to compare.
+        const x = was_k.get(name) orelse StepStats{};
+        const y = now_k.get(name) orelse StepStats{};
+        // A step reused, or not selected, on one side has nothing to compare.
         if (x.n == 0 or y.n == 0) {
             const ran = if (x.n == 0) y else x;
             const nums = .{ median(ran.walls.items), ran.peak, ran.cpu };
@@ -324,10 +344,110 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     }
 }
 
+/// A label of rules that reports can group attempts by.
+pub const By = enum { category, tool, sample };
+
+/// Completed attempts summed over one value of a label.
+pub const Total = struct { name: []const u8, attempts: usize = 0, wall_s: f64 = 0, cpu_s: f64 = 0, steps: usize = 0 };
+
+/// Completed attempts summed per value of label `by`, most CPU time first;
+/// attempts without that label are left out.
+pub fn labelTotals(a: Allocator, rows: []const Attempt, by: By) ![]Total {
+    var map: std.StringArrayHashMapUnmanaged(Total) = .empty;
+    var seen: std.StringHashMapUnmanaged(void) = .empty;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.status, "completed")) continue;
+        const name = switch (by) {
+            .category => r.category,
+            .tool => r.tool,
+            .sample => r.sample,
+        } orelse continue;
+        const gop = try map.getOrPut(a, name);
+        if (!gop.found_existing) gop.value_ptr.* = .{ .name = name };
+        const t = gop.value_ptr;
+        t.attempts += 1;
+        t.wall_s += r.wall_s;
+        t.cpu_s += r.cpu_s;
+        const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ name, r.step });
+        if (!seen.contains(pair)) {
+            try seen.put(a, pair, {});
+            t.steps += 1;
+        }
+    }
+    const list = map.values();
+    std.mem.sort(Total, list, {}, struct {
+        fn more(_: void, x: Total, y: Total) bool {
+            return x.cpu_s > y.cpu_s;
+        }
+    }.more);
+    return list;
+}
+
+/// The median wall time of each step's completed attempts.
+pub fn stepMedians(a: Allocator, rows: []const Attempt) !std.StringHashMapUnmanaged(f64) {
+    var walls: std.StringArrayHashMapUnmanaged(std.ArrayList(f64)) = .empty;
+    for (rows) |r| {
+        if (!std.mem.eql(u8, r.status, "completed")) continue;
+        const gop = try walls.getOrPut(a, r.step);
+        if (!gop.found_existing) gop.value_ptr.* = .empty;
+        try gop.value_ptr.append(a, r.wall_s);
+    }
+    var out: std.StringHashMapUnmanaged(f64) = .empty;
+    for (walls.keys(), walls.values()) |k, *v| {
+        std.mem.sort(f64, v.items, {}, std.sort.asc(f64));
+        try out.put(a, k, median(v.items));
+    }
+    return out;
+}
+
+/// An attempt slower than its step's median by half again and by at least
+/// two seconds: worth a look, since the same work took longer on this data.
+pub fn slowAgainstStep(r: Attempt, step_median: f64) bool {
+    return step_median > 0 and r.wall_s >= step_median * 1.5 and r.wall_s - step_median >= 2;
+}
+
+/// Time per category and per tool, and per sample with its slowest step,
+/// from the completed attempts; each section only when some rule has that
+/// label.
+fn writeLabelSections(a: Allocator, w: *std.Io.Writer, rows: []const Attempt) !void {
+    var cpu_all: f64 = 0;
+    for (rows) |r| if (std.mem.eql(u8, r.status, "completed")) {
+        cpu_all += r.cpu_s;
+    };
+    for ([_]By{ .category, .tool }) |by| {
+        const list = try labelTotals(a, rows, by);
+        if (list.len == 0) continue;
+        try w.print("\ntime per {s} (completed attempts)\n", .{@tagName(by)});
+        try w.print("  {s:<30} STEPS  ATTEMPTS     WALL S      CPU S  CPU SHARE\n", .{if (by == .category) "CATEGORY" else "TOOL"});
+        for (list) |t| try w.print("  {s:<30} {d:>5} {d:>9} {d:>10.1} {d:>10.1} {d:>9.1}%\n", .{ t.name[0..@min(t.name.len, 30)], t.steps, t.attempts, t.wall_s, t.cpu_s, if (cpu_all > 0) t.cpu_s / cpu_all * 100 else 0 });
+    }
+    const samples = try labelTotals(a, rows, .sample);
+    if (samples.len == 0) return;
+    const medians = try stepMedians(a, rows);
+    try w.writeAll("\nsamples (completed attempts), most CPU time first\n");
+    try w.writeAll("  SAMPLE                         STEPS  ATTEMPTS     WALL S      CPU S  SLOWEST STEP\n");
+    for (samples) |t| {
+        var slow: ?Attempt = null;
+        for (rows) |r| {
+            if (!std.mem.eql(u8, r.status, "completed")) continue;
+            const s = r.sample orelse continue;
+            if (!std.mem.eql(u8, s, t.name)) continue;
+            if (slow == null or r.wall_s > slow.?.wall_s) slow = r;
+        }
+        try w.print("  {s:<30} {d:>5} {d:>9} {d:>10.1} {d:>10.1}", .{ t.name[0..@min(t.name.len, 30)], t.steps, t.attempts, t.wall_s, t.cpu_s });
+        if (slow) |r| {
+            const m = medians.get(r.step) orelse 0;
+            try w.print("  {s} {d:.1} s", .{ r.step, r.wall_s });
+            if (slowAgainstStep(r, m)) try w.print("; {d:.1}x the step's median", .{r.wall_s / m});
+        }
+        try w.writeAll("\n");
+    }
+}
+
 const Timing = struct { start: ?i128 = null, finish: ?i128 = null, waited: f64 = 0, status: []const u8 = "" };
 
 /// Prints what limited the launch: its critical path, waiting by reason,
-/// request sizing per kind of rule, stall character and utilization.
+/// request sizing per step, stall character and utilization.
 pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8) !void {
     const rows = try attempts(gpa, a, launch_dir);
     const events_path = try std.fs.path.join(a, &.{ launch_dir, "events.jsonl" });
@@ -427,12 +547,12 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     for (by_reason.keys(), by_reason.values()) |k, s| try w.print("  {s:<32} {d:>9.1} s\n", .{ k, s });
     try groupAdvice(a, w, text);
 
-    // Sizing and character per kind of rule.
-    const Kind = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, container: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
-    var kinds: std.StringArrayHashMapUnmanaged(Kind) = .empty;
+    // Sizing and character per step.
+    const Step = struct { n: usize = 0, delegated: usize = 0, request: f64 = 0, peak: f64 = 0, rss: f64 = 0, oom: f64 = 0, limit: f64 = 0, shared: bool = false, container: bool = false, threads: f64 = 0, eff: f64 = 0, wall: f64 = 0, cpu_stall: f64 = 0, mem_stall: f64 = 0, io_stall: f64 = 0, stall_n: usize = 0, cpu_par: f64 = 0 };
+    var steps: std.StringArrayHashMapUnmanaged(Step) = .empty;
     for (rows) |r| {
         if (!std.mem.eql(u8, r.status, "completed") and r.oom_kill == 0) continue;
-        const gop = try kinds.getOrPut(a, pattern(r.rule));
+        const gop = try steps.getOrPut(a, r.step);
         if (!gop.found_existing) gop.value_ptr.* = .{};
         const k = gop.value_ptr;
         k.n += 1;
@@ -455,9 +575,9 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
             k.stall_n += 1;
         }
     }
-    try w.writeAll("\nrequests per kind of rule (completed attempts)\n");
-    try w.writeAll("  KIND                             N   WALL S   MEM REQ  MAX RSS   PEAK  SUGGEST  THREADS  CPU EFF  CHARACTER\n");
-    for (kinds.keys(), kinds.values()) |name, k| {
+    try w.writeAll("\nrequests per step (completed attempts)\n");
+    try w.writeAll("  STEP                             N   WALL S   MEM REQ  MAX RSS   PEAK  SUGGEST  THREADS  CPU EFF  CHARACTER\n");
+    for (steps.keys(), steps.values()) |name, k| {
         const n: f64 = @floatFromInt(k.n);
         // Suggested request: the largest peak plus a fifth, in 64 MiB steps. The
         // process RSS counts mapped shared inputs, which their holders carry,
@@ -480,6 +600,8 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         if (k.threads > 1 and k.cpu_par < k.threads * 0.5) try w.print("; uses about {d:.1} of {d:.0} threads", .{ k.cpu_par, k.threads });
         try w.writeAll("\n");
     }
+
+    try writeLabelSections(a, w, rows);
 
     if (shared.count() > 0) {
         try w.writeAll("\nshared inputs\n");
@@ -749,5 +871,5 @@ fn criticalPath(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []c
         wait_s += waited;
         try w.print("  at {d:>8.1} s  {s:<44} ran {d:>8.1} s, waited {d:>6.1} s\n", .{ at, r.name[0..@min(r.name.len, 44)], run, waited });
     }
-    try w.print("  {d} steps: {d:.1} s running, {d:.1} s waiting for resources\n", .{ path.items.len, run_s, wait_s });
+    try w.print("  {d} {s}: {d:.1} s running, {d:.1} s waiting for resources\n", .{ path.items.len, if (path.items.len == 1) "rule" else "rules", run_s, wait_s });
 }

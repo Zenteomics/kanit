@@ -665,23 +665,23 @@ const Engine = struct {
     /// Rank of each rule: its estimated wall time plus the largest rank of
     /// its consumers, so the rules heading the longest remaining chain rank
     /// highest. Estimates are each rule's last recorded wall time, else the
-    /// median of its kind (the name without its sample part), else 1 s.
+    /// median of the recorded wall times of its step, else 1 s.
     fn computeRanks(self: *Engine) !void {
         const n = self.wf.rules.len;
         const est = try self.a.alloc(f64, n);
-        var by_kind: std.StringHashMapUnmanaged(std.ArrayList(f64)) = .empty;
+        var by_step: std.StringHashMapUnmanaged(std.ArrayList(f64)) = .empty;
         for (self.wf.rules, 0..) |r, i| {
             est[i] = 0;
             const e = self.st.data.rules.map.get(r.name) orelse continue;
             if (e.wall_s <= 0) continue;
             est[i] = e.wall_s;
-            const gop = try by_kind.getOrPut(self.a, report.pattern(r.name));
+            const gop = try by_step.getOrPut(self.a, r.labels.step);
             if (!gop.found_existing) gop.value_ptr.* = .empty;
             try gop.value_ptr.append(self.a, e.wall_s);
         }
         for (self.wf.rules, 0..) |r, i| if (est[i] == 0) {
             est[i] = 1;
-            if (by_kind.get(report.pattern(r.name))) |list| {
+            if (by_step.get(r.labels.step)) |list| {
                 std.mem.sort(f64, list.items, {}, std.sort.asc(f64));
                 est[i] = report.median(list.items);
             }
@@ -1324,6 +1324,7 @@ const Engine = struct {
             },
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
+            .labels = r.labels,
             .outputs = outputs.items,
             .queue = .{ .waited_s = t.queued_s, .reasons = t.waits.items },
             .key = if (t.key) |k| k.key else null,

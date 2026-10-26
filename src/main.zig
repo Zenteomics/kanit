@@ -242,7 +242,7 @@ const commands = [_]Command{
         ,
         .options = &.{
             .{ .flag = "--bottlenecks", .desc = "critical path, waiting, request sizing, utilization" },
-            .{ .flag = "--suggest", .desc = "suggested threads and memory per kind of rule" },
+            .{ .flag = "--suggest", .desc = "suggested threads and memory per step" },
             .{ .flag = "--compare OTHER", .desc = "compare with a launch ID or directory, or a working directory" },
             .{ .flag = "--format FORMAT", .desc = "tsv (default), json, or html for one self-contained page" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },

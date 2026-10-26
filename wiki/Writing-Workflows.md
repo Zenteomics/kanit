@@ -36,9 +36,14 @@ workz runs a rule's command only after every rule that produces one of its input
 
 workz creates the directory of every output before an attempt starts, and moves any output already there into the attempt's `previous/` directory, so a command always starts from a clean slate and earlier bytes are never lost ([Reuse and resume](Reuse-and-Resume.md#previous-outputs)).
 
-## Name rules by kind
+## Label every rule
 
-Name rules `step_sample` (`trim_s1`, `align_s1`) or `sample__STEP` (`s1__TRIM`). Reports group attempts into kinds by stripping the sample part ([Concepts](Concepts.md#kinds-of-rules)): six `align_` rules become one `align` row with its request, largest peak and suggested request. The scheduler also uses the kind to estimate how long a rule that has never run will take.
+Give each rule its `step`, its `sample` when it works on one, and a `category` and `tool` where they help ([Concepts](Concepts.md#steps-samples-categories-and-tools)). The labels are what the reports group by:
+
+- `workz report --suggest` turns six `align` rules into one row with its request, largest peak and suggested request.
+- The scheduler estimates a rule that has never run from the other rules of its step.
+
+Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
 
 ## Generate the file
 
@@ -67,6 +72,10 @@ bams=()
     cat <<EOF
 [[rules]]
 name = "trim_$s"
+step = "trim"
+sample = "$s"
+category = "trimming"
+tool = "fastp"
 input = ["$r1", "$r2"]
 output = ["trimmed/${s}_1.fq.gz", "trimmed/${s}_2.fq.gz"]
 shell = "fastp -w \$WORKZ_THREADS -i $r1 -I $r2 -o trimmed/${s}_1.fq.gz -O trimmed/${s}_2.fq.gz"
@@ -79,6 +88,10 @@ groups = { disk = 1 }
 
 [[rules]]
 name = "align_$s"
+step = "align"
+sample = "$s"
+category = "alignment"
+tool = "bowtie2"
 input = ["trimmed/${s}_1.fq.gz", "trimmed/${s}_2.fq.gz"]
 output = ["aligned/$s.bam"]
 shell = "bowtie2 --mm -p \$WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/${s}_1.fq.gz -2 trimmed/${s}_2.fq.gz | samtools view -b -o aligned/$s.bam -"
@@ -98,6 +111,9 @@ EOF
   cat <<EOF
 [[rules]]
 name = "count_genes"
+step = "count_genes"
+category = "quantification"
+tool = "featureCounts"
 input = ["ref/genes.gtf", ${quoted%, }]
 output = ["counts.tsv"]
 shell = "featureCounts -T \$WORKZ_THREADS -p -a ref/genes.gtf -o counts.tsv ${bams[*]}"
@@ -126,6 +142,7 @@ Some choices in this script are worth copying:
 - The bowtie2 index is a [shared input](Resources-and-Scheduling.md#shared-inputs): workz loads it once for all alignments, and counts it as an input of each, so rebuilding the index reruns them.
 - `bowtie2 --mm` maps the index instead of reading it, so the alignments share one copy of it in memory, which is what makes a shared input pay off.
 - The `disk` group lets at most two trims read from disk at once, while alignments with `priority = 10` start before trims that become ready at the same time.
+- Every rule says what it is: its step, sample, category and tool. The script knows them, so the reports can group by them, and `count_genes` stays the step `count_genes` instead of being read as `count`.
 - Regenerating the file is safe. Rules whose command, request and inputs did not change are reused.
 
 ## Choose requests
@@ -134,7 +151,7 @@ A request is both a reservation and a limit, so it pays to size it from measurem
 
 1. Start generous: enough memory that nothing is killed, and the threads you want each tool to use.
 2. Run the workflow, or a few samples of it.
-3. Ask workz what each kind of rule used: `workz report --suggest` prints the largest peak and a suggested request for each kind, and `workz report --bottlenecks` says which requests are far above their peaks ([Reports](Reports.md#request-sizing)).
+3. Ask workz what each step used: `workz report --suggest` prints the largest peak and a suggested request for each step, and `workz report --bottlenecks` says which requests are far above their peaks ([Reports](Reports.md#request-sizing)).
 4. Apply the suggestions in the generator, and run again.
 
 Memory requests cover what the kernel charges to the task's cgroup, which includes page cache for the files it writes. A task that writes a large file under a small request is slowed by reclaim, not killed; one whose own memory exceeds the request is killed as out of memory, with every process of the attempt. Threads become a CPU quota of that many CPUs: a tool that starts more threads than requested is throttled to the quota.

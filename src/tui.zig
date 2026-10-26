@@ -465,7 +465,7 @@ const Line = struct {
     }
 
     /// A name in a field of `width` columns. A longer one keeps its start
-    /// and end around "...", since rules of one kind differ at the end.
+    /// and end around "...", since rules of one step differ at the end.
     fn name(self: *Line, s: []const u8, width: usize) void {
         if (fit(s, width) == s.len or width < 7) return self.field(s, width, false);
         const keep = width - 3;

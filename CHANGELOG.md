@@ -10,9 +10,12 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
 - On a terminal, `run` and `status` print a short readable summary instead of JSON. Standard output that goes to a file or a pipe still gets the JSON summary, and `--json` gives it on a terminal too.
 - Recorded file identities no longer include the device number, so every rule runs once after the upgrade.
+- `workz report --suggest` names its first column and JSON field `step` instead of `kind`, and `--compare` and `--bottlenecks` group attempts by step.
 
 ### Added
 
+- Rules can declare their `step`, `sample`, `category` and `tool`. The labels are recorded with each attempt and are not part of the rule key, so adding or changing one reruns nothing. Rules without them are labelled from their names and images, as the reports grouped them before.
+- `workz report --bottlenecks` adds the CPU time per category and per tool, and each sample's time with its slowest step, marked when that step took at least 1.5 times its median. The TSV and JSON attempt reports carry each attempt's labels.
 - `workz help COMMAND`, `workz COMMAND --help` and `-h` show a command's usage, options with their defaults, and examples; `workz help` lists the commands grouped by job.
 - A mistyped command or option is named with the one probably meant, for example `unknown option '--max-thread' for run; did you mean '--max-threads'?`.
 - On a terminal, `workz run` keeps a status line below its progress lines: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the rules running. A failure line shows the last lines of the attempt's standard error, rules blocked by a failure get a line, and the launch ends with a summary: the outcome, each failure with its last error line, the slowest rules of a launch that completed, and the commands to look further. `workz status` prints the same summary.
@@ -25,14 +28,14 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - The live `watch` view shows the launch in gauges: a progress bar split by state, the threads and memory reserved against the budget beside the cores and memory in use, and for each running rule its CPU use against its threads and a memory bar against its request, yellow from 70% and red from 90%. The timeline has a time axis, the details view gauges, and the log view shows error lines in red and warnings in yellow. Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
 - `X` in the live view cancels the launch only when pressed a second time within 3 s.
 - The selection in the live view stays on the top row as rules finish, until a key moves it.
-- The HTML report opens with cards for the elapsed time, rules, attempts, CPU, memory and engine cost. Its timeline labels every attempt with its rule and has a time axis, the budget charts have axes and the budget line, what limited the launch is laid out as the critical path step by step and the time ready rules waited for each resource, the requests per kind of rule form a table with memory bars, and the attempt table scrolls under a fixed header. The page follows a light or dark color scheme and prints cleanly.
+- The HTML report opens with cards for the elapsed time, rules, attempts, CPU, memory and engine cost. Its timeline labels every attempt with its rule and has a time axis, the budget charts have axes and the budget line, what limited the launch is laid out as the critical path step by step and the time ready rules waited for each resource, the requests per step form a table with memory bars, and the attempt table scrolls under a fixed header. The page follows a light or dark color scheme and prints cleanly.
 
 ### Fixed
 
 - A rule that uses a shared file input counts the input's path as an input, so rebuilding an index reruns the rules that read it.
 - Reuse survives a reboot on btrfs, which numbers its subvolumes anew at each mount: recorded file identities and input-manifest stamps no longer compare the device number, which made every rule run again after a reboot.
 - A `state.json` upgraded from an earlier version is saved with the current format version.
-- A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
+- A rule that never completed is estimated by the median wall time of its step when ready rules are ordered by their chain of work.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
 - A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
 - An option given without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
