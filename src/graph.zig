@@ -63,15 +63,39 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
         }
     }
     if (order.items.len != n) {
-        for (pending, 0..) |c, i| if (c > 0) {
-            _ = cycle_message.set(gpa, "the rule graph has a cycle through rule {s}", .{wf.rules[i].name}) catch {};
-            break;
-        };
+        const cycle = try findCycle(a, parents, pending);
+        var text: std.Io.Writer.Allocating = .init(a);
+        for (cycle) |i| try text.writer.print("{s} -> ", .{wf.rules[i].name});
+        try text.writer.writeAll(wf.rules[cycle[0]].name);
+        _ = cycle_message.set(gpa, "the rule graph has a cycle: {s} (each rule writes an input of the next)", .{text.written()}) catch {};
+        cycle_message.line = wf.rules[cycle[0]].line;
         return error.Cycle;
     }
     g.order = order.items;
     try checkServiceInputs(gpa, a, wf, &g, cycle_message);
     return g;
+}
+
+/// The rules of one cycle, each a parent of the next, from the rules Kahn's
+/// algorithm left with `pending` parents. Every such rule has a parent also
+/// left, so walking from parent to parent returns to a rule already seen.
+fn findCycle(a: Allocator, parents: []const []const usize, pending: []const usize) ![]usize {
+    var i = for (pending, 0..) |c, k| {
+        if (c > 0) break k;
+    } else unreachable;
+    const seen_at = try a.alloc(?usize, pending.len);
+    @memset(seen_at, null);
+    var walk: std.ArrayList(usize) = .empty;
+    while (seen_at[i] == null) {
+        seen_at[i] = walk.items.len;
+        try walk.append(a, i);
+        i = for (parents[i]) |p| {
+            if (pending[p] > 0) break p;
+        } else unreachable;
+    }
+    const loop = walk.items[seen_at[i].?..];
+    std.mem.reverse(usize, loop);
+    return loop;
 }
 
 /// A service may load files that rules of the workflow produce; each rule

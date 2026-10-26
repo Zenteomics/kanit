@@ -365,6 +365,26 @@ test "graph order puts producers first and detects cycles" {
     testing.allocator.free(problem.message);
 }
 
+test "[failure] - [graph]: a cycle error names the rules on the cycle in order" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    // `after` depends on the cycle without being on it; `x` and `y` are on it.
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"after\"\ninput = [\"y\"]\noutput = [\"after\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"x\"\ninput = [\"z\"]\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"y\"\ninput = [\"x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"z\"\ninput = [\"y\"]\noutput = [\"z\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    try testing.expectError(error.Cycle, workz.graph.build(testing.allocator, &wf, &problem));
+    defer testing.allocator.free(problem.message);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "x -> y -> z -> x") != null or
+        std.mem.indexOf(u8, problem.message, "y -> z -> x -> y") != null or
+        std.mem.indexOf(u8, problem.message, "z -> x -> y -> z") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "after") == null);
+    try testing.expect(problem.line > 0);
+}
+
 test "state round-trips through its file and refuses other versions" {
     var s = try Scratch.init();
     defer s.deinit();

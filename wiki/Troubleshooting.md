@@ -27,7 +27,7 @@ workz: typo.toml: line 9: unknown key 'memroy' in a rule; did you mean 'memory'?
 
 - `rules A and B both produce 'PATH'`: Two rules declare the same output. Give each its own file.
 
-- `the rule graph has a cycle through rule NAME`: Some rules depend on each other in a loop. The named rule is on the loop or downstream of it; `workz graph` shows the edges.
+- `the rule graph has a cycle: A -> B -> A (each rule writes an input of the next)`: These rules depend on each other in a loop, so none of them can start. Break the loop: usually one rule declares, as an input, a file that a later step writes.
 
 - `rule NAME: input 'PATH' must be an explicit local path`: Paths cannot contain wildcards, braces, URLs or control characters. List the files explicitly; a script that generates the workflow can expand them.
 
