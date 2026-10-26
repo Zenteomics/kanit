@@ -108,6 +108,9 @@ pub fn load(gpa: Allocator, records: []const u8) !State {
     probe.deinit();
     if (v != 1 and v != format_version) return error.UnsupportedState;
     s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
+    // Format 1 lacks only `envs`, which this engine adds as rules run, so
+    // the file is saved as the current format.
+    s.data.format_version = format_version;
     return s;
 }
 

@@ -362,6 +362,18 @@ test "state round-trips through its file and refuses other versions" {
     try testing.expectError(error.CorruptState, state.load(testing.allocator, s.path));
 }
 
+test "[regression] - [state]: a format 1 file is saved as the current format" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("state.json", "{\"format_version\": 1, \"rules\": {}, \"files\": {}, \"manifest\": {}}");
+    var old = try state.load(testing.allocator, s.path);
+    defer old.deinit();
+    try old.save(testing.allocator);
+    const text = try sys.readFile(testing.allocator, try std.fs.path.join(old.allocator(), &.{ s.path, "state.json" }), 1 << 20);
+    defer testing.allocator.free(text);
+    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":2,"));
+}
+
 test "the key of a fixed rule matches its pinned value" {
     // A change here means the key encoding changed: raise state.engine_key.
     var s = try Scratch.init();

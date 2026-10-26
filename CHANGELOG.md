@@ -8,6 +8,10 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 
 - `build.zig.zon` pins z-toml by URL and hash, so a fresh clone builds with `zig build` alone.
 
+### Fixed
+
+- A `state.json` upgraded from an earlier version is saved with the current format version.
+
 ## 0.3.0 - 2026-10-25
 
 Reports you can share and runs you can steer: an HTML report of a launch, launch comparisons and request suggestions, commands to stop, retry and inspect rules while a launch runs, per-rule work directories, and mounts for container images.
