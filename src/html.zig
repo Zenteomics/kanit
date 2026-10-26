@@ -79,27 +79,51 @@ fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
 // (or steps) take eight inks in a fixed order, validated for color vision
 // deficiency against each paper; magnitude uses one ink ramp; red is kept
 // for failure. Dark mode is a blueprint: blue paper, pale ink.
-const style =
-    \\:root{color-scheme:light dark;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#7d8894;--hair:#cfd3d8;
-    \\--g1:rgba(29,43,58,.04);--g2:rgba(29,43,58,.08);--wash:rgba(29,43,58,.05);
+// The sheet in light: ink on paper. Categories c1-c8 keep one hue each in
+// both themes; q1-q7 shade the samples matrix from fast to slow; --rule draws
+// frames and dividers, --tab the figure numbers.
+const light_theme =
+    \\color-scheme:light;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#7d8894;--hair:#cfd3d8;
+    \\--rule:#1d2b3a;--tab:#1d2b3a;--tab-ink:#fbfaf6;--g1:rgba(29,43,58,.04);--g2:rgba(29,43,58,.08);--wash:rgba(29,43,58,.05);
     \\--c1:#2b5fae;--c2:#c46a1a;--c3:#23896b;--c4:#8a5cc2;--c5:#a6841a;--c6:#2c86ad;--c7:#b84f7a;--c8:#6d7f2d;--c0:#9aa3ad;
     \\--q1:#e4e9f0;--q2:#c6d0dc;--q3:#a2b1c3;--q4:#7d91a8;--q5:#5a718c;--q6:#3b5370;--q7:#1d2b3a;--t4:#fff;--t5:#fff;
-    \\--done:#1d2b3a;--run:#2b5fae;--fail:#c62828;--warn:#d68a00;--cancel:#9aa3ad;
-    \\--mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+    \\--done:#1d2b3a;--run:#2b5fae;--fail:#c62828;--warn:#d68a00;--cancel:#9aa3ad
+;
+
+// The sheet in dark: a neutral charcoal on which the same hues sit in a
+// darker band, so no color glares against another; frames are a soft slate
+// rather than bright ink.
+const dark_theme =
+    \\color-scheme:dark;--paper:#111418;--sheet:#181c22;--ink:#e2e6eb;--ink2:#a9b2be;--muted:#7c8796;--hair:#2a3038;
+    \\--rule:#566170;--tab:#3a4452;--tab-ink:#e2e6eb;--g1:rgba(214,222,232,.03);--g2:rgba(214,222,232,.06);--wash:rgba(214,222,232,.045);
+    \\--c1:#5a87d6;--c2:#cf7838;--c3:#2fa07c;--c4:#9677d6;--c5:#a98a28;--c6:#3a9cc2;--c7:#cc6b93;--c8:#839744;--c0:#69737f;
+    \\--q1:#262d37;--q2:#323c4a;--q3:#435163;--q4:#5a6b81;--q5:#7b8da5;--q6:#a3b2c5;--q7:#cfd8e3;--t4:#e2e6eb;--t5:#111418;
+    \\--done:#8b98aa;--run:#64b0ff;--fail:#e5605c;--warn:#d9a033;--cancel:#5d6775
+;
+
+/// The choices of the theme switch; auto follows the reader's setting.
+const themes = [_][]const u8{ "auto", "light", "dark" };
+
+// The reader's color scheme decides, unless the theme switch on the page
+// picks one; print is always light. The switch is three radio buttons that
+// come before the sheet, `.page`, so the sheet takes its theme from the
+// checked one with a sibling selector and the page needs no script.
+const style =
+    \\:root{--mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
     \\--sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
     \\--label:"Barlow Condensed","Roboto Condensed","Arial Narrow","DejaVu Sans Condensed",system-ui,sans-serif}
-    \\@media (prefers-color-scheme:dark){:root{--paper:#123a63;--sheet:#0f3357;--ink:#e8eef5;--ink2:#b3c4d8;--muted:#7f97b3;--hair:#2f5a85;
-    \\--g1:rgba(232,238,245,.05);--g2:rgba(232,238,245,.1);--wash:rgba(232,238,245,.06);
-    \\--c1:#5b8fd9;--c2:#cf7932;--c3:#2aa47e;--c4:#9d7ddb;--c5:#ad8d29;--c6:#369bc6;--c7:#d0709a;--c8:#889b3a;--c0:#6f89a6;
-    \\--q1:#1d4a78;--q2:#2d5f8f;--q3:#4677a6;--q4:#6590bb;--q5:#89abcd;--q6:#b3c8de;--q7:#e8eef5;--t4:#e8eef5;--t5:#0f3357;
-    \\--done:#e8eef5;--run:#7fb2ff;--fail:#ff6b6b;--warn:#f0b429;--cancel:#6f89a6}}
+    \\
+++ ".page{" ++ light_theme ++ "}\n" ++
+    "@media (prefers-color-scheme:dark){#theme-auto:checked~.page{" ++ dark_theme ++ "}}\n" ++
+    "#theme-dark:checked~.page{" ++ dark_theme ++ "}\n" ++
     \\*{box-sizing:border-box}
-    \\body{margin:0;color:var(--ink);font:14px/1.5 var(--sans);background-color:var(--paper);
+    \\body{margin:0}.pick{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+    \\.page{min-height:100vh;color:var(--ink);font:14px/1.5 var(--sans);background-color:var(--paper);
     \\background-image:linear-gradient(var(--g2) 1px,transparent 1px),linear-gradient(90deg,var(--g2) 1px,transparent 1px),linear-gradient(var(--g1) 1px,transparent 1px),linear-gradient(90deg,var(--g1) 1px,transparent 1px);
     \\background-size:80px 80px,80px 80px,16px 16px,16px 16px}
     \\main{max-width:1240px;margin:0 auto;padding:28px 28px 44px}
     \\code,.mono{font-family:var(--mono);font-size:.92em}
-    \\.title{display:grid;gap:1.5px;background:var(--ink);border:2px solid var(--ink)}
+    \\.title{display:grid;gap:1.5px;background:var(--rule);border:2px solid var(--rule)}
     \\.row{display:grid;gap:1.5px}.r1{grid-template-columns:2.6fr 1fr 1.7fr 1.3fr 1fr}.r2{grid-template-columns:repeat(6,1fr)}
     \\.cell{background:var(--sheet);padding:8px 12px;min-width:0}
     \\.k{display:block;font:600 11px/1.2 var(--label);text-transform:uppercase;letter-spacing:.11em;color:var(--muted);margin-bottom:3px}
@@ -109,23 +133,29 @@ const style =
     \\.s-ok{color:var(--c3)}.s-fail{color:var(--fail)}.s-run{color:var(--run)}.s-cancel{color:var(--muted)}
     \\.live{animation:pulse 1.6s ease-in-out infinite}
     \\.error{background:var(--sheet);border:1.5px solid var(--fail);border-top:0;padding:8px 12px;color:var(--fail)}
-    \\nav{display:flex;flex-wrap:wrap;border:1.5px solid var(--ink);border-top:0;background:var(--sheet)}
+    \\nav{display:flex;flex-wrap:wrap;align-items:stretch;border:1.5px solid var(--rule);border-top:0;background:var(--sheet)}
     \\nav a{font:600 12px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--ink2);text-decoration:none;padding:9px 13px;border-right:1px solid var(--hair)}
     \\nav a:hover{color:var(--ink);background:var(--wash)}nav a b{color:var(--muted);margin-right:6px}
-    \\.fig{background:var(--sheet);border:1.5px solid var(--ink);margin:26px 0 0}
-    \\.fig-h{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--ink);padding:0 14px 0 0;flex-wrap:wrap}
-    \\.no{font:700 12px/1 var(--label);letter-spacing:.14em;background:var(--ink);color:var(--sheet);padding:9px 11px}
+    \\.corner{display:flex;justify-content:flex-end;margin:0 0 8px}.theme{display:flex;align-items:center;border:1px solid var(--rule);background:var(--sheet)}
+    \\.theme .k{margin:0;padding:0 10px}
+    \\.theme label{font:600 11.5px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:6px 10px;border-left:1px solid var(--hair);cursor:pointer}
+    \\.theme label:hover{color:var(--ink);background:var(--wash)}
+    \\#theme-auto:checked~.page label[for=theme-auto],#theme-light:checked~.page label[for=theme-light],#theme-dark:checked~.page label[for=theme-dark]{color:var(--tab-ink);background:var(--tab)}
+    \\#theme-auto:focus-visible~.page label[for=theme-auto],#theme-light:focus-visible~.page label[for=theme-light],#theme-dark:focus-visible~.page label[for=theme-dark]{outline:2px solid var(--run);outline-offset:-2px}
+    \\.fig{background:var(--sheet);border:1.5px solid var(--rule);margin:26px 0 0}
+    \\.fig-h{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--rule);padding:0 14px 0 0;flex-wrap:wrap}
+    \\.no{font:700 12px/1 var(--label);letter-spacing:.14em;background:var(--tab);color:var(--tab-ink);padding:9px 11px}
     \\h2{font:600 17px/1.2 var(--label);letter-spacing:.08em;text-transform:uppercase;margin:0}
     \\.note{margin-left:auto;font-size:12px;color:var(--muted)}
     \\.fig-b{padding:14px 18px 18px}
     \\.lead{color:var(--ink2);margin:0 0 14px;font-size:13px;max-width:96ch}.muted{color:var(--muted)}
     \\svg{display:block;width:100%;height:auto;font-family:var(--sans)}svg text{fill:var(--muted);font-size:11px}
-    \\.gridline{stroke:var(--hair);stroke-width:1}.axis{stroke:var(--ink);stroke-width:1}.zebra{fill:var(--wash)}
+    \\.gridline{stroke:var(--hair);stroke-width:1}.axis{stroke:var(--rule);stroke-width:1}.zebra{fill:var(--wash)}
     \\.dim{stroke:var(--ink2);stroke-width:1}svg text.dimtext{fill:var(--ink2);font:600 11px var(--label);letter-spacing:.08em}
     \\.g1{fill:var(--c1);background:var(--c1)}.g2{fill:var(--c2);background:var(--c2)}.g3{fill:var(--c3);background:var(--c3)}
     \\.g4{fill:var(--c4);background:var(--c4)}.g5{fill:var(--c5);background:var(--c5)}.g6{fill:var(--c6);background:var(--c6)}
     \\.g7{fill:var(--c7);background:var(--c7)}.g8{fill:var(--c8);background:var(--c8)}.g0{fill:var(--c0);background:var(--c0)}
-    \\.box{fill:var(--sheet);stroke:var(--ink);stroke-width:1.25}.box.active{stroke:var(--run);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
+    \\.box{fill:var(--sheet);stroke:var(--rule);stroke-width:1.25}.box.active{stroke:var(--run);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
     \\.wire{fill:none;stroke:var(--ink2);stroke-width:1}.arrow{fill:var(--ink2)}
     \\svg text.t-name{font:600 12px var(--mono);fill:var(--ink)}svg text.t-sub{font-size:11px;fill:var(--ink2)}svg text.t-count{font:600 11px var(--mono);fill:var(--ink)}
     \\.st-completed{fill:var(--done);background:var(--done)}.st-reused{fill:url(#hatch);background:repeating-linear-gradient(135deg,var(--done) 0 1.5px,transparent 1.5px 4px)}
@@ -138,14 +168,14 @@ const style =
     \\@keyframes pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.st-running,.live{animation:none}}
     \\.legend{display:flex;flex-wrap:wrap;gap:6px 18px;list-style:none;padding:0;margin:12px 0 0;font-size:12.5px;color:var(--ink2)}
     \\.legend i{display:inline-block;width:11px;height:11px;margin-right:6px;vertical-align:-1px}.legend b{font-weight:600;color:var(--ink)}
-    \\.split{display:flex;height:26px;gap:2px;border:1px solid var(--ink);padding:2px;margin:4px 0}.split i{display:block;min-width:3px}
+    \\.split{display:flex;height:26px;gap:2px;border:1px solid var(--rule);padding:2px;margin:4px 0}.split i{display:block;min-width:3px}
     \\table{border-collapse:collapse;width:100%;font-size:13px}
-    \\th{font:600 11.5px/1.2 var(--label);letter-spacing:.09em;text-transform:uppercase;color:var(--ink2);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--ink);white-space:nowrap;background:var(--sheet)}
+    \\th{font:600 11.5px/1.2 var(--label);letter-spacing:.09em;text-transform:uppercase;color:var(--ink2);text-align:left;padding:8px 10px;border-bottom:1.5px solid var(--rule);white-space:nowrap;background:var(--sheet)}
     \\td{padding:6px 10px;border-bottom:1px solid var(--hair);vertical-align:middle;font-variant-numeric:tabular-nums}
     \\.n{text-align:right;white-space:nowrap;font-family:var(--mono);font-size:12.5px}tbody tr:hover td{background:var(--wash)}
     \\td.name{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
     \\td.name i,th.step i{display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:-1px}
-    \\td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;color:var(--ink2);white-space:nowrap}td.name small{margin-left:18px}
+    \\td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;color:var(--ink2);white-space:nowrap}td.name small{margin-left:18px}td.n small.sub{white-space:normal;max-width:22ch;margin-left:auto}
     \\.wide{overflow-x:auto;scrollbar-color:var(--hair) transparent}.scroll{max-height:70vh;overflow:auto;border:1px solid var(--hair)}
     \\.scroll thead th{position:sticky;top:0;z-index:1}
     \\.bar{position:relative;height:9px;min-width:110px;border:1px solid var(--ink2)}
@@ -176,7 +206,9 @@ const style =
     \\.failure pre{border-top:1px solid var(--hair)}
     \\footer{color:var(--muted);font:600 11px/1.6 var(--label);letter-spacing:.1em;text-transform:uppercase;text-align:right;margin-top:16px}
     \\@media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}}
-    \\@media print{:root{color-scheme:light}body{background:#fff}main{max-width:none;padding:0}nav{display:none}
+    \\
+++ "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}" ++
+    \\.page{background:#fff}main{max-width:none;padding:0}nav,.corner{display:none}
     \\.fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}.st-running,.live{animation:none}}
 ;
 
@@ -193,8 +225,13 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
     try escape(w, l.name);
     try w.writeAll(" - workz launch ");
     try escape(w, l.id);
-    try w.print("</title>\n<style>\n{s}</style></head><body><main>\n", .{style});
+    try w.print("</title>\n<style>\n{s}</style></head><body>\n", .{style});
+    // The theme switch's buttons come before the sheet they restyle; its
+    // labels sit in the sheet's corner.
+    for (themes) |t| try w.print("<input class=\"pick\" type=\"radio\" name=\"theme\" id=\"theme-{s}\" aria-label=\"{s} theme\"{s}>", .{ t, t, if (std.mem.eql(u8, t, "auto")) " checked" else "" });
+    try w.writeAll("\n<div class=\"page\"><main>\n");
 
+    try p.themeSwitch();
     try p.titleBlock();
     try p.nav();
     try p.pipeline();
@@ -213,7 +250,7 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
     try escape(w, l.id);
     try w.writeAll("</span>");
     if (!l.finished) try w.writeAll(" &middot; this page reloads every 5 s while the launch runs");
-    try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere</footer>\n</main></body></html>\n");
+    try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere</footer>\n</main></div></body></html>\n");
 }
 
 /// Colors go to categories when the workflow declares any, else to steps,
@@ -384,6 +421,16 @@ const Page = struct {
         if (self.l.samples.len > 0) try w.writeAll("<a href=\"#samples\"><b>3</b>Samples by step</a>");
         try w.writeAll("<a href=\"#steps\"><b>T1</b>Steps</a><a href=\"#timeline\"><b>4</b>Timeline</a><a href=\"#budget\"><b>5</b>Budget</a><a href=\"#limits\"><b>6</b>What limited it</a>");
         try w.print("<a href=\"#failures\"><b>T2</b>Failures ({d})</a><a href=\"#attempts\"><b>T3</b>Attempts ({d})</a></nav>\n", .{ failedCount(self.l), self.l.rows.len });
+    }
+
+    /// The theme switch, a tag at the sheet's corner: radio buttons the
+    /// stylesheet reads with :has(), so the page needs no script. Auto
+    /// follows the reader's color scheme.
+    fn themeSwitch(self: Page) !void {
+        const w = self.w;
+        try w.writeAll("<div class=\"corner\"><span class=\"theme\"><span class=\"k\">theme</span>");
+        for (themes) |t| try w.print("<label for=\"theme-{s}\">{s}</label>", .{ t, t });
+        try w.writeAll("</span></div>\n");
     }
 
     // ---- FIG. 1: the pipeline ----

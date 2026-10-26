@@ -51,14 +51,14 @@ Three changes need action:
 
 ### Changed
 
-- **The HTML report** is drawn as one engineering sheet, on grid paper in light mode and as a blueprint in dark mode.
+- **The HTML report** is drawn as one engineering sheet: ink on grid paper in light, a charcoal sheet in dark.
   - A title block gives the status, elapsed time, rules done, the pipeline's samples and steps, CPU and memory against the budget, and the engine's own cost.
   - FIG. 1 draws the pipeline: a box for each step in the order of the workflow's graph, wired to the steps it reads from, with a cell for each rule showing whether it is done, reused, running, waiting, failed or blocked.
   - Further figures show where the CPU time went, each sample's run of each step, the steps with their suggested requests, the timeline, the use of the budget and what limited the launch.
   - Tables list the failures and every attempt.
   - The pipeline, CPU, samples and steps figures cover the latest run of every rule, so a launch that reused rules still shows the whole pipeline; the rest cover the launch itself.
   - A page written while the launch runs reloads itself every 5 s.
-  - The page follows the reader's light or dark color scheme, prints cleanly, and has no scripts and nothing loaded from elsewhere.
+  - The page follows the reader's color scheme, and a theme tag at its corner picks auto, light or dark without a script. It prints in light and loads nothing from elsewhere.
 - **The live view** shows the launch in gauges.
   - A progress bar is split by state, and the threads and memory reserved against the budget sit beside the cores and memory in use.
   - Each running rule shows its CPU use against its threads and a memory bar against its request, yellow from 70% and red from 90%.

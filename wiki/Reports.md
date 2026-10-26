@@ -178,9 +178,9 @@ Each step compares the median wall time of its runs, the largest cgroup peak and
 
 ## The HTML report
 
-`workz report --format html -o report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. The page is drawn as an engineering sheet: grid paper in a light color scheme, a blueprint in a dark one, following the reader's setting. It prints cleanly.
+`workz report --format html -o report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. The page is drawn as an engineering sheet, ink on grid paper in light and a charcoal sheet in dark. It follows the reader's color scheme until the theme tag at its corner picks auto, light or dark, and it always prints in light.
 
-![The top of an HTML report: a title block with the status stamp, elapsed time, rules done, the pipeline's samples and steps, CPU and memory against the budget and the engine's cost; FIG. 1, the pipeline as boxes for qc, trim, align, count and report wired in graph order, each with a filled cell per rule; and FIG. 2, the CPU time split by category, then per tool.](images/report.png)
+![The top of an HTML report: a theme tag at the corner set to auto, a title block with the status stamp, elapsed time, rules done, the pipeline's samples and steps, CPU and memory against the budget and the engine's cost; FIG. 1, the pipeline as boxes for qc, trim, align, count and report wired in graph order, each with a filled cell per rule; and FIG. 2, the CPU time split by category, then per tool.](images/report.png)
 
 The sheet holds, in order:
 
@@ -197,4 +197,4 @@ The sheet holds, in order:
 
 Figures 1 to 3 and Table 1 cover the pipeline, so a launch that reused rules still shows every sample and step, with each reused rule hatched; the rest cover the launch itself. Each category, or each step when no rule declares a category, keeps one color across the sheet, on the left edge of its pipeline box, its timeline bars and its matrix column. Up to eight get a color each, in pipeline order; with more, the first seven keep theirs and the rest share gray as "other". Hovering a cell, dot or bar gives its numbers.
 
-Every launch also keeps this page as `report.html` in its launch directory: `run` draws it as the launch starts, every 5 s while it runs, and once more at the end ([Running workflows](Running-Workflows.md#starting-a-launch)). While the launch runs, the page reloads itself every 5 s, its title block says RUNNING, the timeline measures the time so far, and running attempts are open bars; the last page stops reloading. `workz report --format html` draws the same page on demand, for any launch.
+Every launch also keeps this page as `report.html` in its launch directory: `run` draws it as the launch starts, every 5 s while it runs, and once more at the end ([Running workflows](Running-Workflows.md#starting-a-launch)). While the launch runs, the page reloads itself every 5 s, its title block says RUNNING, the timeline measures the time so far, and running attempts are open bars; the last page stops reloading. `workz report --format html` draws the same page on demand, for any launch. A theme picked on a page that reloads itself lasts only while the browser keeps the page's form state; the reader's color scheme is the lasting choice.

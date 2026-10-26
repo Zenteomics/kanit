@@ -848,7 +848,7 @@ new report-html
 "$workz" report -d . --format html > r.html
 check "run names the launch's page when it starts" 'grep -q "^\[0/2\] page \.workz/launches/[^/]*/report\.html, drawn again every 5 s" err.txt'
 check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -q "stroke:var(--ink);stroke-width:1.5" r.html && grep -Eq "text-anchor=\"end\"( style=\"[^\"]*\")?>bad</text>" r.html && grep -q "id=\"pipeline\"" r.html && grep -q "class=\"st-failed\"" r.html'
-check "the html report has no scripts or remote assets, and has dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html'
+check "the html report has no scripts or remote assets, a theme switch, and dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html && grep -q "<label for=\"theme-dark\">dark</label>" r.html'
 
 new labels
 { header labels

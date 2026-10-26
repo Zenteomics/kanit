@@ -99,6 +99,12 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     try testing.expect(has(page, ">1.0 GiB</text>") and has(page, "<td class=\"n\">512 MiB</td>"));
     try testing.expect(has(page, "<td>threads</td>") and has(page, "<span>1.0 s</span>"));
     try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
+    // The theme switch: its buttons come before the sheet they restyle, with
+    // auto picked, and its labels sit in the sheet.
+    const pick = std.mem.indexOf(u8, page, "<input class=\"pick\" type=\"radio\" name=\"theme\" id=\"theme-dark\"").?;
+    try testing.expect(pick < std.mem.indexOf(u8, page, "<div class=\"page\">").?);
+    try testing.expect(has(page, "id=\"theme-auto\" aria-label=\"auto theme\" checked>"));
+    try testing.expect(has(page, "<label for=\"theme-light\">light</label>") and has(page, "#theme-dark:checked~.page{color-scheme:dark;"));
     // A finished launch's page does not reload itself.
     try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
