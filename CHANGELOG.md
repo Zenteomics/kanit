@@ -8,15 +8,22 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 
 - Rules that use a shared file input count its path as an input, so each such rule runs once after the upgrade.
 - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
+- On a terminal, `run` and `status` print a short readable summary instead of JSON. Standard output that goes to a file or a pipe still gets the JSON summary, and `--json` gives it on a terminal too.
 
 ### Added
 
 - `workz help COMMAND`, `workz COMMAND --help` and `-h` show a command's usage, options with their defaults, and examples; `workz help` lists the commands grouped by job.
 - A mistyped command or option is named with the one probably meant, for example `unknown option '--max-thread' for run; did you mean '--max-threads'?`.
+- On a terminal, `workz run` keeps a status line below its progress lines: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the rules running. A failure line shows the last lines of the attempt's standard error, rules blocked by a failure get a line, and the launch ends with a summary: the outcome, each failure with its last error line, the slowest rules of a launch that completed, and the commands to look further. `workz status` prints the same summary.
+- `run --json` prints the JSON summary on a terminal, and `run --no-color` turns colors off, as `NO_COLOR=1` does for every command.
+- `?` in the live view lists every key.
 
 ### Changed
 
 - `build.zig.zon` pins z-toml by URL and hash, so a fresh clone builds with `zig build` alone.
+- The live `watch` view shows the launch in gauges: a progress bar split by state, the threads and memory reserved against the budget beside the cores and memory in use, and for each running rule its CPU use against its threads and a memory bar against its request, yellow from 70% and red from 90%. The timeline has a time axis, the details view gauges, and the log view shows error lines in red and warnings in yellow. Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
+- `X` in the live view cancels the launch only when pressed a second time within 3 s.
+- The selection in the live view stays on the top row as rules finish, until a key moves it.
 
 ### Fixed
 

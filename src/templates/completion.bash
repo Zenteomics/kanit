@@ -29,13 +29,13 @@ _workz() {
     esac
     local opts="-h --help -d --workdir"
     case $cmd in
-        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --grace --slice --no-isolation -q --quiet" ;;
+        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --grace --slice --no-isolation -q --quiet --json --no-color" ;;
         plan | dry-run) opts="$opts -t --target --summary --rerun --rerun-rule --pass-env" ;;
         explain) opts="$opts -t --target --rerun --rerun-rule --pass-env" ;;
         validate | graph) opts="$opts -t --target" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval" ;;
-        status) opts="$opts --history" ;;
+        status) opts="$opts --history --json" ;;
         report) opts="$opts --launch --format --bottlenecks --suggest --compare" ;;
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
         clean) opts="$opts --keep --dry-run" ;;

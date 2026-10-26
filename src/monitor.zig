@@ -8,6 +8,8 @@ const sys = @import("sys.zig");
 const records = @import("records.zig");
 const cgroup = @import("cgroup.zig");
 const tui = @import("tui.zig");
+const term = @import("term.zig");
+const report = @import("report.zig");
 const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 
@@ -51,6 +53,14 @@ pub const RuleView = struct {
     /// Request of the latest attempt.
     threads: u32 = 0,
     memory_mib: u64 = 0,
+    /// Counters of a running attempt, sampled by the interactive view. A
+    /// failed read keeps the last value; `live_cores` is the CPU used
+    /// between the last two samples.
+    live_memory: ?u64 = null,
+    live_peak: ?u64 = null,
+    live_cores: ?f64 = null,
+    live_cpu_usec: ?u64 = null,
+    live_cpu_ns: i128 = 0,
 };
 
 pub const SharedView = struct {
@@ -59,6 +69,8 @@ pub const SharedView = struct {
     memory_peak: ?u64 = null,
     /// cgroup of the current holder, for live counters.
     cg: ?[]const u8 = null,
+    /// Memory the holder uses, sampled by the interactive view.
+    live_memory: ?u64 = null,
 };
 
 /// The state of one launch, kept up to date from its event stream.
@@ -71,6 +83,9 @@ pub const Tracker = struct {
     partial: std.ArrayList(u8) = .empty,
 
     launch: []const u8 = "",
+    /// Base name of the working directory, from `launch.json`; empty when
+    /// it cannot be read.
+    workdir_name: []const u8 = "",
     selected: u32 = 0,
     started_ns: i128 = 0,
     max_threads: u32 = 0,
@@ -95,6 +110,12 @@ pub const Tracker = struct {
         const a = t.arena.allocator();
         t.events_path = try std.fs.path.join(a, &.{ launch_dir, "events.jsonl" });
         t.launch = try a.dupe(u8, std.fs.path.basename(launch_dir));
+        if (sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20)) |text| {
+            defer gpa.free(text);
+            if (std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always })) |v| {
+                if (str(v, "workdir")) |wd| t.workdir_name = std.fs.path.basename(wd);
+            } else |_| {}
+        } else |_| {}
         return t;
     }
 
@@ -202,6 +223,10 @@ pub const Tracker = struct {
                 r.started_ns = at;
                 r.finished_ns = 0;
                 r.reason = "";
+                r.live_memory = null;
+                r.live_peak = null;
+                r.live_cores = null;
+                r.live_cpu_usec = null;
             } else if (eql(u8, ev, "task_finished")) {
                 const st = str(v, "status") orelse "";
                 r.status = if (eql(u8, st, "completed")) .completed else if (eql(u8, st, "cancelled")) .cancelled else .failed;
@@ -301,19 +326,40 @@ pub fn bytes(w: *std.Io.Writer, n: ?u64) !void {
     return w.print("{d:>5.1} Ki", .{f / 1024});
 }
 
+/// A path as shown to a person: relative to the current directory when it
+/// lies below it, else as given.
+pub fn shownPath(a: Allocator, path: []const u8) []const u8 {
+    const here = sys.cwd(a) catch return path;
+    const below = here.len > 1 and path.len > here.len + 1 and std.mem.startsWith(u8, path, here) and path[here.len] == '/';
+    return if (below) path[here.len + 1 ..] else path;
+}
+
 /// The last non-empty line of a file, with control characters blanked and
 /// cut to `max` bytes; allocated in `a`.
 pub fn lastLine(gpa: Allocator, a: Allocator, path: []const u8, max: usize) []const u8 {
-    const tail = sys.readTail(gpa, path, 4096) catch return "";
+    const lines = lastLines(gpa, a, path, 1, max);
+    return if (lines.len == 0) "" else lines[0];
+}
+
+/// The last `n` non-empty lines of a file, oldest first, with control
+/// characters blanked and each cut to `max` bytes; allocated in `a`.
+pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: usize) []const []const u8 {
+    const tail = sys.readTail(gpa, path, 4096) catch return &.{};
     defer gpa.free(tail);
-    var end = tail.len;
-    while (end > 0 and (tail[end - 1] == '\n' or tail[end - 1] == '\r' or tail[end - 1] == ' ')) end -= 1;
-    const start = if (std.mem.lastIndexOfScalar(u8, tail[0..end], '\n')) |p| p + 1 else 0;
-    const out = a.dupe(u8, tail[start..end][0..@min(end - start, max)]) catch return "";
-    for (out) |*c| if (c.* < 0x20 or c.* == 0x7f) {
-        c.* = ' ';
-    };
-    return out;
+    var found: std.ArrayList([]const u8) = .empty;
+    var it = std.mem.splitBackwardsScalar(u8, tail, '\n');
+    while (it.next()) |raw| {
+        if (found.items.len == n) break;
+        const line = std.mem.trimEnd(u8, raw, " \r");
+        if (line.len == 0) continue;
+        const out = a.dupe(u8, line[0..@min(line.len, max)]) catch break;
+        for (out) |*c| if (c.* < 0x20 or c.* == 0x7f) {
+            c.* = ' ';
+        };
+        found.append(a, out) catch break;
+    }
+    std.mem.reverse([]const u8, found.items);
+    return found.items;
 }
 
 /// The latest output line of an attempt: its standard error, else its
@@ -377,7 +423,7 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
 /// Shows the newest launch: interactively when both standard input and
 /// output are terminals and `once` is not set; otherwise as text, refreshed
 /// every `interval_ms` until the launch finishes, or once.
-pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_ms: u64) !bool {
+pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
     var launch_arena = std.heap.ArenaAllocator.init(gpa);
     defer launch_arena.deinit();
     const rec = try records.recordsDir(launch_arena.allocator(), root);
@@ -387,8 +433,8 @@ pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_
     };
     var tracker = try Tracker.init(gpa, dir);
     defer tracker.deinit();
-    if (!once and tui.isTerminal(0) and tui.isTerminal(1)) return tui.run(gpa, &tracker, interval_ms);
-    const tty = tui.isTerminal(1);
+    if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tracker, interval_ms, color);
+    const tty = term.isTerminal(1);
     var obuf: [16384]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
@@ -441,8 +487,133 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     }
 }
 
-/// Prints the newest launch's summary, or its live view while it runs.
-pub fn status(gpa: Allocator, io: std.Io, root: []const u8) !bool {
+/// Writes a readable summary of an ended launch from its records: how it
+/// ended and how long it took, the counts, its slowest rules or its
+/// failures, where its records are, and what to run next.
+pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, color: bool) !void {
+    const s: term.Style = .{ .on = color };
+    const text = try sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), 1 << 20);
+    defer gpa.free(text);
+    const v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always });
+    const outcome = str(v, "status") orelse "?";
+    const elapsed = float(v, "elapsed_s") orelse 0;
+    const counts = if (v == .object) v.object.get("counts") else null;
+    const count = struct {
+        fn of(c: ?std.json.Value, k: []const u8) u64 {
+            const o = c orelse return 0;
+            return if (int(o, k)) |n| @intCast(n) else 0;
+        }
+    }.of;
+    const completed = count(counts, "completed");
+    const reused = count(counts, "reused");
+    const failed = count(counts, "failed");
+    const blocked = count(counts, "blocked");
+    const cancelled = count(counts, "cancelled");
+    const not_started = count(counts, "not_started");
+    const selected = if (int(v, "selected")) |n| @as(u64, @intCast(n)) else 0;
+    // The label column holds the outcome badge and one space after it.
+    const col = @max(outcome.len + 3, 10);
+    const label = struct {
+        fn put(wr: *std.Io.Writer, st: term.Style, width: usize, name: []const u8) !void {
+            try wr.print(" {s}{s}{s}", .{ st.dim(), name, st.reset() });
+            try wr.splatByteAll(' ', width -| name.len);
+        }
+    }.put;
+
+    const badge = if (std.mem.eql(u8, outcome, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, outcome, "interrupted")) "\x1b[45;30;1m" else "\x1b[41;97;1m";
+    if (color) {
+        try w.print(" {s} {s} \x1b[0m", .{ badge, outcome });
+        try w.splatByteAll(' ', col - (outcome.len + 2));
+    } else try label(w, s, col, outcome);
+    var dur: [32]u8 = undefined;
+    const took = std.fmt.bufPrint(&dur, "{d:.1} s", .{elapsed}) catch "";
+    if (std.mem.eql(u8, outcome, "refused")) {
+        try w.print("{s}\n", .{str(v, "error") orelse ""});
+    } else if (std.mem.eql(u8, outcome, "completed")) {
+        try w.print("{d} rules in {s}: {d} ran, {d} reused", .{ selected, took, completed, reused });
+        if (cancelled > 0) try w.print(", {d} stopped", .{cancelled});
+        try w.writeAll("\n");
+    } else {
+        try w.print("after {s}: {d} completed, {d} reused", .{ took, completed, reused });
+        if (failed > 0) try w.print(", {s}{d} failed{s}", .{ s.red(), failed, s.reset() });
+        if (blocked > 0) try w.print(", {d} blocked", .{blocked});
+        if (cancelled > 0) try w.print(", {d} cancelled", .{cancelled});
+        if (not_started > 0) try w.print(", {d} not started", .{not_started});
+        try w.writeAll("\n");
+        if (str(v, "error")) |e| {
+            try label(w, s, col, "error");
+            try w.print("{s}{s}{s}\n", .{ s.red(), e, s.reset() });
+        }
+    }
+
+    // The last attempt of each rule, from the attempt records.
+    const rows = report.attempts(gpa, a, launch_dir) catch &.{};
+    var last: std.ArrayList(report.Attempt) = .empty;
+    for (rows, 0..) |r, i| {
+        if (i + 1 < rows.len and std.mem.eql(u8, rows[i + 1].rule, r.rule)) continue;
+        try last.append(a, r);
+    }
+    // Up to five failures, their reasons aligned after the longest name.
+    const max_failures = 5;
+    var failures: usize = 0;
+    var name_w: usize = 0;
+    for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
+        if (failures < max_failures) name_w = @max(name_w, @min(r.rule.len, 40));
+        failures += 1;
+    };
+    var shown: usize = 0;
+    for (last.items) |r| {
+        if (std.mem.eql(u8, r.status, "completed")) continue;
+        if (shown == max_failures) break;
+        try label(w, s, col, if (shown == 0) "failures" else "");
+        try w.print("{s}{s}{s}", .{ s.bold(), r.rule, s.reset() });
+        try w.splatByteAll(' ', name_w -| r.rule.len + 2);
+        try w.print("{s}{s}{s}\n", .{ s.red(), r.reason, s.reset() });
+        // The attempt's last error line, unless the reason already holds it.
+        const said = if (r.dir.len == 0) "" else lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "stderr.log" }), 160);
+        if (said.len > 0 and std.mem.indexOf(u8, r.reason, said) == null) {
+            try label(w, s, col, "");
+            try w.splatByteAll(' ', name_w + 2);
+            try w.print("{s}| {s}{s}\n", .{ s.dim(), said, s.reset() });
+        }
+        shown += 1;
+    }
+    if (failures > shown) {
+        try label(w, s, col, "");
+        try w.print("and {d} more; workz report lists every attempt\n", .{failures - shown});
+    }
+    if (shown == 0 and last.items.len > 0) {
+        std.mem.sort(report.Attempt, last.items, {}, struct {
+            fn gt(_: void, x: report.Attempt, y: report.Attempt) bool {
+                return x.wall_s > y.wall_s;
+            }
+        }.gt);
+        try label(w, s, col, "slowest");
+        for (last.items[0..@min(last.items.len, 3)], 0..) |r, i| try w.print("{s}{s} {d:.1} s", .{ if (i == 0) "" else ", ", r.rule, r.wall_s });
+        try w.writeAll("\n");
+    }
+    try label(w, s, col, "records");
+    try w.print("{s}\n", .{shownPath(a, launch_dir)});
+    try label(w, s, col, "next");
+    if (std.mem.eql(u8, outcome, "completed")) {
+        try w.print("{s}workz report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
+        try label(w, s, col, "");
+        try w.print("{s}workz report --format html > report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
+    } else if (std.mem.eql(u8, outcome, "refused")) {
+        try w.writeAll("fix the cause above and run the same command again\n");
+    } else {
+        for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
+            try w.print("{s}workz logs {s}{s}   the output of the failed attempt\n", .{ s.cyan(), r.rule, s.reset() });
+            try label(w, s, col, "");
+            break;
+        };
+        try w.writeAll("run the same command again: rules that completed are reused\n");
+    }
+}
+
+/// Prints the newest launch's summary, or its live view while it runs: with
+/// `human`, the readable summary, else its `summary.json` as written.
+pub fn status(gpa: Allocator, io: std.Io, root: []const u8, human: bool, color: bool) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -452,10 +623,17 @@ pub fn status(gpa: Allocator, io: std.Io, root: []const u8) !bool {
         return false;
     };
     const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), 1 << 20) catch |err| switch (err) {
-        error.FileNotFound => return watch(gpa, io, root, true, 0),
+        error.FileNotFound => return watch(gpa, io, root, true, 0, false),
         else => return err,
     };
     defer gpa.free(summary);
+    if (human) {
+        var buf: [16384]u8 = undefined;
+        var out = std.Io.File.stdout().writerStreaming(io, &buf);
+        try writeSummary(gpa, a, &out.interface, dir, color);
+        try out.interface.flush();
+        return true;
+    }
     try sys.writeAll(1, summary);
     return true;
 }

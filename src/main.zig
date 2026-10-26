@@ -121,8 +121,9 @@ const commands = [_]Command{
         .about =
         \\Runs the selected rules that are not reusable, within a budget of threads,
         \\memory and jobs, each attempt in its own cgroup inside a systemd user scope.
-        \\Progress goes to standard error and the summary to standard output; every
-        \\attempt is recorded in .workz/ in the working directory.
+        \\Progress goes to standard error and the summary to standard output, as text
+        \\on a terminal and as JSON otherwise. Every attempt is recorded in .workz/ in
+        \\the working directory.
         ,
         .options = &.{
             .{ .flag = "--max-threads N", .desc = "CPU budget in threads (default: every online CPU)" },
@@ -139,6 +140,8 @@ const commands = [_]Command{
             .{ .flag = "--slice NAME.slice", .desc = "place the run's scope in this systemd slice" },
             .{ .flag = "--no-isolation", .desc = "no scope, cgroups or network namespace" },
             .{ .flag = "-q, --quiet", .desc = "no progress lines; failures still print" },
+            .{ .flag = "--json", .desc = "print the summary as JSON, also on a terminal" },
+            .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
         \\workz run workflow.toml --max-threads 16 --max-memory 60G
@@ -191,11 +194,13 @@ const commands = [_]Command{
         .group = .watch,
         .common = .workdir,
         .about =
-        \\Prints the summary of the newest launch, its summary.json, once it has ended,
-        \\or a plain view while it runs.
+        \\Prints the summary of the newest launch once it has ended, or a plain view
+        \\while it runs. On a terminal the summary is a short readable report;
+        \\elsewhere, and with --json, it is the launch's summary.json.
         ,
         .options = &.{
             .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default 10)" },
+            .{ .flag = "--json", .desc = "print summary.json, also on a terminal" },
         },
         .examples =
         \\workz status
@@ -888,6 +893,7 @@ const WatchExtra = struct {
     once: *bool,
     interval: *u64,
     history: ?*?usize = null,
+    json: ?*bool = null,
     fn option(self: WatchExtra, arg: []const u8, value: ?[]const u8) !usize {
         if (self.history) |h| if (std.mem.eql(u8, arg, "--history")) {
             // An optional count follows.
@@ -896,6 +902,10 @@ const WatchExtra = struct {
                 return 2;
             } else |_| {};
             h.* = 10;
+            return 1;
+        };
+        if (self.json) |j| if (std.mem.eql(u8, arg, "--json")) {
+            j.* = true;
             return 1;
         };
         if (std.mem.eql(u8, arg, "--once")) {
@@ -916,7 +926,8 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     var once = summary;
     var interval: u64 = 1000;
     var history: ?usize = null;
-    if (try parseArgs(c, args, &common, WatchExtra{ .once = &once, .interval = &interval, .history = if (summary) &history else null })) |e| return e;
+    var json = false;
+    if (try parseArgs(c, args, &common, WatchExtra{ .once = &once, .interval = &interval, .history = if (summary) &history else null, .json = if (summary) &json else null })) |e| return e;
     const root = (try rootOf(c, &common)) orelse return .usage;
     if (history) |n| {
         const rec = try workz.records.recordsDir(c.a, root);
@@ -927,7 +938,7 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
         try w.interface.flush();
         return .ok;
     }
-    const ok = if (summary) try monitor.status(c.gpa, c.io, root) else try monitor.watch(c.gpa, c.io, root, once, @max(interval, 100));
+    const ok = if (summary) try monitor.status(c.gpa, c.io, root, !json and term.isTerminal(1), term.colorOn(1, c.env)) else try monitor.watch(c.gpa, c.io, root, once, @max(interval, 100), term.colorOn(1, c.env));
     return if (ok) .ok else .failed;
 }
 
@@ -1036,8 +1047,16 @@ const RunExtra = struct {
             o.quiet = true;
             return 1;
         }
+        if (eq(u8, arg, "--json")) {
+            o.json = true;
+            return 1;
+        }
+        if (eq(u8, arg, "--no-color")) {
+            o.color = false;
+            return 1;
+        }
         // Accepted for compatibility with oxo-local command lines.
-        if (eq(u8, arg, "--resume-failed") or eq(u8, arg, "--provenance") or eq(u8, arg, "--json") or eq(u8, arg, "--no-color")) return 1;
+        if (eq(u8, arg, "--resume-failed") or eq(u8, arg, "--provenance")) return 1;
         const takes_value = for ([_][]const u8{ "-j", "--jobs", "--max-threads", "--max-memory", "-r", "--retry", "--timeout", "--grace", "--input-manifest", "--slice", "--pass-env" }) |name| {
             if (eq(u8, arg, name)) break true;
         } else false;

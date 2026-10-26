@@ -645,7 +645,7 @@ test "the watch selection moves, scrolls and survives filters" {
     try testing.expect(ui.quit);
 }
 
-test "a watch frame fits the terminal width and lists running rules first" {
+test "[unit] - [watch]: a frame fits the terminal width, shortens long names in the middle and lists running rules first" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("events.jsonl", ev_start ++ ev_rules);
@@ -674,7 +674,7 @@ test "a watch frame fits the terminal width and lists running rules first" {
             cols += 1;
         }
         try testing.expect(cols <= 40);
-        for ([_][]const u8{ "align_sample", "merge", "trim" }, 0..) |name, k| if (std.mem.indexOf(u8, line, name) != null) {
+        for ([_][]const u8{ "align...name", "merge", "trim" }, 0..) |name, k| if (std.mem.indexOf(u8, line, name) != null) {
             order[found] = k;
             found += 1;
         };
@@ -834,4 +834,151 @@ test "the watch lists every selected rule and searches and sorts them" {
     try testing.expectEqual(@as(?usize, 2), ui.action.?.rule);
     ui.key(.{ .char = 'i' }, &rows, 10);
     try testing.expectEqual(tui.Mode.details, ui.mode);
+}
+
+/// Columns of `line` outside escape sequences.
+fn visibleColumns(line: []const u8) usize {
+    var cols: usize = 0;
+    var i: usize = 0;
+    while (i < line.len) : (i += 1) {
+        if (line[i] == 0x1b) {
+            i += 1;
+            while (i < line.len and (line[i] < 0x40 or line[i] > 0x7e or line[i] == '[')) i += 1;
+            continue;
+        }
+        cols += 1;
+    }
+    return cols;
+}
+
+test "[unit] - [watch]: without color a frame has no SGR sequences and draws bars with characters" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.monitor.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var ui: workz.tui.Ui = .{};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const now = workz.monitor.parseTime("2026-01-01T00:00:05.000Z").?;
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 120, 20, now, false);
+    const frame = out.written();
+    // Only cursor, clear and erase sequences: no color (SGR ends in 'm').
+    var i: usize = 0;
+    while (std.mem.indexOfScalarPos(u8, frame, i, 0x1b)) |at| : (i = at + 1) {
+        var j = at + 2;
+        while (j < frame.len and (frame[j] < 0x40 or frame[j] > 0x7e)) j += 1;
+        try testing.expect(frame[j] != 'm');
+    }
+    // The progress bar: one of three rules done is none here; one failed.
+    try testing.expect(std.mem.indexOf(u8, frame, " progress  [") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, "!") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, "1 failed") != null);
+}
+
+test "[unit] - [watch]: with color a frame keeps its width and shows sampled memory against the request" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.monitor.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    const r = &t.rules.items[0];
+    r.memory_mib = 1536;
+    r.threads = 3;
+    r.live_memory = 202 << 20;
+    r.live_cores = 2.9;
+    var ui: workz.tui.Ui = .{ .color = true };
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const now = workz.monitor.parseTime("2026-01-01T00:00:05.000Z").?;
+    for ([_]usize{ 50, 80, 120, 200 }) |width| {
+        out.clearRetainingCapacity();
+        try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, width, 20, now, false);
+        var lines = std.mem.splitSequence(u8, out.written(), "\r\n");
+        while (lines.next()) |line| try testing.expect(visibleColumns(line) <= width);
+        if (width >= 120) {
+            try testing.expect(std.mem.indexOf(u8, out.written(), "202M/1.5G") != null);
+            try testing.expect(std.mem.indexOf(u8, out.written(), "2.9/3") != null);
+        }
+    }
+}
+
+test "[unit] - [watch]: X cancels the launch only when pressed again within three seconds" {
+    const tui = workz.tui;
+    var ui: tui.Ui = .{};
+    const rows = [_]usize{0};
+    ui.clock_ns = 100 * std.time.ns_per_s;
+    ui.key(.{ .char = 'X' }, &rows, 5);
+    try testing.expectEqual(@as(?tui.Action, null), ui.action);
+    try testing.expect(std.mem.indexOf(u8, ui.message[0..ui.message_len], "again") != null);
+    ui.clock_ns += 4 * std.time.ns_per_s;
+    ui.key(.{ .char = 'X' }, &rows, 5);
+    try testing.expectEqual(@as(?tui.Action, null), ui.action);
+    ui.clock_ns += std.time.ns_per_s;
+    ui.key(.{ .char = 'X' }, &rows, 5);
+    try testing.expectEqualStrings("cancel", ui.action.?.cmd);
+}
+
+test "[unit] - [watch]: ? shows the keys and returns to the view it was opened from" {
+    const tui = workz.tui;
+    var ui: tui.Ui = .{ .mode = .timeline };
+    const rows = [_]usize{0};
+    ui.key(.{ .char = '?' }, &rows, 5);
+    try testing.expectEqual(tui.Mode.help, ui.mode);
+    ui.key(.{ .char = 'j' }, &rows, 5);
+    try testing.expectEqual(tui.Mode.help, ui.mode);
+    ui.key(.{ .char = 'q' }, &rows, 5);
+    try testing.expectEqual(tui.Mode.timeline, ui.mode);
+    try testing.expect(!ui.quit);
+}
+
+test "[unit] - [watch]: the selection follows the top row until a key moves it" {
+    const tui = workz.tui;
+    var ui: tui.Ui = .{};
+    ui.settle(&.{ 3, 1, 2 }, 5);
+    try testing.expectEqual(@as(?usize, 3), ui.selected);
+    // Rows reorder as rules finish: the untouched selection stays on top.
+    ui.settle(&.{ 1, 2, 3 }, 5);
+    try testing.expectEqual(@as(?usize, 1), ui.selected);
+    ui.key(.down, &.{ 1, 2, 3 }, 5);
+    try testing.expectEqual(@as(?usize, 2), ui.selected);
+    // Once moved, it stays on its rule.
+    ui.settle(&.{ 2, 3, 1 }, 5);
+    try testing.expectEqual(@as(?usize, 2), ui.selected);
+    ui.settle(&.{ 3, 1, 2 }, 5);
+    try testing.expectEqual(@as(?usize, 2), ui.selected);
+}
+
+test "[unit] - [run]: the readable summary names each failure with its last error line and the next command" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try s.dir("launch");
+    _ = try s.dir("launch/attempts");
+    _ = try s.dir("launch/attempts/align_S1");
+    _ = try s.dir("launch/attempts/align_S1/001");
+    _ = try s.dir("launch/attempts/prep");
+    _ = try s.dir("launch/attempts/prep/001");
+    _ = try s.file("launch/summary.json",
+        \\{"status":"failed","elapsed_s":3.4,"selected":4,"counts":{"completed":2,"reused":0,"failed":1,"blocked":1,"cancelled":0,"not_started":0}}
+    );
+    _ = try s.file("launch/attempts/prep/001/record.json",
+        \\{"rule":"prep","attempt":1,"status":"completed","reason":"","wall_s":1.0}
+    );
+    _ = try s.file("launch/attempts/align_S1/001/record.json",
+        \\{"rule":"align_S1","attempt":1,"status":"failed","reason":"exited with status 3","wall_s":1.2}
+    );
+    _ = try s.file("launch/attempts/align_S1/001/stderr.log", "reading index\nalign: reference index is truncated\n\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.monitor.writeSummary(testing.allocator, arena.allocator(), &out.writer, launch, false);
+    const text = out.written();
+    try testing.expect(std.mem.indexOfScalar(u8, text, 0x1b) == null);
+    try testing.expect(std.mem.startsWith(u8, text, " failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "\n failures  align_S1  exited with status 3\n                     | align: reference index is truncated\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n next      workz logs align_S1") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "prep") == null);
 }

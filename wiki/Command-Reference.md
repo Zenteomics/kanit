@@ -58,24 +58,26 @@ Prints the selected rules and their dependencies in Graphviz DOT form, one box p
 workz run WORKFLOW [options]
 ```
 
-Runs the selected rules that are not reusable. Progress goes to standard error; the summary goes to standard output as one line of JSON ([Running workflows](Running-Workflows.md)).
+Runs the selected rules that are not reusable. Progress goes to standard error and the summary to standard output: a short report on a terminal, one line of JSON otherwise ([Running workflows](Running-Workflows.md)).
 
-| Option             | Argument  | Default            | Meaning                                       |
-| ------------------ | --------- | ------------------ | --------------------------------------------- |
-| `--max-threads`    | N         | online CPUs        | thread budget                                 |
-| `--max-memory`     | SIZE      | 3/4 of the memory  | memory budget, such as `60G`                  |
-| `-j`, `--jobs`     | N         | `--max-threads`    | most tasks at once                            |
-| `-k`, `--keep-going` |         | off                | run independent rules after a failure         |
-| `-r`, `--retry`    | N         | 0                  | retries of rules that set none, 0 to 3        |
-| `--timeout`        | DURATION  | none               | limit of rules that set none, such as `2h`    |
-| `--rerun`          |           | off                | run every selected rule                       |
-| `--rerun-rule`     | RULE      |                    | run RULE even if reusable; repeatable         |
-| `--input-manifest` | FILE      |                    | check external inputs against digests         |
-| `--pass-env`       | NAME      |                    | pass and key a variable; repeatable           |
-| `--grace`          | SECONDS   | 10                 | wait before killing a stopped task            |
-| `--slice`          | NAME      |                    | put the run's scope in the slice `NAME.slice` |
-| `--no-isolation`   |           | off                | no scope, cgroups or network namespace        |
-| `-q`, `--quiet`    |           | off                | no progress lines; failures still print       |
+| Option               | Argument | Default           | Meaning                                       |
+| -------------------- | -------- | ----------------- | --------------------------------------------- |
+| `--max-threads`      | N        | online CPUs       | thread budget                                 |
+| `--max-memory`       | SIZE     | 3/4 of the memory | memory budget, such as `60G`                  |
+| `-j`, `--jobs`       | N        | `--max-threads`   | most tasks at once                            |
+| `-k`, `--keep-going` |          | off               | run independent rules after a failure         |
+| `-r`, `--retry`      | N        | 0                 | retries of rules that set none, 0 to 3        |
+| `--timeout`          | DURATION | none              | limit of rules that set none, such as `2h`    |
+| `--rerun`            |          | off               | run every selected rule                       |
+| `--rerun-rule`       | RULE     |                   | run RULE even if reusable; repeatable         |
+| `--input-manifest`   | FILE     |                   | check external inputs against digests         |
+| `--pass-env`         | NAME     |                   | pass and key a variable; repeatable           |
+| `--grace`            | SECONDS  | 10                | wait before killing a stopped task            |
+| `--slice`            | NAME     |                   | put the run's scope in the slice `NAME.slice` |
+| `--no-isolation`     |          | off               | no scope, cgroups or network namespace        |
+| `-q`, `--quiet`      |          | off               | no progress lines; failures still print       |
+| `--json`             |          | off               | JSON summary, also on a terminal              |
+| `--no-color`         |          | off               | no colors on a terminal                       |
 
 - Sizes take `K`, `M`, `G` or `T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`.
 - `--slice` takes the full unit name, ending in `.slice`.
@@ -97,10 +99,15 @@ Shows the newest launch. On a terminal it is interactive ([keys](Watching-a-Laun
 ## status
 
 ```text
-workz status [WORKFLOW] [--history [N]]
+workz status [WORKFLOW] [--history [N]] [--json]
 ```
 
-Prints the newest launch's `summary.json`, or its plain view while it runs. `--history [N]` prints one line for each of the last N launches instead (default 10).
+Prints the newest launch's summary once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view.
+
+| Option      | Argument | Default | Meaning                                      |
+| ----------- | -------- | ------- | -------------------------------------------- |
+| `--history` | [N]      | 10      | one line for each of the last N launches     |
+| `--json`    |          | off     | print `summary.json`, also on a terminal     |
 
 ## logs
 
@@ -136,13 +143,13 @@ workz report [WORKFLOW] [options]
 
 Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 
-| Option          | Argument          | Default | Meaning                                       |
-| --------------- | ----------------- | ------- | --------------------------------------------- |
-| `--launch`      | ID                | newest  | the launch to report on                       |
-| `--format`      | `tsv`, `json`, `html` | `tsv` | attempt table, or a self-contained page     |
-| `--bottlenecks` |                   |         | what limited the launch                       |
-| `--suggest`     |                   |         | suggested threads and memory per kind         |
-| `--compare`     | OTHER             |         | compare with a launch ID or directory         |
+| Option          | Argument              | Default | Meaning                                 |
+| --------------- | --------------------- | ------- | --------------------------------------- |
+| `--launch`      | ID                    | newest  | the launch to report on                 |
+| `--format`      | `tsv`, `json`, `html` | `tsv`   | attempt table, or a self-contained page |
+| `--bottlenecks` |                       |         | what limited the launch                 |
+| `--suggest`     |                       |         | suggested threads and memory per kind   |
+| `--compare`     | OTHER                 |         | compare with a launch ID or directory   |
 
 `--suggest`, `--compare` and `--bottlenecks` each print one report; given together, the first in that order wins. `--suggest` accepts `--format json`.
 
@@ -201,4 +208,4 @@ Run 'workz help run' for its options.
 - `2`: an invalid command line or workflow: an unknown command or option, a missing or invalid value, a rule or target that does not exist, or a launch refused before it started because of the workflow or its budget.
 - `130`: `run` was interrupted, or cancelled with `workz control cancel`.
 
-`run` also accepts, and ignores, `--resume-failed`, `--provenance`, `--json` and `--no-color`, for command lines written for oxo-local.
+`run` also accepts, and ignores, `--resume-failed` and `--provenance`, for command lines written for oxo-local.

@@ -2,7 +2,7 @@
 
 workz runs a prepared graph of file-producing rules on one Linux workstation. It starts every rule whose inputs are ready as long as the machine's CPU and memory budget allows, enforces each rule's memory and CPU request with its own cgroup, reuses work only when nothing it depends on has changed, and keeps a complete record of every attempt.
 
-![The workz watch view of a running launch: rules running with their memory, rules waiting for threads, completed and pending rules, and the budget in use.](wiki/images/watch.png)
+![The workz watch view of a running launch: gauges for progress, threads and memory against the budget, then every rule, with the running ones first showing their CPU use and a memory bar against their request.](wiki/images/watch.png)
 
 - **Explicit graphs.** A TOML file lists rules with their inputs, outputs, command and request; a script generates it for any number of samples.
 - **Fits the machine.** Rules start in critical-path order within a thread, memory and job budget, with resource groups for limits such as disk bandwidth.

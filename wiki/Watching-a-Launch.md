@@ -4,33 +4,46 @@ While a launch runs, and after it ends, three commands show it: `watch` for the 
 
 Run `workz watch` in the working directory, or `workz watch path/to/workflow.toml` from elsewhere, while `workz run` works in another terminal:
 
-![The workz watch view of a launch 18 seconds in: four rules running with their current and peak memory, six waiting for threads, eight completed and seven pending; the header shows 10 of 10 threads reserved and a shared genome index holding 601.6 MiB.](images/watch.png)
+![The workz watch view of a launch 15 seconds in: a progress bar at 7 of 25 rules done, gauges for 10 of 10 threads reserved and 4.6 of 6.0 GiB of memory, a shared genome index holding 602 MiB, and a table with four running rules first, each with its CPU use and a memory bar against its request.](images/watch.png)
 
-The header gives the launch ID, its status and elapsed time, how many rules are done, running, waiting, pending and failed, the threads and memory reserved against the budget, the CPU cores and memory the run uses, and one line for each shared input with the memory it holds. Below it is a table of every selected rule:
+The header holds four gauges:
 
-- **STATUS** and **RULE**: running rules first, then waiting, failed, done and pending ones.
+- **progress**: a bar of the selected rules, split into done, running, waiting and failed, with the count of each.
+- **threads**: the threads reserved against the budget, and the CPU cores the run keeps busy.
+- **memory**: the memory reserved against the budget, and the memory the run uses.
+- **shared**: one line for each shared input, with its state and the memory it holds.
+
+Below it is a table of every selected rule, running rules first, then waiting, failed, done and pending ones:
+
+- **STATUS** and **RULE**: a long name is shortened in the middle, so `align_sample_0042_lane_3` keeps both of its ends.
 - **ATT**: the attempt number.
 - **TIME**: how long the rule has run, or how long it has waited to start.
-- **MEM** and **PEAK**: the memory the running attempt uses now and its peak so far, read live from its cgroup; for finished rules, the recorded peak.
+- **CPU**: the cores the attempt uses against the threads it requested, such as `2.9/3`; for a finished rule, the average over its run.
+- **MEMORY**: for a running rule, a bar and the memory its cgroup uses now against its request, such as `203M/1.5G`; the bar turns yellow from 70% of the request and red from 90%. For a finished rule, its recorded peak against its request.
 - **LAST OUTPUT / REASON**: the last line the running attempt wrote to standard error, or to standard output if it wrote nothing to standard error; for other rules, why the rule waits or failed.
 
-The view stays open after the launch ends, so you can look through it; <kbd>q</kbd> leaves.
+On a narrow terminal the memory bar goes first, then the CPU column, then the memory value. The selection stays on the top row until you move it, so the busiest rule stays selected as rules finish. The view stays open after the launch ends, so you can look through it; <kbd>q</kbd> leaves.
+
+> [!TIP]
+> Set `NO_COLOR=1`, or use a terminal with `TERM=dumb`, for a view without colors: bars are then drawn with characters, `#` for done and `>` for running.
 
 ### Keys
 
+<kbd>?</kbd> shows every key in the view itself.
+
 - <kbd>j</kbd> and <kbd>k</kbd>, or the arrow keys, move the selection; <kbd>PgUp</kbd>, <kbd>PgDn</kbd>, <kbd>g</kbd> and <kbd>G</kbd> jump.
-- <kbd>Enter</kbd> follows the selected attempt's standard error as it grows; <kbd>o</kbd> switches to standard output.
-- <kbd>i</kbd> shows the selected rule in detail: its request, when it became ready and started, its CPU time and peak, and while it runs, its cgroup's current memory, near-limit events and stall times.
+- <kbd>Enter</kbd> follows the selected attempt's standard error as it grows, with lines that mention an error in red and a warning in yellow; <kbd>o</kbd> switches to standard output.
+- <kbd>i</kbd> shows the selected rule in detail: its request, when it became ready and started, gauges of its CPU and memory against the request, how often it reached its memory limit, its stall times, and its last lines of output.
 - <kbd>t</kbd> draws a timeline of the launch.
 - <kbd>a</kbd> shows all rules, <kbd>r</kbd> running and retrying ones, <kbd>w</kbd> waiting and pending ones, <kbd>f</kbd> failed, blocked and cancelled ones, and <kbd>d</kbd> done ones.
 - <kbd>/</kbd> searches rule names; <kbd>Enter</kbd> keeps the search and <kbd>Esc</kbd> clears it.
 - <kbd>s</kbd> cycles the order: status, elapsed time, peak memory, name.
-- <kbd>S</kbd> stops the selected rule, <kbd>R</kbd> retries it, and <kbd>X</kbd> cancels the launch, as [`workz control`](Running-Workflows.md#steering-a-running-launch) does. <kbd>X</kbd> asks no confirmation.
+- <kbd>S</kbd> stops the selected rule and <kbd>R</kbd> retries it, as [`workz control`](Running-Workflows.md#steering-a-running-launch) does. <kbd>X</kbd> cancels the launch when pressed a second time within 3 s.
 - <kbd>q</kbd> or <kbd>Esc</kbd> goes back, or leaves from the table; <kbd>Ctrl</kbd>+<kbd>C</kbd> leaves.
 
 ### Timeline
 
-<kbd>t</kbd> draws every rule on one time axis: `.` while it waited to start, `>` while it runs, `=` when it ran and completed, `!` where it failed and `x` where it was cancelled.
+<kbd>t</kbd> draws every rule on one time axis, with ticks such as `30s`, `1m` and `1m30s`. A dotted stretch is the time a rule waited to start; then a bar shows its run, green when it completed, cyan while it runs, red where it failed and magenta where it was cancelled. Without colors the bar is drawn with `=`, `>`, `!` and `x`.
 
 ![The timeline of the same launch after it ended: qc rules wait while align rules with a higher priority run, and each count rule follows its alignment.](images/watch-timeline.png)
 
@@ -56,7 +69,18 @@ Failed rules follow under `FAILED`, each with its reason and the path of its sta
 
 ## status
 
-`workz status` prints the newest launch's summary once it has ended, the content `workz run` ends with, as indented JSON ([summary.json](Records.md#summaryjson)); while it runs, it prints the plain view above once.
+`workz status` prints the newest launch's summary once it has ended. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch directory, and the commands to look further:
+
+```text
+ failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked
+ failures  align_S1  exited with status 3
+                     | align: reference index is truncated
+ records   .workz/launches/20261026T051434.360-95f2e7d0
+ next      workz logs align_S1   the output of the failed attempt
+           run the same command again: rules that completed are reused
+```
+
+A launch that completed lists its three slowest rules instead of failures. Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written. While the launch runs, it prints the plain view above once.
 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 

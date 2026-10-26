@@ -822,6 +822,9 @@ if command -v tmux > /dev/null; then
 # Interactive watch on a terminal: a private tmux server gives it a real
 # terminal; the screen is read back with capture-pane.
 tm() { tmux -L "workz-check-$$" -f /dev/null "$@"; }
+# start ARGS...: a new detached session, tried again while a server whose last
+# session just ended is still shutting down.
+start() { for _ in $(seq 30); do tm new-session -d "$@" 2> /dev/null && return 0; sleep 0.1; done; tm new-session -d "$@"; }
 # Each view gets its own session: a finished one can outlive its command briefly.
 screen() { tm capture-pane -p -t "$sess"; }
 # wait_for PATTERN: until the screen shows PATTERN, at most 5 s.
@@ -834,27 +837,27 @@ new watch-tty
 "$workz" run wf.toml "${iso[@]}" -q > s.json &
 runner=$!
 for _ in $(seq 50); do [ -d .workz/launches ] && break; sleep 0.1; done
-sess=w1; tm new-session -d -s "$sess" -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-check "the interactive view lists the running rule first with its last output" 'wait_for "^running    slow .*to-stderr" && screen | grep -q "reserved 1/4 threads, 64/2048 MiB"'
+sess=w1; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+check "the interactive view lists the running rule first with its last output" 'wait_for "running  *slow .*to-stderr" && screen | grep -q "1/4 reserved" && screen | grep -q "64M/2.0G reserved"'
 tm send-keys -t "$sess" Enter
-check "enter follows the selected attempt's standard error" 'wait_for "^slow  attempt 1  running  stderr" && screen | grep -q "^to-stderr"'
+check "enter follows the selected attempt's standard error" 'wait_for "slow .*attempt 1  running  stderr" && screen | grep -q "^to-stderr"'
 tm send-keys -t "$sess" o
 check "o switches the log to standard output" 'wait_for "^to-stdout"'
 tm send-keys -t "$sess" q t
-check "t shows the timeline" 'wait_for "^slow  *>>>"'
+check "t shows the timeline" 'wait_for "slow  *>>>"'
 wait $runner
-check "the view follows the launch to its end and stays open" 'wait_for "completed" && wait_for "^slow  *===="'
+check "the view follows the launch to its end and stays open" 'wait_for "completed" && wait_for "slow  *===="'
 tm send-keys -t "$sess" q q
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "q leaves the view with status 0 and the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt && grep -q " echo " stty.txt'
 rm -f exit.txt stty.txt
-sess=w2; tm new-session -d -s "$sess" -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-wait_for "workz watch" && tm send-keys -t "$sess" C-c
+sess=w2; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+wait_for "workz .*launch" && tm send-keys -t "$sess" C-c
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "an interrupt key leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
 rm -f exit.txt stty.txt
-sess=w3; tm new-session -d -s "$sess" -x 100 -y 14 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-wait_for "workz watch"
+sess=w3; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
+wait_for "workz .*launch"
 kill -TERM "$(pgrep -P "$(tm display-message -p -t "$sess" '#{pane_pid}')" -x workz)"
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "SIGTERM leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
@@ -867,16 +870,37 @@ new watch-control
 "$workz" run wf.toml "${iso[@]}" --grace 1 -q > s.json 2> /dev/null &
 runner=$!
 for _ in $(seq 50); do [ -d .workz/launches ] && break; sleep 0.1; done
-sess=w4; tm new-session -d -s "$sess" -x 120 -y 16 "\"$workz\" watch -d . --interval 200; echo \$? > exit.txt"
-check "the view lists a rule that has yet to start as pending" 'wait_for "^pending    after"'
+sess=w4; start -s "$sess" -x 120 -y 16 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt"
+check "the view lists a rule that has yet to start as pending" 'wait_for "pending  *after"'
 tm send-keys -t "$sess" / l o n g Enter
-check "/ keeps the rules whose name matches" 'wait_for "^running    long" && ! screen | grep -q "^pending    after"'
+check "/ keeps the rules whose name matches" 'wait_for "running  *long" && ! screen | grep -q "pending  *after"'
 tm send-keys -t "$sess" i
-check "i shows the selected rule's request and live counters" 'wait_for "^request    1 threads, 64 MiB" && screen | grep -q "^memory "'
+check "i shows the selected rule's request and live counters" 'wait_for "request  *1 threads, 64M" && screen | grep -q "^  memory  "'
 tm send-keys -t "$sess" S
 wait $runner
 check "S stops the selected running rule through the control file" 'jq -e "select(.event == \"control\" and .command == \"stop\" and .rule == \"long\")" "$(last_launch)/events.jsonl" > /dev/null && [ "$(status_of s.json cancelled)" = 1 ]'
 tm send-keys -t "$sess" q q
+
+# run and status on a terminal: event lines, a failure's error lines and a
+# readable summary; --json and --no-color restore the output for scripts.
+new run-tty
+{ header run-tty
+  rule ok '[]' '["ok.txt"]' '"touch ok.txt"'
+  rule bad '[]' '["bad.txt"]' '"echo first-error-line >&2; echo last-error-line >&2; exit 3"'
+  rule after '["bad.txt"]' '["after.txt"]' '"touch after.txt"'
+} > wf.toml
+sess=r1; start -s "$sess" -x 120 -y 20 "NO_COLOR=1 \"$workz\" run wf.toml ${iso[*]} -k; echo \$? > exit.txt; sleep 30"
+for _ in $(seq 100); do [ -s exit.txt ] && break; sleep 0.1; done
+check "on a terminal run prints a failure's last error lines, the blocked rules and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "failed  *bad: exited with status 3$" && screen | grep -q "^ *| last-error-line" && screen | grep -q "blocked  *after: it needs a rule that did not complete" && screen | grep -q "^ failed  *after .* 1 completed, 0 reused, 1 failed, 1 blocked" && screen | grep -q "^ next  *workz logs bad" && ! screen | grep -q "{"'
+rm -f exit.txt
+sess=r2; start -s "$sess" -x 120 -y 20 "\"$workz\" status -d .; sleep 30"
+check "on a terminal status prints the readable summary" 'wait_for "^ failures  *bad  *exited with status 3" && screen | grep -q "^ *| last-error-line"'
+rm -f exit.txt
+# Wide enough that the JSON line does not wrap.
+sess=r3; start -s "$sess" -x 400 -y 20 "\"$workz\" run wf.toml ${iso[*]} -k --json --no-color; echo \$? > exit.txt; sleep 30"
+for _ in $(seq 100); do [ -s exit.txt ] && break; sleep 0.1; done
+esc=$(printf '\033')
+check "run --json --no-color prints the JSON summary without colors on a terminal" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "\"status\":\"failed\"" && ! tm capture-pane -e -p -t "$sess" | grep -qF "$esc"'
 
 tm kill-server 2> /dev/null
 rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"

@@ -12,7 +12,11 @@ workz run workflow.toml --max-threads 16 --max-memory 60G
 - `--retry N` and `--timeout DURATION` apply to rules that set no `retries` or `timeout` of their own.
 - `--quiet` drops the progress lines; failures still print.
 
-Progress goes to standard error, one line per start, completion and failure, prefixed with the count of finished rules. When the launch ends, workz prints its summary to standard output as one line of JSON, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)).
+On a terminal, `run` prints a line for each rule that completes, retries, fails or is blocked, and keeps one status line below them: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the names of the running rules. A failure's line is followed by the last lines of the attempt's standard error. When the launch ends, a short summary follows on standard output:
+
+![workz run on a terminal: one line for each completed rule, a retry of trim_S4 after a temporary failure, and a summary naming the three slowest rules, the launch directory and the reports to read next.](images/run.png)
+
+Off a terminal, such as in a script or a log file, each start, completion and failure is one plain line on standard error, prefixed with the count of finished rules, and the summary is one line of JSON on standard output, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)). `--json` prints the JSON summary on a terminal too, and `--no-color` or `NO_COLOR=1` turns colors off.
 
 Only one launch runs in a working directory at a time; a second one stops at once with `another run holds .../.workz/lock`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
 
@@ -56,20 +60,28 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 
 ## Failures
 
-An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this (paths shortened):
+An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-[0/5] started exits (attempt 1)
-[0/5] started too_big (attempt 1)
-[0/5] started no_output (attempt 1)
-[0/5] started slow (attempt 1)
-[1/5] failed exits: exited with status 1 (see .../attempts/exits/001/stderr.log)
-[2/5] failed no_output: exited 0 without output d.txt (see .../attempts/no_output/001/stderr.log)
-[4/5] failed too_big: out of memory: could not stay within its 64 MiB request (see .../attempts/too_big/001/stderr.log)
-[5/5] failed slow: timed out after 2 s (see .../attempts/slow/001/stderr.log)
+    1/5  failed     exits: exited with status 1
+                    | sort: cannot read: samples.tsv: No such file or directory
+    2/5  failed     no_output: exited 0 without output d.txt
+    3/5  blocked    after: it needs a rule that did not complete
+    4/5  failed     too_big: out of memory: could not stay within its 64 MiB request
+    5/5  failed     slow: timed out after 2 s
+
+ failed    after 2.0 s: 0 completed, 0 reused, 4 failed, 1 blocked
+ failures  exits      exited with status 1
+                      | sort: cannot read: samples.tsv: No such file or directory
+           no_output  exited 0 without output d.txt
+           slow       timed out after 2 s
+           too_big    out of memory: could not stay within its 64 MiB request
+ records   .workz/launches/20261026T052452.447-796d3243
+ next      workz logs exits   the output of the failed attempt
+           run the same command again: rules that completed are reused
 ```
 
-The fifth rule, which depends on `exits`, is blocked: it never starts, and the launch ends as `failed` with exit status 1. `workz logs exits` prints the failed command's output.
+The fifth rule, `after`, depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. Off a terminal, each failure line ends with the path of the attempt's standard error instead, such as `(see .../attempts/exits/001/stderr.log)`.
 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.

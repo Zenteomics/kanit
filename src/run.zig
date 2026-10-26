@@ -16,6 +16,8 @@ const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const container = @import("container.zig");
 const report = @import("report.zig");
+const monitor = @import("monitor.zig");
+const term = @import("term.zig");
 const Allocator = std.mem.Allocator;
 
 pub const version = @import("root.zig").version;
@@ -37,6 +39,10 @@ pub const Options = struct {
     pass_env: []const []const u8 = &.{},
     grace_s: u64 = 10,
     quiet: bool = false,
+    /// The summary as JSON even when standard output is a terminal.
+    json: bool = false,
+    /// Colors on a terminal; `NO_COLOR` and `TERM=dumb` also turn them off.
+    color: bool = true,
     /// systemd slice the isolated run's scope is placed in.
     slice: ?[]const u8 = null,
 
@@ -50,6 +56,17 @@ pub const Options = struct {
 pub const Outcome = enum(u8) { ok = 0, failed = 1, invalid = 2, interrupted = 130 };
 
 const Status = enum { pending, ready, staging, running, completed, reused, failed, blocked, cancelled, not_started, excluded };
+
+/// The run's progress on a terminal: event lines scroll above one status
+/// line, drawn again about once a second. Off a terminal, or with --quiet,
+/// the engine prints plain lines and no status line.
+const Console = struct {
+    on: bool = false,
+    color: bool = false,
+    /// A status line is on screen and must be cleared before other output.
+    shown: bool = false,
+    next_ns: i128 = 0,
+};
 
 const Task = struct {
     status: Status = .pending,
@@ -288,15 +305,167 @@ const Engine = struct {
     leftover_cgroups: std.ArrayList([]const u8) = .empty,
     finished: usize = 0,
     selected: usize = 0,
+    console: Console = .{},
+    /// Monotonic time the launch opened, for the elapsed time on the console.
+    start_mono: i128 = 0,
 
-    fn progress(self: *Engine, comptime fmt: []const u8, args: anytype) void {
+    fn progress(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (self.opts.quiet) return;
-        std.debug.print("[{d}/{d}] " ++ fmt ++ "\n", .{ self.finished, self.selected } ++ args);
+        self.event(verb, fmt, args);
     }
 
     /// Failures are printed even in quiet mode.
-    fn alert(self: *Engine, comptime fmt: []const u8, args: anytype) void {
-        std.debug.print("[{d}/{d}] " ++ fmt ++ "\n", .{ self.finished, self.selected } ++ args);
+    fn alert(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
+        self.event(verb, fmt, args);
+    }
+
+    /// One event line, `[finished/selected] verb details`. On a terminal the
+    /// verb is colored and the status line is drawn again below the line; a
+    /// start shows only in the status line.
+    fn event(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
+        if (!self.console.on) {
+            std.debug.print("[{d}/{d}] " ++ verb ++ " " ++ fmt ++ "\n", .{ self.finished, self.selected } ++ args);
+            return;
+        }
+        if (comptime std.mem.eql(u8, verb, "started")) return self.drawStatus(true);
+        const s: term.Style = .{ .on = self.console.color };
+        const tint = comptime if (std.mem.eql(u8, verb, "completed"))
+            "\x1b[32m"
+        else if (std.mem.eql(u8, verb, "failed"))
+            "\x1b[31;1m"
+        else if (std.mem.eql(u8, verb, "blocked"))
+            "\x1b[31m"
+        else if (std.mem.eql(u8, verb, "cancelled"))
+            "\x1b[35m"
+        else if (std.mem.eql(u8, verb, "retrying") or std.mem.eql(u8, verb, "restarting"))
+            "\x1b[33m"
+        else
+            "\x1b[36m";
+        self.clearStatus();
+        std.debug.print("{s}{d:>5}/{d}{s}  {s}{s:<10}{s} " ++ fmt ++ "\n", .{ s.dim(), self.finished, self.selected, s.reset(), if (s.on) tint else "", verb, s.reset() } ++ args);
+        self.drawStatus(true);
+    }
+
+    /// On a terminal, the last `n` lines of an attempt's standard error under
+    /// its event line, aligned with the event's text.
+    fn showTail(self: *Engine, dir: []const u8, n: usize) void {
+        if (!self.console.on) return;
+        const path = std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}) catch return;
+        var digits: usize = 1;
+        var v = self.selected;
+        while (v >= 10) : (v /= 10) digits += 1;
+        const indent = 19 + digits;
+        const lines = monitor.lastLines(self.gpa, self.a, path, n, term.size(2).cols -| (indent + 3));
+        if (lines.len == 0) return;
+        const s: term.Style = .{ .on = self.console.color };
+        self.clearStatus();
+        for (lines) |line| {
+            for (0..indent) |_| std.debug.print(" ", .{});
+            std.debug.print("{s}| {s}{s}\n", .{ s.dim(), line, s.reset() });
+        }
+        self.drawStatus(true);
+    }
+
+    /// On a terminal, one line for the rules a pass found blocked: up to
+    /// three names and how many more.
+    fn showBlocked(self: *Engine, names: []const []const u8, count: usize) void {
+        if (!self.console.on or count == 0) return;
+        var buf: [512]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        for (names, 0..) |name, k| w.print("{s}{s}", .{ if (k == 0) "" else ", ", name }) catch {};
+        if (count > names.len) w.print(" and {d} more", .{count - names.len}) catch {};
+        w.print(": {s} a rule that did not complete", .{if (count == 1) "it needs" else "they need"}) catch {};
+        self.event("blocked", "{s}", .{w.buffered()});
+    }
+
+    /// A message of its own on the console, such as the interrupt notice.
+    fn note(self: *Engine, text: []const u8) void {
+        self.clearStatus();
+        std.debug.print("{s}\n", .{text});
+        self.drawStatus(true);
+    }
+
+    fn clearStatus(self: *Engine) void {
+        if (!self.console.shown) return;
+        std.debug.print("\r\x1b[K", .{});
+        self.console.shown = false;
+    }
+
+    /// Draws the status line: a bar of the rules done, running and waiting,
+    /// the counts, the elapsed time and the rules running, cut to the
+    /// terminal's width. It is drawn at most once a second unless `force`.
+    fn drawStatus(self: *Engine, force: bool) void {
+        if (!self.console.on) return;
+        const now = sys.monoNs();
+        if (!force and now < self.console.next_ns) return;
+        self.console.next_ns = now + std.time.ns_per_s;
+        var done: usize = 0;
+        var active: usize = 0;
+        var waiting: usize = 0;
+        var failed: usize = 0;
+        for (self.tasks, 0..) |t, i| {
+            if (!self.mask[i]) continue;
+            switch (t.status) {
+                .completed, .reused => done += 1,
+                .running, .staging => active += 1,
+                .ready => waiting += 1,
+                .failed, .blocked => failed += 1,
+                else => {},
+            }
+        }
+        const cols = term.size(2).cols -| 1;
+        const s: term.Style = .{ .on = self.console.color };
+        var buf: [2048]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&buf);
+        var used: usize = 0;
+        const width: usize = if (cols >= 80) 24 else 12;
+        const total = @max(self.selected, 1);
+        const parts = [_]struct { n: usize, bg: []const u8, ch: u8 }{
+            .{ .n = done, .bg = "\x1b[42m", .ch = '#' },
+            .{ .n = active, .bg = "\x1b[46m", .ch = '>' },
+            .{ .n = failed, .bg = "\x1b[41m", .ch = '!' },
+            .{ .n = waiting, .bg = "\x1b[43m", .ch = '~' },
+        };
+        if (!s.on) w.writeAll("[") catch {};
+        var filled: usize = 0;
+        for (parts) |p| {
+            var n = p.n * width / total;
+            if (n == 0 and p.n > 0) n = 1;
+            n = @min(n, width - filled);
+            if (n == 0) continue;
+            if (s.on) w.writeAll(p.bg) catch {};
+            for (0..n) |_| w.writeByte(if (s.on) ' ' else p.ch) catch {};
+            if (s.on) w.writeAll("\x1b[0m") catch {};
+            filled += n;
+        }
+        if (s.on) w.writeAll("\x1b[100m") catch {};
+        for (0..width - filled) |_| w.writeByte(if (s.on) ' ' else '.') catch {};
+        w.writeAll(if (s.on) "\x1b[0m" else "]") catch {};
+        used += width + @as(usize, if (s.on) 0 else 2);
+        const secs: u64 = @intCast(@max(@divFloor(now - self.start_mono, std.time.ns_per_s), 0));
+        var text: [160]u8 = undefined;
+        const counts = std.fmt.bufPrint(&text, " {d}/{d}  {d} running  {d} waiting  {d} failed  {d}:{d:0>2}", .{ done, self.selected, active, waiting, failed, secs / 60, secs % 60 }) catch "";
+        const shown = counts[0..@min(counts.len, cols -| used)];
+        w.print("{s}{s}{s}", .{ s.bold(), shown, s.reset() }) catch {};
+        used += shown.len;
+        // The rules running, as many as fit.
+        var first = true;
+        var left: usize = 0;
+        for (self.tasks, 0..) |t, i| {
+            if (t.status != .running) continue;
+            const name = self.rule(i).name;
+            const sep: []const u8 = if (first) "  " else ", ";
+            if (used + sep.len + name.len + 8 > cols) {
+                left += 1;
+                continue;
+            }
+            w.print("{s}{s}{s}{s}", .{ sep, s.cyan(), name, s.reset() }) catch {};
+            used += sep.len + name.len;
+            first = false;
+        }
+        if (left > 0 and used + 8 <= cols) w.print(" +{d}", .{left}) catch {};
+        std.debug.print("\r{s}\x1b[K", .{w.buffered()});
+        self.console.shown = true;
     }
 
     fn rule(self: *Engine, i: usize) *const workflow.Rule {
@@ -306,6 +475,9 @@ const Engine = struct {
     // ---- readiness and reuse ----
 
     fn updateReadiness(self: *Engine) !void {
+        var names: [3][]const u8 = undefined;
+        var newly_blocked: usize = 0;
+        defer self.showBlocked(names[0..@min(newly_blocked, names.len)], newly_blocked);
         for (self.g.order) |i| {
             const t = &self.tasks[i];
             if (t.status != .pending) continue;
@@ -321,6 +493,8 @@ const Engine = struct {
                 t.reason = "a producing rule did not complete";
                 self.finished += 1;
                 self.events.emit("task_blocked", .{ .rule = self.rule(i).name });
+                if (newly_blocked < names.len) names[newly_blocked] = self.rule(i).name;
+                newly_blocked += 1;
                 continue;
             }
             if (!all_done or self.stopping) continue;
@@ -346,7 +520,7 @@ const Engine = struct {
             t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
             self.finished += 1;
             self.events.emit("task_failed", .{ .rule = r.name, .reason = t.reason });
-            self.alert("failed {s}: {s}", .{ r.name, t.reason });
+            self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
             if (!self.opts.keep_going) self.beginStop();
             return;
         }
@@ -666,7 +840,7 @@ const Engine = struct {
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
         self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s });
-        self.progress("started {s} (attempt {d})", .{ r.name, t.attempts });
+        self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
     }
 
     fn timeoutOf(self: *Engine, r: *const workflow.Rule) ?u64 {
@@ -685,7 +859,7 @@ const Engine = struct {
         self.releaseShared(i);
         self.finished += 1;
         self.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
-        self.alert("failed {s}: {s}", .{ r.name, t.reason });
+        self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
         if (!self.opts.keep_going) self.beginStop();
     }
 
@@ -778,7 +952,7 @@ const Engine = struct {
         h.pipe = pipe[0];
         h.st = .loading;
         self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = h.cg });
-        self.progress("loading shared input {s} ({d} MiB)", .{ s.name, h.mib });
+        self.progress("loading", "shared input {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
     /// Starts a service container: the client in the containers group, the
@@ -850,7 +1024,7 @@ const Engine = struct {
         h.timed_out = false;
         h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
         self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid, .cgroup = h.cg });
-        self.progress("starting shared service {s} ({d} MiB)", .{ s.name, h.mib });
+        self.progress("starting", "shared service {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
     /// Asks a holder to end: a service by closing its stop FIFO, and
@@ -1026,7 +1200,7 @@ const Engine = struct {
         if (was != .ready and h.failed_starts < s.retries and h.users > 0 and !self.stopping) {
             h.failed_starts += 1;
             self.events.emit("shared_retry", .{ .name = s.name, .reason = why, .next_start = h.starts + 1 });
-            self.alert("restarting shared service {s}: {s}", .{ s.name, why });
+            self.alert("restarting", "shared service {s}: {s}", .{ s.name, why });
             try self.startHolder(hi);
             return;
         }
@@ -1051,7 +1225,7 @@ const Engine = struct {
         self.releaseShared(i);
         self.finished += 1;
         self.events.emit("task_failed", .{ .rule = self.rule(i).name, .reason = reason });
-        self.alert("failed {s}: {s}", .{ self.rule(i).name, reason });
+        self.alert("failed", "{s}: {s}", .{ self.rule(i).name, reason });
         if (!self.opts.keep_going) self.beginStop();
     }
 
@@ -1182,7 +1356,7 @@ const Engine = struct {
             try self.pending_done.append(self.gpa, r.name);
             self.finished += 1;
             self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "completed", .wall_s = wall_s, .cpu_s = taskCpu(counters, reaped), .maxrss_kib = reaped.usage.maxrss, .memory_peak = if (counters) |c| c.memory_peak else null });
-            self.progress("completed {s} ({d:.1} s)", .{ r.name, wall_s });
+            self.progress("completed", "{s} ({d:.1} s)", .{ r.name, wall_s });
             return;
         }
         t.reason = reason;
@@ -1197,14 +1371,21 @@ const Engine = struct {
             t.waits = .empty;
             t.wait_reason = null;
             self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
-            self.alert("retrying {s}: {s}", .{ r.name, reason });
+            self.alert("retrying", "{s}: {s}", .{ r.name, reason });
+            self.showTail(t.dir, 1);
             return;
         }
         t.status = if (t.cancelled) .cancelled else .failed;
         self.releaseShared(i);
         released = true;
         self.finished += 1;
-        self.alert("{s} {s}: {s} (see {s}/stderr.log)", .{ status, r.name, reason, t.dir });
+        // A terminal shows the error lines themselves; `workz logs` has the rest.
+        if (self.console.on) {
+            if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, reason }) else {
+                self.alert("failed", "{s}: {s}", .{ r.name, reason });
+                self.showTail(t.dir, 3);
+            }
+        } else if (t.cancelled) self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, t.dir }) else self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, t.dir });
         if (!t.cancelled and !self.opts.keep_going) self.beginStop();
     }
 
@@ -1287,7 +1468,7 @@ const Engine = struct {
             const name = words.next() orelse "";
             const result = try self.control(cmd, name);
             self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
-            self.alert("control {s} {s}: {s}", .{ cmd, name, result });
+            self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
         }
     }
 
@@ -1435,6 +1616,7 @@ const Engine = struct {
             best = if (best) |b| @min(b, save_at) else save_at;
         }
         best = if (best) |b| @min(b, self.next_sample_ns) else self.next_sample_ns;
+        if (self.console.on) best = @min(best.?, self.console.next_ns);
         return best;
     }
 
@@ -1549,7 +1731,7 @@ const Engine = struct {
                     self.interrupted = true;
                     self.interrupted_at = sys.monoNs();
                     self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
-                    if (!self.opts.quiet) std.debug.print("workz: interrupted; stopping running tasks (interrupt again to kill)\n", .{});
+                    if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
                     self.beginStop();
                 }
             }
@@ -1560,6 +1742,7 @@ const Engine = struct {
             try self.reapAll();
             self.checkTimers();
             self.sample();
+            self.drawStatus(false);
         }
     }
 };
@@ -1611,6 +1794,7 @@ const Refusal = struct {
     engine: []const u8,
     selected: usize,
     t0: i128,
+    json: bool,
 
     fn refuse(self: Refusal, outcome: Outcome, reason: []const u8) !Outcome {
         std.debug.print("workz: {s}\n", .{reason});
@@ -1632,7 +1816,7 @@ const Refusal = struct {
         var w: std.Io.Writer.Allocating = .init(self.gpa);
         defer w.deinit();
         try w.writer.print("{f}\n", .{std.json.fmt(summary, .{})});
-        try sys.writeAll(1, w.written());
+        if (self.json or !term.isTerminal(1)) try sys.writeAll(1, w.written());
         return outcome;
     }
 };
@@ -1696,7 +1880,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .slice = opts.slice,
         .selected = selected,
     });
-    const refusal: Refusal = .{ .gpa = gpa, .a = a, .events = &events, .launch = launch.id, .dir = launch.dir, .engine = engine_id, .selected = selected, .t0 = t_open };
+    const refusal: Refusal = .{ .gpa = gpa, .a = a, .events = &events, .launch = launch.id, .dir = launch.dir, .engine = engine_id, .selected = selected, .t0 = t_open, .json = opts.json };
 
     // Budget and input checks.
     var holders = try a.alloc(Holder, wf.shared.len);
@@ -1916,6 +2100,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
     engine.last_sample_ns = engine.last_save_ns;
     if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);
+    engine.console = .{ .on = !opts.quiet and term.isTerminal(2), .color = opts.color and term.colorOn(2, environ) };
+    engine.start_mono = t_open;
     const t0 = t_open;
     // The selected rules, so a view can list those that have yet to start.
     var selected_names: std.ArrayList([]const u8) = .empty;
@@ -2001,6 +2187,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     events.emit("launch_finished", .{ .status = summary.status, .counts = summary.counts, .elapsed_s = elapsed, .@"error" = engine.fatal });
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "summary.json" }), summary);
+    engine.clearStatus();
+    // A person at a terminal gets the readable summary; scripts get JSON.
+    if (!opts.json and term.isTerminal(1)) {
+        var out: std.Io.Writer.Allocating = .init(gpa);
+        defer out.deinit();
+        // A blank line sets the summary apart from the event lines above it.
+        if (engine.finished > 0 and !opts.quiet) try out.writer.writeAll("\n");
+        try monitor.writeSummary(gpa, a, &out.writer, launch.dir, opts.color and term.colorOn(1, environ));
+        try sys.writeAll(1, out.written());
+        return outcome;
+    }
     var w: std.Io.Writer.Allocating = .init(gpa);
     defer w.deinit();
     try w.writer.print("{f}\n", .{std.json.fmt(summary, .{})});
