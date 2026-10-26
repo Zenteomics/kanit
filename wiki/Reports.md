@@ -151,11 +151,11 @@ launch   .../.workz/launches/20261026T193346.830-862c8523
 
 per step (completed attempts)
   STEP                             N   WALL S (MEDIAN)          PEAK MiB (MAX)           CPU S (TOTAL)
-  align                            6    16.93   16.98      0%      403     405      1%    282.8   281.3     -1%
-  count                            6     2.00    2.00      0%        2       2     16%     11.9    12.0      0%
-  qc                               6     3.00    3.00     -0%        2       2      1%     17.9    18.0      0%
-  report                           1     2.00    2.01      0%        2       2     -0%      2.0     2.0     -0%
-  trim                             6     4.00    4.01      0%        2       2    -14%     23.9    23.9     -0%
+  align                            6    16.93   16.98      0%      403     405      0%    282.8   281.3     -1%
+  count                            6     2.00    2.00      0%        2       2      0%     11.9    12.0      1%
+  qc                               6     3.00    3.00      0%        2       2      0%     17.9    18.0      1%
+  report                           1     2.00    2.01      0%        2       2      0%      2.0     2.0      0%
+  trim                             6     4.00    4.01      0%        2       2      0%     23.9    23.9      0%
 ```
 
 Four more threads saved 8% of the elapsed time, while every step ran as before, so the gain came from scheduling alone. The bottleneck report of the second launch shows the next limits: waiting for `group:disk` grew from 58 to 96 s, and ready rules now also waited 57 s for memory.

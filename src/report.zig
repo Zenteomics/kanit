@@ -287,9 +287,15 @@ pub fn median(xs: []const f64) f64 {
     return if (xs.len % 2 == 1) xs[m] else (xs[m - 1] + xs[m]) / 2;
 }
 
-fn change(w: *std.Io.Writer, was: f64, now: f64) !void {
-    if (was <= 0) return w.writeAll("       -");
-    try w.print(" {d:>6.0}%", .{(now - was) / was * 100});
+/// The change from `was` to `now` as printed with `decimals` places, so two
+/// values that print alike show no change.
+fn change(w: *std.Io.Writer, was: f64, now: f64, decimals: u8) !void {
+    const scale = std.math.pow(f64, 10, @floatFromInt(decimals));
+    const x = @round(was * scale) / scale;
+    const y = @round(now * scale) / scale;
+    if (x <= 0) return w.writeAll("       -");
+    const pct = (y - x) / x * 100;
+    try w.print(" {d:>6.0}%", .{if (@abs(pct) < 0.5) 0 else pct});
 }
 
 /// Compares launch `now_dir` with the baseline `was_dir`: session totals,
@@ -307,9 +313,9 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     try w.print("baseline {s}\nlaunch   {s}\n\n", .{ was_dir, now_dir });
     try w.writeAll("                          BASELINE     LAUNCH   CHANGE\n");
     try w.print("  elapsed s             {d:>10.1} {d:>10.1}", .{ was_s, now_s });
-    try change(w, was_s, now_s);
+    try change(w, was_s, now_s, 1);
     try w.print("\n  attempts              {d:>10} {d:>10}\n  reserved thread-s     {d:>10.0} {d:>10.0}", .{ was_rows.len, now_rows.len, was_task, now_task });
-    try change(w, was_task, now_task);
+    try change(w, was_task, now_task, 0);
     try w.writeAll("\n\nper step (completed attempts)\n");
     try w.writeAll("  STEP                             N   WALL S (MEDIAN)          PEAK MiB (MAX)           CPU S (TOTAL)\n");
     const was_k = try stepStats(a, was_rows);
@@ -332,13 +338,13 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
             continue;
         }
         try w.print("  {s:<30} {d:>3}  {d:>7.2} {d:>7.2}", .{ name[0..@min(name.len, 30)], y.n, median(x.walls.items), median(y.walls.items) });
-        try change(w, median(x.walls.items), median(y.walls.items));
+        try change(w, median(x.walls.items), median(y.walls.items), 2);
         // Use measured outside workz's cgroups does not compare.
         const outside = x.delegated * 2 > x.n or y.delegated * 2 > y.n;
         try w.print("  {d:>7.0} {d:>7.0}", .{ x.peak, y.peak });
-        if (outside) try w.writeAll("       -") else try change(w, x.peak, y.peak);
+        if (outside) try w.writeAll("       -") else try change(w, x.peak, y.peak, 0);
         try w.print("  {d:>7.1} {d:>7.1}", .{ x.cpu, y.cpu });
-        if (outside) try w.writeAll("       -") else try change(w, x.cpu, y.cpu);
+        if (outside) try w.writeAll("       -") else try change(w, x.cpu, y.cpu, 1);
         if (outside) try w.print("  {s} ran its work outside workz", .{if (x.delegated * 2 > x.n) "baseline" else "launch"});
         try w.writeAll("\n");
     }

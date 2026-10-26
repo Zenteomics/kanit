@@ -36,6 +36,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - Reuse survives a reboot on btrfs, which numbers its subvolumes anew at each mount: recorded file identities and input-manifest stamps no longer compare the device number, which made every rule run again after a reboot.
 - A `state.json` upgraded from an earlier version is saved with the current format version.
 - A rule that never completed is estimated by the median wall time of its step when ready rules are ordered by their chain of work.
+- `workz report --compare` computes each change from the values it prints, so two values that print alike show 0% instead of a change from rounding, such as 16% between two 2 MiB peaks.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
 - A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
 - An option given without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
