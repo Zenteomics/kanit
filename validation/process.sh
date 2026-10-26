@@ -627,6 +627,9 @@ base=$(basename "$(last_launch)")
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun -q > s2.json
 "$workz" report -d . --compare "$base" > compare.txt
 check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
+"$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun-rule c3 -q > s3.json
+"$workz" report -d . --compare "$base" > compare-one.txt
+check "report --compare marks a kind with no completed attempt on one side" 'grep -q "^  short1 *0 .*no completed attempt in the launch" compare-one.txt && ! grep -q "%.*no completed attempt" compare-one.txt'
 
 # ---------------------------------------------------------------- inputs and formats
 new manifest

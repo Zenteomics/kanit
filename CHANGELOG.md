@@ -20,6 +20,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
 - A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
 - The starter workflow from `workz init` describes a resource group as units that rules take, not as a limit on rules of a kind.
+- `report --compare` shows `-` for a kind with no completed attempt on one side, and says on which side it did not run, instead of a change of -100%.
 
 ## 0.3.0 - 2026-10-25
 

@@ -300,6 +300,17 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     for (names.keys()) |name| {
         const x = was_k.get(name) orelse KindStats{};
         const y = now_k.get(name) orelse KindStats{};
+        // A kind reused, or not selected, on one side has nothing to compare.
+        if (x.n == 0 or y.n == 0) {
+            const ran = if (x.n == 0) y else x;
+            const nums = .{ median(ran.walls.items), ran.peak, ran.cpu };
+            try w.print("  {s:<30} {d:>3}  ", .{ name[0..@min(name.len, 30)], y.n });
+            if (x.n == 0) {
+                try w.print("{s:>7} {d:>7.2}       -  {s:>7} {d:>7.0}       -  {s:>7} {d:>7.1}       -", .{ "-", nums[0], "-", nums[1], "-", nums[2] });
+            } else try w.print("{d:>7.2} {s:>7}       -  {d:>7.0} {s:>7}       -  {d:>7.1} {s:>7}       -", .{ nums[0], "-", nums[1], "-", nums[2], "-" });
+            try w.print("  no completed attempt in the {s}\n", .{if (x.n == 0) "baseline" else "launch"});
+            continue;
+        }
         try w.print("  {s:<30} {d:>3}  {d:>7.2} {d:>7.2}", .{ name[0..@min(name.len, 30)], y.n, median(x.walls.items), median(y.walls.items) });
         try change(w, median(x.walls.items), median(y.walls.items));
         // Use measured outside workz's cgroups does not compare.

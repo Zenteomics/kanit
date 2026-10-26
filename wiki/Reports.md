@@ -131,7 +131,7 @@ per kind of rule (completed attempts)
 
 Four more threads saved 10% of the elapsed time, while every kind of rule ran exactly as before, so the gain came from scheduling alone. The bottleneck report of the second launch shows the next limit: waiting for `group:disk` grew from 58 to 72 s.
 
-Kinds whose work ran outside workz in either launch are marked, and their memory and CPU comparisons do not describe the work. A kind that was reused in the newer launch has no completed attempts there, so it shows `0` and a change of `-100%`; compare launches that ran the same rules, for example with `--rerun`.
+Kinds whose work ran outside workz in either launch are marked, and their memory and CPU comparisons do not describe the work. A kind with no completed attempt on one side, for example one reused in the newer launch, shows `-` for that side and says where it did not run.
 
 ## The HTML report
 
