@@ -705,6 +705,29 @@ ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash);
 sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
 
+new command-line
+"$workz" help run > help-run.txt
+rc1=$?
+"$workz" run --help > run-help.txt
+rc2=$?
+check "help shows a command's options, also through --help" '[ $rc1 = 0 ] && [ $rc2 = 0 ] && cmp -s help-run.txt run-help.txt && grep -q "^  --max-threads N" help-run.txt'
+"$workz" run wf.toml --max-thread 4 2> typo.txt
+rc=$?
+check "a mistyped option is named with the one probably meant" '[ $rc = 2 ] && grep -q "did you mean .--max-threads.?" typo.txt'
+"$workz" run wf.toml --max-threads 2> missing.txt
+rc1=$?
+"$workz" run wf.toml --max-memory 4GB 2> invalid.txt
+rc2=$?
+check "an option without its value, or with a bad one, says what it needs" '[ $rc1 = 2 ] && grep -q "needs a value" missing.txt && [ $rc2 = 2 ] && grep -q "invalid value .4GB." invalid.txt'
+"$workz" report -d . 2> nolaunch.txt
+rc1=$?
+"$workz" logs -d . x 2> noattempt.txt
+rc2=$?
+check "commands with nothing recorded to show exit 1" '[ $rc1 = 1 ] && [ $rc2 = 1 ] && grep -q "no launch recorded" nolaunch.txt'
+"$workz" init --force 2> initopt.txt
+rc=$?
+check "init rejects options instead of using them as file names" '[ $rc = 2 ] && [ ! -e ./--force ] && grep -q "unknown option" initopt.txt'
+
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
 "$workz" validate wf.toml > /dev/null 2> err.txt

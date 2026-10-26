@@ -1,4 +1,4 @@
-Every `workz` command and option. `workz help` prints a summary of the same, and `workz completion bash` completes commands, most options and rule names in bash.
+Every `workz` command and option. `workz help COMMAND` shows the same for one command, and `workz completion bash` completes commands, options and rule names in bash.
 
 ```text
 workz <command> [options]
@@ -178,13 +178,27 @@ workz completion bash
 
 Prints a bash completion script: `source <(workz completion bash)`. It completes the commands, the options of each command, the `control` commands, and rule names after `--target` and `--rerun-rule` and for `explain`, `logs` and `control`.
 
-## version and help
+## help and version
 
-`workz version` (or `--version`) prints `workz 0.3.0`. `workz help` (or `--help`, `-h`) prints the command summary.
+```text
+workz help [COMMAND]
+workz COMMAND --help
+```
+
+`workz help` lists the commands grouped by job. `workz help COMMAND`, `workz COMMAND --help` and `workz COMMAND -h` show a command's usage, options with their defaults, and examples. `workz version` (or `--version`) prints `workz 0.3.0`.
+
+A mistyped command or option is named in the error with the one probably meant:
+
+```text
+workz: unknown option '--max-thread' for run; did you mean '--max-threads'?
+Run 'workz help run' for its options.
+```
 
 ## Exit statuses
 
-- `0`: success. For `run`, no rule failed, was blocked or was left unstarted; a rule stopped with `workz control stop` that nothing depends on counts as `cancelled` and still allows 0. `status --history` exits 0 even when there are no launches.
-- `1`: `run` had a failed or blocked rule, or was refused by changed outputs, an input manifest mismatch or another running launch; `verify` found a difference; `watch` or `status` found no launch.
-- `2`: an invalid command line or workflow, or another error, such as a launch refused before it started, a rule name that does not exist, or a `report`, `logs` or `control` with no launch to read.
+- `0`: success. For `run`, no rule failed, was blocked or was left unstarted; a rule stopped with `workz control stop` that nothing depends on counts as `cancelled` and still allows 0.
+- `1`: `run` had a failed or blocked rule, or was refused by changed outputs, an input manifest mismatch or another running launch; `verify` found a difference; or there is nothing recorded to show or act on: no launch for `watch`, `status`, `report` or `control`, no attempt for `logs`, a launch that has ended for `control`, a launch holding the lock for `verify` or `clean`.
+- `2`: an invalid command line or workflow: an unknown command or option, a missing or invalid value, a rule or target that does not exist, or a launch refused before it started because of the workflow or its budget.
 - `130`: `run` was interrupted, or cancelled with `workz control cancel`.
+
+`run` also accepts, and ignores, `--resume-failed`, `--provenance`, `--json` and `--no-color`, for command lines written for oxo-local.

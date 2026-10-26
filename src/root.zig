@@ -11,6 +11,7 @@ pub const run = @import("run.zig");
 pub const plan = @import("plan.zig");
 pub const monitor = @import("monitor.zig");
 pub const tui = @import("tui.zig");
+pub const term = @import("term.zig");
 pub const html = @import("html.zig");
 pub const clean = @import("clean.zig");
 pub const logs = @import("logs.zig");

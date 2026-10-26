@@ -7,6 +7,12 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 ### Upgrading
 
 - Rules that use a shared file input count its path as an input, so each such rule runs once after the upgrade.
+- Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
+
+### Added
+
+- `workz help COMMAND`, `workz COMMAND --help` and `-h` show a command's usage, options with their defaults, and examples; `workz help` lists the commands grouped by job.
+- A mistyped command or option is named with the one probably meant, for example `unknown option '--max-thread' for run; did you mean '--max-threads'?`.
 
 ### Changed
 
@@ -19,6 +25,8 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
 - A rule that fails because its shared input could not be loaded prints a failure line with the reason, like any other failure.
+- An option given without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
+- `workz init` rejects options instead of writing a file named after them.
 - The starter workflow from `workz init` describes a resource group as units that rules take, not as a limit on rules of a kind.
 - `report --compare` shows `-` for a kind with no completed attempt on one side, and says on which side it did not run, instead of a change of -100%.
 - `workz completion bash` completes every option of every command, including `report --suggest` and `--compare`, and the `control` commands with rule names after `stop` and `retry`.
