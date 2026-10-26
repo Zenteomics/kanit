@@ -93,7 +93,7 @@ When rules wait long but do start, `workz report --bottlenecks` shows what they 
 
 - `inputs changed` when the bytes are the same: A file was touched, copied or rewritten with the same content, which changes its identity. Use `cutoff = true` on the rule that produces it, or an [input manifest](Reuse-and-Resume.md#input-manifests) for external files.
 
-- Every rule runs after an upgrade: The new version raised the engine key, as listed under Upgrading in the changelog. It happens once.
+- Every rule runs after an upgrade: The new version changed what a rule key covers, as the changelog says at the top of that version. It happens once.
 
 ## Rules that do not rerun when they should
 

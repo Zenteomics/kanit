@@ -39,7 +39,7 @@ The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, cont
 
 ## Status
 
-workz 0.3.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog lists each such change under Upgrading.
+workz 0.3.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog says at the top of each version what such a change needs from you.
 
 ## License
 
