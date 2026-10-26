@@ -2286,6 +2286,9 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
     return res;
 }
 
+/// A preparer's stamp still describes the file: same inode, size and
+/// modification and change times. The device number is not compared, since
+/// btrfs numbers it anew at each mount.
 fn stampMatches(stamp: std.json.ObjectMap, id: sys.Identity) bool {
     const field = struct {
         fn int(m: std.json.ObjectMap, k: []const u8) ?i128 {
@@ -2297,6 +2300,6 @@ fn stampMatches(stamp: std.json.ObjectMap, id: sys.Identity) bool {
             };
         }
     }.int;
-    return field(stamp, "dev") == @as(i128, id.stDev()) and field(stamp, "ino") == @as(i128, id.ino) and
+    return field(stamp, "ino") == @as(i128, id.ino) and
         field(stamp, "size") == @as(i128, id.size) and field(stamp, "mtime_ns") == id.mtime_ns and field(stamp, "ctime_ns") == id.ctime_ns;
 }

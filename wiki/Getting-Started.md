@@ -181,11 +181,11 @@ rule gc_s2: runs (inputs changed)
   producers  same
   engine key same
   input changed: .../gc-content/reads/s2.txt
-    was 37:20793027:33:1792986055259260508:1792986055259260508
-    now 37:20793027:44:1792986055339942288:1792986055339942288
+    was 20793027:33:1792986055259260508:1792986055259260508
+    now 20793027:44:1792986055339942288:1792986055339942288
 ```
 
-The `was` and `now` lines are the file's identity: device, inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
+The `was` and `now` lines are the file's identity: inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
 
 ```sh
 workz run workflow.toml

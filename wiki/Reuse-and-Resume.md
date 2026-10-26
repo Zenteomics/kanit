@@ -50,7 +50,7 @@ The engine key is 2 in workz 0.3.0. Rebuilding or upgrading workz reruns nothing
 
 ## File identity
 
-A file's identity is its device, inode, size, and modification and change times, which workz reads with one `statx` call. A rewrite changes them even when it restores the old modification time, because programs cannot set the change time. workz therefore notices every edit without reading the file.
+A file's identity is its inode, size, and modification and change times, which workz reads with one `statx` call. A rewrite changes them even when it restores the old modification time, because programs cannot set the change time. workz therefore notices every edit without reading the file. The device number is left out: btrfs numbers its subvolumes anew at each mount, so it would change with every reboot.
 
 A directory's identity covers every file below it, so adding, removing or editing any of them changes it.
 
@@ -98,7 +98,7 @@ workz run workflow.toml
 ```
 
 - A plain digest makes workz hash the file once and remember the digest with the file's identity; later launches hash it again only if the identity changed.
-- A digest with a `stamp` carries the identity the manifest's writer saw when it hashed the file (`dev` as `stat` reports it). If the file's identity matches the stamp, workz trusts the digest without reading the file. Use stamps only from a program you trust to write them.
+- A digest with a `stamp` carries the identity the manifest's writer saw when it hashed the file. If the file's inode, size and modification and change times match the stamp, workz trusts the digest without reading the file; `dev` may be present and is not compared, since it changes with every mount on btrfs. Use stamps only from a program you trust to write them.
 - A file that is missing or does not match refuses the launch before any rule starts, with exit status 1.
 
 Inputs listed in the manifest are keyed on their digests, like the outputs of cutoff rules.

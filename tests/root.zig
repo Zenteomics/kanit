@@ -442,7 +442,28 @@ test "[regression] - [state]: a format 1 file is saved as the current format" {
     try old.save(testing.allocator);
     const text = try sys.readFile(testing.allocator, try std.fs.path.join(old.allocator(), &.{ s.path, "state.json" }), 1 << 20);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":2,"));
+    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":3,"));
+}
+
+test "[regression] - [state]: identities recorded with the device number match without it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("state.json",
+        \\{"format_version": 2, "files": {"/w/x": "52:7:3:100:200"},
+        \\"manifest": {"/in/a.fq": {"id": "52:9:5:300:400", "sha256": "ab"}},
+        \\"rules": {
+        \\"x": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g",
+        \\  "outputs": [{"path": "/w/x", "id": "52:7:3:100:200"}], "attempt": "a", "finished": "f"},
+        \\"index": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g",
+        \\  "outputs": [{"path": "/w/idx", "id": "dir:00"}], "attempt": "a", "finished": "f"}}}
+    );
+    var old = try state.load(testing.allocator, s.path);
+    defer old.deinit();
+    try testing.expectEqualStrings("7:3:100:200", old.data.rules.map.get("x").?.outputs[0].id);
+    try testing.expectEqualStrings("9:5:300:400", old.data.manifest.map.get("/in/a.fq").?.id);
+    // A directory's old identity cannot be compared, so its rule runs again.
+    try testing.expect(old.data.rules.map.get("index") == null);
+    try testing.expectEqualStrings("52:7:3:100:200", old.data.files.map.get("/w/x").?);
 }
 
 test "the key of a fixed rule matches its pinned value" {
@@ -1039,4 +1060,14 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     try testing.expect(has(page, "<td>threads</td><td class=\"n\">1.0</td>"));
     try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
     for (page) |c| try testing.expect(c < 0x80);
+}
+
+test "[regression] - [sys]: a recorded file identity does not change when only the device number does" {
+    const a: sys.Identity = .{ .dev = 52, .ino = 148455540, .size = 21511621, .mtime_ns = 1793000094563445142, .ctime_ns = 1793000094576445205, .mode = 0o100644 };
+    var b = a;
+    b.dev = 49;
+    var x: [96]u8 = undefined;
+    var y: [96]u8 = undefined;
+    try testing.expectEqualStrings(try std.fmt.bufPrint(&x, "{f}", .{a}), try std.fmt.bufPrint(&y, "{f}", .{b}));
+    try testing.expectEqualStrings("148455540:21511621:1793000094563445142:1793000094576445205", try std.fmt.bufPrint(&x, "{f}", .{a}));
 }

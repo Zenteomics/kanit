@@ -52,7 +52,7 @@ A **shared input** is a large read-only file, such as a genome index, that many 
 
 Each time a rule completes, workz records its **rule key**: a digest of its command, its keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and the names passed with `--pass-env`), its request, its declared outputs, the identities of its input files (or their content digests, where one is stored) and the keys of the rules that produce them (or, for producers with `cutoff = true`, the digests of their outputs). A rule is **reused** in a later launch when its key is the same and its outputs are still the files it wrote. Anything else makes it run again, and its consumers follow.
 
-A file's **identity** is its device, inode, size, and modification and change times, so workz notices an edited file without reading it. Some files are keyed on their content instead ([Reuse and resume](Reuse-and-Resume.md#content-digests)).
+A file's **identity** is its inode, size, and modification and change times, so workz notices an edited file without reading it. Some files are keyed on their content instead ([Reuse and resume](Reuse-and-Resume.md#content-digests)).
 
 ## Kinds of rules
 

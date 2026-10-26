@@ -10,9 +10,10 @@ const sys = @import("sys.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
-/// Format 2 adds the recorded environments; format 1 files are read as
-/// format 2 without them.
-pub const format_version: i64 = 2;
+/// Format 2 adds the recorded environments, and format 3 records file
+/// identities without the device number. Format 1 and 2 files are read as
+/// format 3 (`dropDevice`).
+pub const format_version: i64 = 3;
 
 /// Version of what a rule key covers. Raise it when the key parts or their
 /// encoding change, when what a command starts with changes (shell, flags,
@@ -106,12 +107,42 @@ pub fn load(gpa: Allocator, records: []const u8) !State {
     var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return error.CorruptState;
     const v = probe.value.format_version;
     probe.deinit();
-    if (v != 1 and v != format_version) return error.UnsupportedState;
+    if (v < 1 or v > format_version) return error.UnsupportedState;
     s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
     // Format 1 lacks only `envs`, which this engine adds as rules run, so
     // the file is saved as the current format.
+    if (v < 3) try dropDevice(a, &s.data);
     s.data.format_version = format_version;
     return s;
+}
+
+/// Formats 1 and 2 record a file's identity with the device number first,
+/// `dev:ino:size:mtime_ns:ctime_ns`; recorded outputs and manifest entries
+/// are read without it. A directory's identity is a digest over the
+/// identities of its files in that form and cannot be read again, so a rule
+/// that wrote a directory loses its record and runs again. The `files` map
+/// keeps the old text: `explain` shows it as the identity that was.
+fn dropDevice(a: Allocator, d: *Data) !void {
+    var i: usize = 0;
+    rules: while (i < d.rules.map.count()) {
+        const e = &d.rules.map.values()[i];
+        const outs = try a.dupe(Output, e.outputs);
+        for (outs) |*o| {
+            if (std.mem.startsWith(u8, o.id, "dir:")) {
+                d.rules.map.orderedRemoveAt(i);
+                continue :rules;
+            }
+            o.id = withoutDevice(o.id);
+        }
+        e.outputs = outs;
+        i += 1;
+    }
+    for (d.manifest.map.values()) |*m| m.id = withoutDevice(m.id);
+}
+
+fn withoutDevice(id: []const u8) []const u8 {
+    if (std.mem.count(u8, id, ":") != 4) return id;
+    return id[std.mem.indexOfScalar(u8, id, ':').? + 1 ..];
 }
 
 /// Identity text of a path: the stat tuple of a file, or a digest over the

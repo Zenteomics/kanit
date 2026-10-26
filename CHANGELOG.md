@@ -9,6 +9,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 - Rules that use a shared file input count its path as an input, so each such rule runs once after the upgrade.
 - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
 - On a terminal, `run` and `status` print a short readable summary instead of JSON. Standard output that goes to a file or a pipe still gets the JSON summary, and `--json` gives it on a terminal too.
+- Recorded file identities no longer include the device number, so every rule runs once after the upgrade.
 
 ### Added
 
@@ -29,6 +30,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 ### Fixed
 
 - A rule that uses a shared file input counts the input's path as an input, so rebuilding an index reruns the rules that read it.
+- Reuse survives a reboot on btrfs, which numbers its subvolumes anew at each mount: recorded file identities and input-manifest stamps no longer compare the device number, which made every rule run again after a reboot.
 - A `state.json` upgraded from an earlier version is saved with the current format version.
 - A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
 - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
