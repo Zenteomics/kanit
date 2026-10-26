@@ -31,15 +31,15 @@ On a narrow terminal the memory bar goes first, then the CPU column, then the me
 
 <kbd>?</kbd> shows every key in the view itself.
 
-- <kbd>j</kbd> and <kbd>k</kbd>, or the arrow keys, move the selection; <kbd>PgUp</kbd>, <kbd>PgDn</kbd>, <kbd>g</kbd> and <kbd>G</kbd> jump.
-- <kbd>Enter</kbd> follows the selected attempt's standard error as it grows, with lines that mention an error in red and a warning in yellow; <kbd>o</kbd> switches to standard output.
+- <kbd>j</kbd> and <kbd>k</kbd>, or the up and down arrows, move the selection; <kbd>Space</kbd> and <kbd>b</kbd>, or <kbd>PgDn</kbd> and <kbd>PgUp</kbd>, move it a page; <kbd>g</kbd> and <kbd>G</kbd>, or <kbd>Home</kbd> and <kbd>End</kbd>, jump to the first and last rule.
+- <kbd>Enter</kbd>, <kbd>l</kbd> or the right arrow follows the selected attempt's standard error as it grows, with lines that mention an error in red and a warning in yellow; <kbd>o</kbd> switches to standard output.
 - <kbd>i</kbd> shows the selected rule in detail: its request, when it became ready and started, gauges of its CPU and memory against the request, how often it reached its memory limit, its stall times, and its last lines of output.
 - <kbd>t</kbd> draws a timeline of the launch.
 - <kbd>a</kbd> shows all rules, <kbd>r</kbd> running and retrying ones, <kbd>w</kbd> waiting and pending ones, <kbd>f</kbd> failed, blocked and cancelled ones, and <kbd>d</kbd> done ones.
 - <kbd>/</kbd> searches rule names; <kbd>Enter</kbd> keeps the search and <kbd>Esc</kbd> clears it.
 - <kbd>s</kbd> cycles the order: status, elapsed time, peak memory, name.
 - <kbd>S</kbd> stops the selected rule and <kbd>R</kbd> retries it, as [`workz control`](Running-Workflows.md#steering-a-running-launch) does. <kbd>X</kbd> cancels the launch when pressed a second time within 3 s.
-- <kbd>q</kbd> or <kbd>Esc</kbd> goes back, or leaves from the table; <kbd>Ctrl</kbd>+<kbd>C</kbd> leaves.
+- <kbd>q</kbd> or <kbd>Esc</kbd> goes back, or leaves from the table; <kbd>h</kbd> or the left arrow goes back to the table; <kbd>Ctrl</kbd>+<kbd>C</kbd> leaves.
 
 ### Timeline
 
@@ -54,22 +54,22 @@ Here the align rules, with `priority = 10`, start as soon as their trim is done,
 When its output is not a terminal, or with `--once`, `watch` prints a plain view of the running rules instead, again at every refresh until the launch ends:
 
 ```text
-launch 20261026T033653.780-bb9b10ee  elapsed 00:00:19
+launch 20261026T221057.818-be24883d  running for 19.0 s
 25 selected: 7 pending, 6 waiting, 4 running, 8 completed, 8 done
 shared genome: ready
 
-RUNNING                                      ATT  ELAPSED     MEM NOW  MEM PEAK  LAST OUTPUT
-align_S1                                       1  00:00:13  202.6 Mi  403.8 Mi
-align_S2                                       1  00:00:15  202.7 Mi  404.5 Mi
-qc_S3                                          1  00:00:01  940.0 Ki    1.4 Mi
-align_S3                                       1  00:00:05  203.5 Mi  403.6 Mi
+RUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT
+align_S2                                       1    15.9 s   203 MiB   402 MiB  Mapping reads: 3 threads
+align_S4                                       1     5.9 s   204 MiB   403 MiB  Mapping reads: 3 threads
+align_S5                                       1    14.0 s   203 MiB   402 MiB  Mapping reads: 3 threads
+qc_S6                                          1     1.9 s   1.1 MiB   1.6 MiB  Started analysis of S6.fq
 ```
 
-Failed rules follow under `FAILED`, each with its reason and the path of its standard error. `--interval MS` sets the refresh period (default 1000 ms). A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch, and `status --history` marks it `running?`. Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
+The second line counts the selected rules in each state; `done` adds the completed and reused ones. Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table. `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest. A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch, and `status --history` marks it `running?`. Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
 
 ## status
 
-`workz status` prints the newest launch's summary once it has ended. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch's page, and the commands to look further:
+`workz status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch's page, and the commands to look further:
 
 ```text
  failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked
@@ -80,15 +80,21 @@ Failed rules follow under `FAILED`, each with its reason and the path of its sta
            run the same command again: rules that completed are reused
 ```
 
-A launch that completed lists its three slowest rules instead of failures. Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written. While the launch runs, it prints the plain view above once.
+A launch that completed lists its three slowest rules instead of failures. Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written.
+
+While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state:
+
+```json
+{"launch":"20261026T221057.818-be24883d","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.979420178,"launch_dir":"/home/me/rnaseq/.workz/launches/20261026T221057.818-be24883d"}
+```
 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 
 ```text
-LAUNCH                          STATUS        ELAPSED   DONE  FAILED  OTHER
-20261026T033841.917-25bd675f    completed     00:00:43    25       0      0
-20261026T033743.455-61b4e2d5    completed     00:00:24    25       0      0
-20261026T033653.780-bb9b10ee    completed     00:00:48    25       0      0
+LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER
+20261026T221057.818-be24883d    completed       48.5 s    25       0      0
+20261026T214107.045-dbca1c53    completed       48.2 s    25       0      0
+20261026T212349.502-401d88e4    completed       45.1 s    25       0      0
 ```
 
 `DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `OTHER` cancelled and unstarted ones. A launch that ended with an error shows it at the end of its line; one still running, or killed before it wrote its summary, shows `running?`.

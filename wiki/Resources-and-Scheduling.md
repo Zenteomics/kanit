@@ -10,7 +10,7 @@ A launch has three limits, set on the command line:
 | Memory  | `--max-memory`  | three quarters of the memory     |
 | Jobs    | `-j`, `--jobs`  | the thread budget                |
 
-Sizes take `K`, `M`, `G` or `T` (powers of 1024); a plain number is MiB. With isolation, the default, the run's systemd scope is limited to the thread budget as a CPU quota and to the memory budget plus 256 MiB, with no swap, so the whole run stays inside what you gave it even if a task misbehaves.
+Sizes take `K`, `M`, `G` or `T` (powers of 1024); a plain number is MiB. With isolation, the default, the run's systemd scope enforces the budget itself, so the whole run stays inside what you gave it even if a rule misbehaves ([Isolation](Running-Workflows.md#isolation)).
 
 A rule whose request alone exceeds the budget can never start, so the launch refuses to begin:
 
@@ -48,7 +48,7 @@ The second step starts the critical path as early as it can, which shortens a la
 
 Each attempt runs in its own cgroup inside the run's scope:
 
-- **Memory.** The request is the cgroup's hard limit (`memory.max`). When the attempt's processes need more, the kernel kills all of them together, and the attempt fails with `out of memory: could not stay within its <N> MiB request`. The limit counts page cache too; the kernel reclaims cache at the limit, which can slow a task that writes large files under a small request, but does not kill it.
+- **Memory.** The request is the cgroup's hard limit (`memory.max`). When the attempt's processes need more, the kernel kills all of them together, and the attempt fails with `out of memory: could not stay within its <N> MiB request`. The limit counts page cache too; the kernel reclaims cache at the limit, which can slow an attempt that writes large files under a small request, but does not kill it.
 - **CPU.** The thread request becomes a CPU quota of that many CPUs (`cpu.max`). A tool that starts more threads than requested still gets only that much CPU time; pass `$WORKZ_THREADS` to it.
 - **Counters.** With isolation, workz records the cgroup's peak memory, CPU time, out-of-memory and limit events, and the time its processes stalled on CPU, memory and I/O (pressure), for every attempt.
 

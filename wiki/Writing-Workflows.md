@@ -20,7 +20,7 @@ shared = ["index"]
 
 - `name` is unique in the workflow: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - `input` lists every file or directory the command reads, and `output` every file it writes. They are the only way rules connect, and the only files workz watches for changes.
-- `shell` is one command line, run by `bash -euo pipefail` in the working directory, so a failing command anywhere in a pipeline fails the rule.
+- `shell` is one command line, run in the rule's `workdir` or else the working directory, so relative paths start there. A host rule runs it with `bash -euo pipefail`, so a failing command anywhere in a pipeline fails the rule; a [container rule](Containers-and-Services.md) runs it with the image's `/bin/sh` and `set -eu`, with `pipefail` where that shell has it.
 - `[rules.resources]` holds the request: `threads`, `memory`, units of resource groups, and the shared inputs the rule uses.
 - `priority`, `log`, `benchmark` and the other keys are optional.
 
@@ -40,11 +40,11 @@ workz creates the directory of every output before an attempt starts, and moves 
 
 Give each rule its `step`, its `sample` when it works on one, and a `category` and `tool` where they help ([Concepts](Concepts.md#steps-samples-categories-and-tools)). The labels are what the reports group by:
 
-- `workz report --suggest` turns six `align` rules into one row with its request, largest peak and suggested request.
-- The HTML report draws a table of samples by steps that points at the sample a step was slow on, and colors every attempt by its category.
+- `workz report --suggest` turns six `align` rules into one row with their request, the most memory any of them used, and a suggested request.
+- The HTML report draws the pipeline step by step, a table of samples by steps that points at the sample a step was slow on, and colors every attempt by its category.
 - The scheduler estimates a rule that has never run from the other rules of its step.
 
-Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
+Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names, as [Concepts](Concepts.md#steps-samples-categories-and-tools) describes: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
 
 ## Generate the file
 
@@ -155,7 +155,7 @@ A request is both a reservation and a limit, so it pays to size it from measurem
 3. Ask workz what each step used: `workz report --suggest` prints the largest peak and a suggested request for each step, and `workz report --bottlenecks` says which requests are far above their peaks ([Reports](Reports.md#request-sizing)).
 4. Apply the suggestions in the generator, and run again.
 
-Memory requests cover what the kernel charges to the task's cgroup, which includes page cache for the files it writes. A task that writes a large file under a small request is slowed by reclaim, not killed; one whose own memory exceeds the request is killed as out of memory, with every process of the attempt. Threads become a CPU quota of that many CPUs: a tool that starts more threads than requested is throttled to the quota.
+Memory requests cover what the kernel charges to the attempt's cgroup, which includes page cache for the files it writes. An attempt that writes a large file under a small request is slowed by reclaim, not killed; one whose own memory exceeds the request is killed as out of memory, with every process of the attempt. Threads become a CPU quota of that many CPUs: a tool that starts more threads than requested is throttled to the quota.
 
 `resources.threads` and `resources.memory` may also be written directly on the rule, and `[defaults]` gives both for rules that set neither. Every rule needs a memory request, from one of these places.
 

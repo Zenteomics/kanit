@@ -406,6 +406,31 @@ pub fn realpath(gpa: Allocator, path: []const u8) !?[]u8 {
     return try gpa.dupe(u8, buf[0..n]);
 }
 
+/// The names in the directory `path`, sorted, without those that begin with
+/// a dot; null when it does not exist or is not a directory. The names are
+/// allocated in `a`.
+pub fn dirNames(gpa: Allocator, a: Allocator, path: []const u8) !?[]const []const u8 {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    const fd: Fd = @intCast(check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    });
+    defer close(fd);
+    var names: std.ArrayList([]const u8) = .empty;
+    var entries: DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| {
+        if (e.name[0] == '.') continue;
+        try names.append(a, try a.dupe(u8, e.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    return names.items;
+}
+
 /// The entries of an open directory, without "." and "..", read with
 /// getdents64. An entry's name lives in the reader's buffer until the next
 /// call of `next`.

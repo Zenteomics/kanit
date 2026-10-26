@@ -10,7 +10,7 @@ workz is one executable. This page lists what it needs from the system, builds i
 - **Rootless Podman**, only for [container rules and services](Containers-and-Services.md).
 - **Zig 0.16.0**, to build workz.
 
-Without a systemd user manager or cgroup v2, `workz run --no-isolation` still runs workflows within the budget, but without per-task limits, counters or a private network ([Running workflows](Running-Workflows.md#without-isolation)).
+Without a systemd user manager or cgroup v2, `workz run --no-isolation` still runs workflows within the budget, but without per-attempt limits, counters or a private network ([Running workflows](Running-Workflows.md#without-isolation)).
 
 ## Build
 
@@ -46,7 +46,7 @@ workz completion bash > ~/.local/share/bash-completion/completions/workz
 
 ## Check isolation
 
-A run starts with `systemd-run --user --scope -p Delegate=yes`, and workz then creates a cgroup for every task inside that scope. This needs the user manager to own the `cpu`, `memory` and `pids` controllers:
+A run starts with `systemd-run --user --scope -p Delegate=yes`, and workz then creates a cgroup for every attempt inside that scope. This needs the user manager to own the `cpu`, `memory` and `pids` controllers:
 
 ```sh
 cat /sys/fs/cgroup/user.slice/user-$(id -u).slice/user@$(id -u).service/cgroup.controllers
@@ -72,4 +72,4 @@ printf '[workflow]\nname = "check"\n\n[[rules]]\nname = "hello"\noutput = ["hell
 workz run workflow.toml
 ```
 
-The run prints `[1/1] completed hello` and a one-line JSON summary with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.
+On a terminal the run ends with a short summary that starts with `completed` and names the launch's page; off a terminal it prints `[1/1] completed hello (0.0 s)` and a one-line JSON summary with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.

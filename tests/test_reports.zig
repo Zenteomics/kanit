@@ -1,0 +1,222 @@
+//! Unit tests of the reports: the launch model, the text reports and the
+//! HTML page.
+const std = @import("std");
+const testing = std.testing;
+const workz = @import("workz");
+const helpers = @import("helpers.zig");
+const Scratch = helpers.Scratch;
+
+test "[edge] - [report]: the median of an even count averages the middle values" {
+    try testing.expectEqual(@as(f64, 0), workz.model.median(&.{}));
+    try testing.expectEqual(@as(f64, 3), workz.model.median(&.{ 1, 3, 9 }));
+    try testing.expectEqual(@as(f64, 2.5), workz.model.median(&.{ 1, 2, 3, 40 }));
+}
+
+test "an attempt that ran but used almost none of its requests is delegated" {
+    const base: workz.model.Attempt = .{ .rule = "r", .attempt = 1, .status = "completed", .reason = "", .wall_s = 30, .cpu_s = 29, .threads = 1, .request_mib = 3072, .peak_mib = 900, .rss_mib = 880, .oom_kill = 0, .limit_events = 0, .waited_s = 0, .wait_reason = "", .cpu_stall = null, .memory_stall = null, .io_stall = null, .uses_shared = false };
+    try testing.expect(!base.delegated());
+    var client = base;
+    client.cpu_s = 0.04;
+    client.peak_mib = 4;
+    client.rss_mib = 4;
+    try testing.expect(client.delegated());
+    var quick = client;
+    quick.wall_s = 0.3;
+    try testing.expect(!quick.delegated());
+    var failed = client;
+    failed.status = "failed";
+    try testing.expect(!failed.delegated());
+}
+
+test "html report text is escaped" {
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.escape(&out.writer, "a<b> & \"c\" 'd'");
+    try testing.expectEqualStrings("a&lt;b&gt; &amp; &quot;c&quot; &#39;d&#39;", out.written());
+}
+
+test "[unit] - [report]: the html page labels every attempt, escapes its records and needs no scripts" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try s.dir("launch");
+    _ = try s.dir("launch/attempts");
+    const long = "align_sample_0042_lane_3_paired_end";
+    _ = try s.dir("launch/attempts/" ++ long);
+    _ = try s.dir("launch/attempts/" ++ long ++ "/001");
+    _ = try s.dir("launch/attempts/bad");
+    _ = try s.dir("launch/attempts/bad/001");
+    _ = try s.file("launch/launch.json",
+        \\{"workdir":"/data/rnaseq","started":"2026-01-01T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+    );
+    _ = try s.file("launch/summary.json",
+        \\{"status":"failed","elapsed_s":12.0,"selected":2,"engine":"workz 9.9.9 sha256:ab","counts":{"completed":1,"failed":1},"engine_cost":{"cpu_s":0.1,"max_rss_mib":5}}
+    );
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"sample","threads_reserved":2,"cpu_cores_used":1.5,"memory_current":104857600,"memory_reserved_mib":512}
+        \\{"time":"2026-01-01T00:00:10.000Z","event":"sample","threads_reserved":2,"cpu_cores_used":1.8,"memory_current":209715200,"memory_reserved_mib":512}
+        \\
+    );
+    _ = try s.file("launch/attempts/" ++ long ++ "/001/record.json",
+        \\{"rule":"align_sample_0042_lane_3_paired_end","attempt":1,"status":"completed","reason":"","wall_s":10.0,"cpu_s":17.0,
+        \\"started":"2026-01-01T00:00:02.000Z","request":{"threads":2,"memory_mib":512},"cgroup":{"memory_peak":209715200},
+        \\"labels":{"step":"align","category":"alignment","tool":"star","sample":"s42"},
+        \\"queue":{"waited_s":1.0,"reasons":[{"reason":"threads","seconds":1.0}]}}
+    );
+    _ = try s.file("launch/attempts/bad/001/record.json",
+        \\{"rule":"bad","attempt":1,"status":"failed","reason":"exited with status 4","wall_s":0.5,"cpu_s":0.0,
+        \\"started":"2026-01-01T00:00:01.000Z","request":{"threads":1,"memory_mib":64}}
+    );
+    _ = try s.file("launch/attempts/bad/001/stderr.log", "<boom & stuff>\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    const page = out.written();
+    const has = struct {
+        fn f(text: []const u8, part: []const u8) bool {
+            return std.mem.indexOf(u8, text, part) != null;
+        }
+    }.f;
+    try testing.expect(!has(page, "<script") and !has(page, "<boom"));
+    try testing.expect(has(page, "<h1>rnaseq</h1>") and has(page, "<span class=\"stamp s-fail\">failed</span>"));
+    try testing.expect(has(page, "<span class=\"k\">started</span>2026-01-01 00:00:00 UTC</div>") and has(page, "<span class=\"k\">engine</span>workz 9.9.9</div>"));
+    // A long rule name keeps both ends in the timeline; the table has it whole.
+    try testing.expect(has(page, ">align_sample_...3_paired_end</text>"));
+    try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>" ++ long ++ "</td><td>align</td><td>s42</td>"));
+    try testing.expect(has(page, "&lt;boom &amp; stuff&gt;"));
+    try testing.expect(has(page, "Failures (1)") and has(page, "Attempts (2)"));
+    // Without a workflow snapshot the steps come from the records. Colors go
+    // to categories in pipeline order, and the rule without a sample gets
+    // the whole-run row of the matrix.
+    try testing.expect(has(page, "id=\"pipeline\"") and has(page, "class=\"st-failed\""));
+    try testing.expect(has(page, "<div class=\"big\">1 &times; 2</div><div class=\"sub\">samples by steps, 2 categories</div>"));
+    try testing.expect(has(page, "<li><i class=\"g1\"></i><b>alignment</b>&nbsp; 17.0 s, 100%</li>"));
+    try testing.expect(has(page, "<td class=\"row\">s42</td>") and has(page, "whole run</span></td>"));
+    try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>align<small>alignment &middot; star &middot; 1 sample</small></td>"));
+    try testing.expect(has(page, "<td class=\"n\">1.7 of 2</td>"));
+    try testing.expect(has(page, ">1.0 GiB</text>") and has(page, "<td class=\"n\">512 MiB</td>"));
+    try testing.expect(has(page, "<td>threads</td>") and has(page, "<span>1.0 s</span>"));
+    try testing.expect(has(page, "prefers-color-scheme:dark") and has(page, "@media print"));
+    // A finished launch's page does not reload itself.
+    try testing.expect(!has(page, "http-equiv=\"refresh\""));
+    for (page) |c| try testing.expect(c < 0x80);
+}
+
+test "[regression] - [report]: a launch that reused rules shows them with the run that made their outputs" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const first = ".workz/launches/20260101T000000.000-aaaaaaaa";
+    const second = ".workz/launches/20260102T000000.000-bbbbbbbb";
+    for ([_][]const u8{ ".workz", ".workz/launches", first, first ++ "/attempts", first ++ "/attempts/s1__ALIGN", first ++ "/attempts/s1__ALIGN/001", first ++ "/attempts/s1__ALIGN/002", second, second ++ "/attempts", second ++ "/attempts/merge", second ++ "/attempts/merge/001" }) |d| _ = try s.dir(d);
+    // The first launch completed the alignment on its second attempt.
+    _ = try s.file(first ++ "/attempts/s1__ALIGN/001/record.json",
+        \\{"rule":"s1__ALIGN","attempt":1,"status":"failed","reason":"exited with status 1","wall_s":2.0,"cpu_s":1.0,"request":{"threads":2,"memory_mib":512}}
+    );
+    _ = try s.file(first ++ "/attempts/s1__ALIGN/002/record.json",
+        \\{"rule":"s1__ALIGN","attempt":2,"status":"completed","reason":"","wall_s":30.0,"cpu_s":50.0,"started":"2026-01-01T00:00:01.000Z","request":{"threads":2,"memory_mib":512}}
+    );
+    // The second launch reused it and ran only the merge.
+    _ = try s.file(second ++ "/launch.json",
+        \\{"workdir":"/data/rnaseq","started":"2026-01-02T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+    );
+    _ = try s.file(second ++ "/summary.json",
+        \\{"status":"completed","elapsed_s":1.5,"selected":2,"counts":{"completed":1,"reused":1}}
+    );
+    _ = try s.file(second ++ "/events.jsonl",
+        \\{"time":"2026-01-02T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
+        \\{"time":"2026-01-02T00:00:00.100Z","event":"task_reused","rule":"s1__ALIGN"}
+        \\
+    );
+    _ = try s.file(second ++ "/attempts/merge/001/record.json",
+        \\{"rule":"merge","attempt":1,"status":"completed","reason":"","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-02T00:00:00.200Z","request":{"threads":1,"memory_mib":64}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const launch = try std.fs.path.join(arena.allocator(), &.{ s.path, second });
+    const reused = try workz.model.reusedAttempts(testing.allocator, arena.allocator(), launch, &.{"s1__ALIGN"});
+    try testing.expectEqual(@as(usize, 1), reused.len);
+    try testing.expectEqualStrings("s1__ALIGN", reused[0].rule);
+    try testing.expectEqual(@as(i64, 2), reused[0].attempt);
+    try testing.expectEqualStrings("20260101T000000.000-aaaaaaaa", reused[0].reused_from.?);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    const page = out.written();
+    const has = struct {
+        fn f(text: []const u8, part: []const u8) bool {
+            return std.mem.indexOf(u8, text, part) != null;
+        }
+    }.f;
+    // The pipeline sections show both rules; the attempt table only the merge.
+    try testing.expect(has(page, "<td class=\"row\">s1</td><td class=\"cell solo reused\""));
+    try testing.expect(has(page, ", reused from launch 20260101T000000.000-aaaaaaaa"));
+    try testing.expect(has(page, "<small class=\"sub\">1 reused</small>"));
+    try testing.expect(has(page, "of which this launch ran 1.0 s;"));
+    try testing.expect(has(page, "Attempts (1)"));
+}
+
+test "[regression] - [report]: a reused rule's run may be a retry beyond its declared retries" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const first = ".workz/launches/20260101T000000.000-aaaaaaaa";
+    const second = ".workz/launches/20260102T000000.000-bbbbbbbb";
+    for ([_][]const u8{ ".workz", ".workz/launches", first, first ++ "/attempts", first ++ "/attempts/sort", second }) |d| _ = try s.dir(d);
+    // Four failed attempts, then `workz control retry` asked for a fifth.
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for (1..6) |n| {
+        const dir = try std.fmt.allocPrint(a, first ++ "/attempts/sort/{d:0>3}", .{n});
+        _ = try s.dir(dir);
+        const status = if (n == 5) "completed" else "failed";
+        _ = try s.file(try std.fmt.allocPrint(a, "{s}/record.json", .{dir}), try std.fmt.allocPrint(a, "{{\"rule\":\"sort\",\"attempt\":{d},\"status\":\"{s}\",\"wall_s\":1.0,\"cpu_s\":1.0,\"request\":{{\"threads\":1,\"memory_mib\":64}}}}", .{ n, status }));
+    }
+    const launch = try std.fs.path.join(a, &.{ s.path, second });
+    const reused = try workz.model.reusedAttempts(testing.allocator, a, launch, &.{"sort"});
+    try testing.expectEqual(@as(usize, 1), reused.len);
+    try testing.expectEqual(@as(i64, 5), reused[0].attempt);
+    // The launch that made it lists all five, in order.
+    const rows = try workz.model.attempts(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, first }));
+    try testing.expectEqual(@as(usize, 5), rows.len);
+    for (rows, 1..) |r, n| try testing.expectEqual(@as(i64, @intCast(n)), r.attempt);
+}
+
+test "[regression] - [report]: a step killed for its memory is sized above the request it exceeded" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/index", "launch/attempts/index/001", "launch/attempts/count", "launch/attempts/count/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":4096}
+        \\
+    );
+    _ = try s.file("launch/attempts/index/001/record.json",
+        \\{"rule":"index","attempt":1,"status":"failed","reason":"out of memory","wall_s":3.0,"cpu_s":2.0,"request":{"threads":1,"memory_mib":256},
+        \\"rusage":{"maxrss_kib":262144},"cgroup":{"memory_peak":268435456,"oom_kill":1}}
+    );
+    // 100 MiB of process memory and 200 MiB of page cache in the cgroup.
+    _ = try s.file("launch/attempts/count/001/record.json",
+        \\{"rule":"count","attempt":1,"status":"completed","reason":"","wall_s":10.0,"cpu_s":9.0,"request":{"threads":1,"memory_mib":2048},
+        \\"rusage":{"maxrss_kib":102400},"cgroup":{"memory_peak":314572800,"oom_kill":0}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var l = try workz.model.load(testing.allocator, arena.allocator(), try std.fs.path.join(arena.allocator(), &.{ s.path, "launch" }));
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 2), l.steps.len);
+    for (l.steps) |st| {
+        if (std.mem.eql(u8, st.name, "index")) {
+            // Half again the 256 MiB it exceeded, never the memory it reached.
+            try testing.expect(st.sizing.note == .out_of_memory);
+            try testing.expectEqual(@as(f64, 384), st.sizing.memory_mib);
+        } else {
+            try testing.expect(st.sizing.note == .measured);
+            try testing.expect(!st.used_is_peak);
+            try testing.expectEqual(@as(f64, 100), st.used_mib);
+            try testing.expectEqual(@as(f64, 300), st.peak_mib);
+            try testing.expectEqual(@as(f64, 128), st.sizing.memory_mib);
+        }
+    }
+}

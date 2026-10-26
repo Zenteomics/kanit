@@ -506,7 +506,7 @@ const Engine = struct {
             };
             if (blocked) {
                 t.status = .blocked;
-                t.reason = "a producing rule did not complete";
+                t.reason = "it needs a rule that did not complete";
                 self.finished += 1;
                 self.events.emit("task_blocked", .{ .rule = self.rule(i).name });
                 if (newly_blocked < names.len) names[newly_blocked] = self.rule(i).name;
@@ -1395,7 +1395,10 @@ const Engine = struct {
                 self.alert("failed", "{s}: {s}", .{ r.name, reason });
                 self.showTail(t.dir, 3);
             }
-        } else if (t.cancelled) self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, t.dir }) else self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, t.dir });
+        } else {
+            const log = monitor.shownPath(self.a, t.dir);
+            if (t.cancelled) self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log }) else self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
+        }
         if (!t.cancelled and !self.opts.keep_going) self.beginStop();
     }
 
@@ -1914,7 +1917,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try sys.mkdirAll(gpa, rec);
     const lock_fd = records.lock(gpa, rec) catch |err| switch (err) {
         error.Busy => {
-            std.debug.print("workz: another run holds {s}/lock\n", .{rec});
+            std.debug.print("workz: another launch is running in {s}; watch it with workz watch, or run again after it ends\n", .{wf.root});
             return .failed;
         },
         else => return err,
@@ -2046,7 +2049,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var tree: ?cgroup.Tree = null;
     if (opts.isolation) {
         tree = cgroup.setup(gpa, a) catch |err| return refusal.refuse(.invalid, switch (err) {
-            error.NotDelegated => "the run's scope cannot create task cgroups: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation",
+            error.NotDelegated => "the run's scope cannot create cgroups for attempts: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation",
             else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{@errorName(err)}),
         });
     }
@@ -2142,7 +2145,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     }
     defer if (engine.network) |n| n.stop();
     if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch |err| guard: {
-        std.debug.print("workz: cannot start the guard of --no-isolation tasks ({s}); they may outlive a killed engine\n", .{@errorName(err)});
+        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{@errorName(err)});
         break :guard null;
     };
     defer if (engine.guard) |gd| gd.stop();

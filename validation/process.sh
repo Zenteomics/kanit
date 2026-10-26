@@ -709,6 +709,25 @@ check "bash completion offers rule names and command options" '[ "$words" = "cou
 ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz control ""); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
+ids=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --launch ""); COMP_CWORD=3; _workz; echo "${COMPREPLY[*]}"')
+check "bash completion offers launch IDs" '[ "$ids" = "$(basename "$(last_launch)")" ]'
+"$workz" validate > default.txt
+rc1=$?
+"$workz" validate workflow.toml extra 2> extra.txt
+rc2=$?
+check "WORKFLOW defaults to workflow.toml, and a stray argument is refused" '[ $rc1 = 0 ] && grep -q "^valid: " default.txt && [ $rc2 = 2 ] && grep -q "unexpected argument .extra." extra.txt'
+"$workz" status --launch "$(basename "$(last_launch)")" --json > byid.json
+"$workz" status --launch 20000101T000000.000-00000000 2> noid.txt
+rc=$?
+check "status --launch shows a launch by ID and names a missing one" 'jq -e ".status == \"completed\"" byid.json > /dev/null && [ $rc = 1 ] && grep -q "no launch 20000101T000000.000-00000000" noid.txt'
+"$workz" logs --stdout --stderr x 2> streams.txt
+rc1=$?
+"$workz" run --grace 2x 2> grace.txt
+rc2=$?
+check "conflicting stream options and a bad --grace duration are refused" '[ $rc1 = 2 ] && grep -q "give --stdout or --stderr" streams.txt && [ $rc2 = 2 ] && grep -q "use a duration" grace.txt'
+"$workz" report --launch --format html 2> novalue.txt
+rc=$?
+check "an option is never taken as another option's value" '[ $rc = 2 ] && grep -q "^workz: --launch needs a value" novalue.txt'
 
 new command-line
 "$workz" help run > help-run.txt
@@ -746,8 +765,12 @@ runner=$!
 sleep 1.2
 cp "$(last_launch)/report.html" live.html
 "$workz" watch -d . --once > view.txt
+"$workz" status -d . --json > running.json
+"$workz" control -d . stop nosuch 2> ctl.txt
+ctl_rc=$?
 wait $runner
-check "watch shows the running task with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " Mi\| Ki" view.txt'
+check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
+check "watch shows the running rule with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " [KMG]iB" view.txt'
 check "a launch keeps its page, which reloads while the launch runs and stops once it ends" 'grep -q "http-equiv=\"refresh\"" live.html && grep -q "live\">running</span>" live.html && ! grep -q "http-equiv=\"refresh\"" "$(last_launch)/report.html" && grep -q "s-ok\">completed</span>" "$(last_launch)/report.html"'
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
@@ -814,7 +837,7 @@ for _ in $(seq 50); do [ "$(ls .workz/launches | wc -l)" = 3 ] && break; sleep 0
 "$workz" clean -d . --keep 1 > /dev/null 2> busy.txt
 rc=$?
 wait $runner
-check "clean refuses while a run holds the working directory" '[ $rc != 0 ] && grep -q "a run holds" busy.txt'
+check "clean refuses while a launch is running" '[ $rc != 0 ] && grep -q "a launch is running in" busy.txt'
 
 new report-html
 { header report-html
@@ -1024,7 +1047,7 @@ for _ in $(seq 100); do [ -f started.txt ] && break; sleep 0.05; done
 "$workz" run wf.toml --max-threads 1 --max-memory 128M -q > second.json 2> err.txt
 rc=$?
 wait $first
-check "a second run in the same directory is refused while the first holds the lock" '[ $rc = 1 ] && grep -q "another run holds" err.txt && [ "$(status_of first.json completed)" = 1 ]'
+check "a second run in the same directory is refused while the first holds the lock" '[ $rc = 1 ] && grep -q "another launch is running in" err.txt && [ "$(status_of first.json completed)" = 1 ]'
 
 for name in ordinary shared_inputs log_is_input log_hardlink relative_alias log_output_hardlink input_output_hardlink log_symlink duplicate_side_write; do
   new "alias-$name"

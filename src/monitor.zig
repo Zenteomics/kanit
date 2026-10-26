@@ -1,7 +1,6 @@
-//! `watch` and `status`: read-only views of a launch, built from its event
-//! stream, its attempt files and the running tasks' cgroup counters. The
-//! event stream is read incrementally: a refresh parses only the complete
-//! lines appended since the previous one.
+//! `watch` and `status`: read-only views of a launch, built from its
+//! tracker (`tracker.zig`), its attempt files and the running rules' cgroup
+//! counters, and the summary a launch ends with.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -10,382 +9,24 @@ const cgroup = @import("cgroup.zig");
 const tui = @import("tui.zig");
 const term = @import("term.zig");
 const model = @import("model.zig");
-const clean = @import("clean.zig");
+const units = @import("units.zig");
+const fields = @import("fields.zig");
+const tracker = @import("tracker.zig");
 const Allocator = std.mem.Allocator;
+const Tracker = tracker.Tracker;
+const Status = tracker.Status;
+const str = fields.str;
+const int = fields.int;
+const float = fields.float;
 
-pub const Status = enum {
-    /// Selected but not yet ready: its producers have not finished.
-    pending,
-    waiting,
-    running,
-    cancelling,
-    retrying,
-    completed,
-    reused,
-    failed,
-    blocked,
-    cancelled,
-
-    pub fn active(s: Status) bool {
-        return s == .running or s == .cancelling;
-    }
-
-    pub fn done(s: Status) bool {
-        return s == .completed or s == .reused;
-    }
-};
-
-pub const RuleView = struct {
-    name: []const u8,
-    status: Status = .waiting,
-    attempt: u32 = 0,
-    /// Attempt directory and cgroup of the latest attempt.
-    dir: []const u8 = "",
-    cg: ?[]const u8 = null,
-    /// Event times, nanoseconds since the epoch; 0 when not reached.
-    ready_ns: i128 = 0,
-    started_ns: i128 = 0,
-    finished_ns: i128 = 0,
-    /// Failure reason, or the current wait reason while waiting.
-    reason: []const u8 = "",
-    memory_peak: ?u64 = null,
-    cpu_s: ?f64 = null,
-    /// Request of the latest attempt.
-    threads: u32 = 0,
-    memory_mib: u64 = 0,
-    /// Counters of a running attempt, sampled by the interactive view. A
-    /// failed read keeps the last value; `live_cores` is the CPU used
-    /// between the last two samples.
-    live_memory: ?u64 = null,
-    live_peak: ?u64 = null,
-    live_cores: ?f64 = null,
-    live_cpu_usec: ?u64 = null,
-    live_cpu_ns: i128 = 0,
-};
-
-pub const SharedView = struct {
-    name: []const u8,
-    state: []const u8,
-    /// The largest memory peak of any of its holders.
-    memory_peak: ?u64 = null,
-    /// cgroup of the current holder, for live counters.
-    cg: ?[]const u8 = null,
-    /// Memory the holder uses, sampled by the interactive view.
-    live_memory: ?u64 = null,
-    /// A container service, not mapped files.
-    service: bool = false,
-    /// Holders started, and the seconds they took to become ready.
-    starts: u32 = 0,
-    load_s: f64 = 0,
-    loading_ns: i128 = 0,
-    /// Memory the input is counted for: a service's declared memory, or the
-    /// pages of its files.
-    declared_mib: f64 = 0,
-    failed: bool = false,
-};
-
-/// One run sample, taken every 5 s while rules run.
-pub const Sample = struct {
-    ns: i128,
-    threads_reserved: f64,
-    memory_reserved_mib: f64,
-    /// The run cgroup's memory in use and CPU cores used, when isolated.
-    memory_current: ?u64,
-    cpu_cores: ?f64,
-};
-
-/// The time a ready rule waited for a resource group, for the advice on
-/// whether a larger group would have started it earlier.
-pub const GroupWait = struct { rule: usize, group: []const u8, from_ns: i128, to_ns: i128 = 0 };
-
-/// The state of one launch, kept up to date from its event stream.
-pub const Tracker = struct {
-    arena: std.heap.ArenaAllocator,
-    gpa: Allocator,
-    events_path: []const u8,
-    offset: u64 = 0,
-    /// Bytes of a line not yet terminated.
-    partial: std.ArrayList(u8) = .empty,
-
-    launch: []const u8 = "",
-    /// Base name of the working directory, from `launch.json`; empty when
-    /// it cannot be read.
-    workdir_name: []const u8 = "",
-    selected: u32 = 0,
-    /// Time of the first event, and of `launch_started`, when the launch
-    /// began its rules after its checks.
-    started_ns: i128 = 0,
-    launch_ns: i128 = 0,
-    max_threads: u32 = 0,
-    max_memory_mib: u64 = 0,
-    /// The run's cgroup, when isolated.
-    run_cg: ?[]const u8 = null,
-    finished: bool = false,
-    finished_ns: i128 = 0,
-    final_status: []const u8 = "",
-    final_error: []const u8 = "",
-    /// The run's memory in use and CPU cores used: from the last sample, or
-    /// read live by the interactive view.
-    memory_current: ?u64 = null,
-    cpu_cores: ?f64 = null,
-    rules: std.ArrayList(RuleView) = .empty,
-    index: std.StringHashMapUnmanaged(usize) = .empty,
-    shared: std.ArrayList(SharedView) = .empty,
-    /// Every run sample, oldest first.
-    samples: std.ArrayList(Sample) = .empty,
-    /// Waits for resource groups; one still open has `to_ns` 0.
-    group_waits: std.ArrayList(GroupWait) = .empty,
-    /// The open group wait of each rule, by rule index.
-    open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
-
-    pub fn init(gpa: Allocator, launch_dir: []const u8) !Tracker {
-        var t: Tracker = .{ .arena = std.heap.ArenaAllocator.init(gpa), .gpa = gpa, .events_path = "" };
-        errdefer t.arena.deinit();
-        const a = t.arena.allocator();
-        t.events_path = try std.fs.path.join(a, &.{ launch_dir, "events.jsonl" });
-        t.launch = try a.dupe(u8, std.fs.path.basename(launch_dir));
-        if (sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20)) |text| {
-            defer gpa.free(text);
-            if (std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always })) |v| {
-                if (str(v, "workdir")) |wd| t.workdir_name = std.fs.path.basename(wd);
-            } else |_| {}
-        } else |_| {}
-        return t;
-    }
-
-    pub fn deinit(self: *Tracker) void {
-        self.partial.deinit(self.gpa);
-        self.arena.deinit();
-    }
-
-    /// Reads and applies the events appended since the last call; true when
-    /// any was applied.
-    pub fn update(self: *Tracker) !bool {
-        const fd = sys.openRead(self.gpa, self.events_path) catch |err| switch (err) {
-            error.FileNotFound => return false,
-            else => return err,
-        };
-        defer sys.close(fd);
-        var changed = false;
-        var buf: [64 * 1024]u8 = undefined;
-        while (true) {
-            const rc = linux.pread(fd, &buf, buf.len, @intCast(self.offset));
-            const n = sys.check(rc) catch return changed;
-            if (n == 0) break;
-            self.offset += n;
-            var rest: []const u8 = buf[0..n];
-            while (std.mem.indexOfScalar(u8, rest, '\n')) |nl| {
-                if (self.partial.items.len > 0) {
-                    try self.partial.appendSlice(self.gpa, rest[0..nl]);
-                    try self.apply(self.partial.items);
-                    self.partial.clearRetainingCapacity();
-                } else try self.apply(rest[0..nl]);
-                rest = rest[nl + 1 ..];
-                changed = true;
-            }
-            try self.partial.appendSlice(self.gpa, rest);
-        }
-        return changed;
-    }
-
-    fn rule(self: *Tracker, name: []const u8) !*RuleView {
-        const gop = try self.index.getOrPut(self.arena.allocator(), name);
-        if (!gop.found_existing) {
-            const owned = try self.arena.allocator().dupe(u8, name);
-            gop.key_ptr.* = owned;
-            gop.value_ptr.* = self.rules.items.len;
-            try self.rules.append(self.arena.allocator(), .{ .name = owned });
-        }
-        return &self.rules.items[gop.value_ptr.*];
-    }
-
-    fn sharedView(self: *Tracker, name: []const u8) !*SharedView {
-        for (self.shared.items) |*s| if (std.mem.eql(u8, s.name, name)) return s;
-        try self.shared.append(self.arena.allocator(), .{ .name = try self.arena.allocator().dupe(u8, name), .state = "" });
-        return &self.shared.items[self.shared.items.len - 1];
-    }
-
-    /// Applies one event line. Strings kept beyond the line are copied into
-    /// the tracker's arena; the parse itself uses a scratch arena.
-    pub fn apply(self: *Tracker, line: []const u8) !void {
-        if (line.len == 0) return;
-        var scratch = std.heap.ArenaAllocator.init(self.gpa);
-        defer scratch.deinit();
-        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch return;
-        const a = self.arena.allocator();
-        const ev = str(v, "event") orelse return;
-        const at = parseTime(str(v, "time") orelse "") orelse 0;
-        if (self.started_ns == 0) self.started_ns = at;
-        const eql = std.mem.eql;
-        if (eql(u8, ev, "launch_started")) {
-            self.launch_ns = at;
-            self.selected = @intCast(int(v, "selected") orelse 0);
-            self.max_threads = @intCast(int(v, "max_threads") orelse 0);
-            self.max_memory_mib = @intCast(int(v, "max_memory_mib") orelse 0);
-            self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-            // Every selected rule is listed from the start, as pending.
-            if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
-                const r = try self.rule(n.string);
-                r.status = .pending;
-            };
-        } else if (eql(u8, ev, "launch_finished")) {
-            self.finished = true;
-            self.finished_ns = at;
-            self.final_status = try a.dupe(u8, str(v, "status") orelse "");
-            self.final_error = try a.dupe(u8, str(v, "error") orelse "");
-        } else if (eql(u8, ev, "sample")) {
-            self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
-            self.cpu_cores = float(v, "cpu_cores_used");
-            try self.samples.append(a, .{
-                .ns = at,
-                .threads_reserved = float(v, "threads_reserved") orelse 0,
-                .memory_reserved_mib = float(v, "memory_reserved_mib") orelse 0,
-                .memory_current = self.memory_current,
-                .cpu_cores = self.cpu_cores,
-            });
-        } else if (std.mem.startsWith(u8, ev, "shared_")) {
-            const s = try self.sharedView(str(v, "name") orelse "?");
-            s.state = if (eql(u8, ev, "shared_loading")) "loading" else if (eql(u8, ev, "shared_loaded")) "ready" else if (eql(u8, ev, "shared_released")) "released" else if (eql(u8, ev, "shared_failed")) "failed" else s.state;
-            if (int(v, "memory_peak")) |m| s.memory_peak = @max(s.memory_peak orelse 0, @as(u64, @intCast(m)));
-            if (eql(u8, ev, "shared_loading")) {
-                s.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-                s.starts += 1;
-                s.loading_ns = at;
-                if (float(v, "memory_mib")) |m| {
-                    s.service = true;
-                    s.declared_mib = m;
-                } else if (float(v, "bytes")) |b| s.declared_mib = b / 1048576.0;
-            } else if (eql(u8, ev, "shared_loaded")) {
-                if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;
-            } else if (eql(u8, ev, "shared_failed")) s.failed = true;
-        } else if (str(v, "rule")) |name| {
-            const r = try self.rule(name);
-            const ri = self.index.get(name).?;
-            // A rule's wait for a resource group ends when it waits for
-            // something else or starts.
-            if (eql(u8, ev, "task_waiting") or eql(u8, ev, "task_started")) {
-                if (self.open_wait.fetchRemove(ri)) |kv| self.group_waits.items[kv.value].to_ns = at;
-            }
-            if (eql(u8, ev, "task_waiting")) {
-                if (r.ready_ns == 0) r.ready_ns = at;
-                r.status = .waiting;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
-                if (std.mem.startsWith(u8, r.reason, "group:")) {
-                    try self.open_wait.put(a, ri, self.group_waits.items.len);
-                    try self.group_waits.append(a, .{ .rule = ri, .group = r.reason["group:".len..], .from_ns = at });
-                }
-            } else if (eql(u8, ev, "task_started")) {
-                if (r.ready_ns == 0) r.ready_ns = at;
-                r.status = .running;
-                r.attempt = @intCast(int(v, "attempt") orelse 0);
-                r.dir = try a.dupe(u8, str(v, "directory") orelse "");
-                r.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-                r.threads = @intCast(int(v, "threads") orelse 0);
-                r.memory_mib = @intCast(int(v, "memory_mib") orelse 0);
-                r.started_ns = at;
-                r.finished_ns = 0;
-                r.reason = "";
-                r.live_memory = null;
-                r.live_peak = null;
-                r.live_cores = null;
-                r.live_cpu_usec = null;
-            } else if (eql(u8, ev, "task_finished")) {
-                const st = str(v, "status") orelse "";
-                r.status = if (eql(u8, st, "completed")) .completed else if (eql(u8, st, "cancelled")) .cancelled else .failed;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
-                r.finished_ns = at;
-                if (int(v, "memory_peak")) |m| r.memory_peak = @intCast(m);
-                r.cpu_s = float(v, "cpu_s");
-            } else if (eql(u8, ev, "task_retry")) {
-                r.status = .retrying;
-            } else if (eql(u8, ev, "task_reused")) {
-                r.status = .reused;
-            } else if (eql(u8, ev, "task_blocked")) {
-                r.status = .blocked;
-            } else if (eql(u8, ev, "task_failed")) {
-                r.status = .failed;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
-                if (r.finished_ns == 0) r.finished_ns = at;
-            } else if (eql(u8, ev, "task_cancelling")) {
-                r.status = .cancelling;
-            }
-        }
-    }
-
-    /// Threads and memory reserved by the running attempts (shared inputs
-    /// are not included).
-    pub fn reserved(self: *const Tracker) struct { threads: u64, memory_mib: u64 } {
-        var th: u64 = 0;
-        var mem: u64 = 0;
-        for (self.rules.items) |r| if (r.status.active()) {
-            th += r.threads;
-            mem += r.memory_mib;
-        };
-        return .{ .threads = th, .memory_mib = mem };
-    }
-
-    pub fn count(self: *const Tracker, s: Status) usize {
-        var n: usize = 0;
-        for (self.rules.items) |r| n += @intFromBool(r.status == s);
-        return n;
-    }
-};
-
-/// Parses "YYYY-MM-DDTHH:MM:SS.mmmZ" into nanoseconds since the epoch.
-pub fn parseTime(t: []const u8) ?i128 {
-    if (t.len < 20) return null;
-    const y = std.fmt.parseInt(i64, t[0..4], 10) catch return null;
-    const mo = std.fmt.parseInt(i64, t[5..7], 10) catch return null;
-    const d = std.fmt.parseInt(i64, t[8..10], 10) catch return null;
-    const h = std.fmt.parseInt(i64, t[11..13], 10) catch return null;
-    const mi = std.fmt.parseInt(i64, t[14..16], 10) catch return null;
-    const s = std.fmt.parseInt(i64, t[17..19], 10) catch return null;
-    const ms: i64 = if (t.len >= 23 and t[19] == '.') std.fmt.parseInt(i64, t[20..23], 10) catch 0 else 0;
-    // Days from civil date (Howard Hinnant's algorithm).
-    const yy = if (mo <= 2) y - 1 else y;
-    const era = @divFloor(yy, 400);
-    const yoe = yy - era * 400;
-    const mp = @mod(mo + 9, 12);
-    const doy = @divFloor(153 * mp + 2, 5) + d - 1;
-    const doe = yoe * 365 + @divFloor(yoe, 4) - @divFloor(yoe, 100) + doy;
-    const days = era * 146097 + doe - 719468;
-    const secs = days * 86400 + h * 3600 + mi * 60 + s;
-    return @as(i128, secs) * std.time.ns_per_s + @as(i128, ms) * std.time.ns_per_ms;
+fn seconds(ns: i128) f64 {
+    return @as(f64, @floatFromInt(@max(ns, 0))) / 1e9;
 }
 
-fn str(v: std.json.Value, key: []const u8) ?[]const u8 {
-    if (v != .object) return null;
-    const x = v.object.get(key) orelse return null;
-    return if (x == .string) x.string else null;
-}
-
-fn int(v: std.json.Value, key: []const u8) ?i64 {
-    if (v != .object) return null;
-    const x = v.object.get(key) orelse return null;
-    return if (x == .integer and x.integer >= 0) x.integer else null;
-}
-
-fn float(v: std.json.Value, key: []const u8) ?f64 {
-    if (v != .object) return null;
-    const x = v.object.get(key) orelse return null;
-    return switch (x) {
-        .float => x.float,
-        .integer => @floatFromInt(x.integer),
-        else => null,
-    };
-}
-
-pub fn duration(w: *std.Io.Writer, ns: i128) !void {
-    const s: u64 = @intCast(@max(@divFloor(ns, std.time.ns_per_s), 0));
-    try w.print("{d:0>2}:{d:0>2}:{d:0>2}", .{ s / 3600, s / 60 % 60, s % 60 });
-}
-
-pub fn bytes(w: *std.Io.Writer, n: ?u64) !void {
-    const v = n orelse return w.writeAll("       -");
-    const f: f64 = @floatFromInt(v);
-    if (v >= 1 << 30) return w.print("{d:>5.1} Gi", .{f / (1 << 30)});
-    if (v >= 1 << 20) return w.print("{d:>5.1} Mi", .{f / (1 << 20)});
-    return w.print("{d:>5.1} Ki", .{f / 1024});
+/// A cgroup counter in bytes, right-aligned in `width` columns, or `-`.
+fn memory(w: *std.Io.Writer, width: usize, n: ?u64) !void {
+    const v = n orelse return w.print("{s:>[1]}", .{ "-", width });
+    try units.right(w, width, units.size, .{@as(f64, @floatFromInt(v)) / 1048576.0});
 }
 
 /// A path as shown to a person: relative to the current directory when it
@@ -443,31 +84,34 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         try w.print("{s}", .{t.final_status});
         if (t.final_error.len > 0) try w.print(": {s}", .{t.final_error});
     } else {
-        try w.writeAll("elapsed ");
-        try duration(w, now_ns - t.started_ns);
+        try w.writeAll("running for ");
+        try units.duration(w, seconds(now_ns - t.started_ns));
     }
     try w.print("\n{d} selected:", .{t.selected});
     for (std.enums.values(Status)) |s| {
         const k = t.count(s);
-        if (k > 0) try w.print(" {d} {s},", .{ k, @tagName(s) });
+        if (k > 0) try w.print(" {d} {s},", .{ k, s.label() });
     }
     try w.print(" {d} done\n", .{t.count(.completed) + t.count(.reused)});
     for (t.shared.items) |s| try w.print("shared {s}: {s}\n", .{ s.name, s.state });
 
-    try w.writeAll("\nRUNNING                                      ATT  ELAPSED     MEM NOW  MEM PEAK  LAST OUTPUT\n");
-    var shown: usize = 0;
-    for (t.rules.items) |r| {
-        if (!r.status.active()) continue;
-        shown += 1;
-        try w.print("{s:<44} {d:>3}  ", .{ r.name[0..@min(r.name.len, 44)], r.attempt });
-        try duration(w, now_ns - r.started_ns);
-        try w.writeAll("  ");
-        try bytes(w, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null);
-        try w.writeAll("  ");
-        try bytes(w, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.peak") else null);
-        try w.print("  {s}\n", .{lastOutput(gpa, a, r.dir, 60)});
+    // An ended launch has nothing running; its summary is `workz status`.
+    if (!t.finished) {
+        try w.writeAll("\nRUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT\n");
+        var shown: usize = 0;
+        for (t.rules.items) |r| {
+            if (!r.status.active()) continue;
+            shown += 1;
+            try w.print("{s:<44} {d:>3}  ", .{ r.name[0..@min(r.name.len, 44)], r.attempt });
+            try units.right(w, 8, units.duration, .{seconds(now_ns - r.started_ns)});
+            try w.writeAll("  ");
+            try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null);
+            try w.writeAll("  ");
+            try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.peak") else null);
+            try w.print("  {s}\n", .{lastOutput(gpa, a, r.dir, 60)});
+        }
+        if (shown == 0) try w.writeAll("(none)\n");
     }
-    if (shown == 0) try w.writeAll("(none)\n");
 
     var failures: usize = 0;
     for (t.rules.items) |r| {
@@ -476,35 +120,44 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         failures += 1;
         if (failures > 10) continue;
         try w.print("{s}: {s}", .{ r.name, r.reason });
-        if (r.dir.len > 0) try w.print("  ({s}/stderr.log)", .{r.dir});
+        if (r.dir.len > 0) try w.print("  ({s}/stderr.log)", .{shownPath(a, r.dir)});
         try w.writeAll("\n");
     }
     if (failures > 10) try w.print("... and {d} more\n", .{failures - 10});
 }
 
-/// Shows the newest launch: interactively when both standard input and
+/// The launch to show: the one named `launch` by ID, else the newest. Null,
+/// with the reason printed, when there is none.
+pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]const u8) !?[]const u8 {
+    const rec = try records.recordsDir(a, root);
+    if (launch) |id| {
+        const dir = try std.fs.path.join(a, &.{ rec, "launches", id });
+        if (sys.exists(gpa, dir)) return dir;
+        std.debug.print("workz: no launch {s} recorded in {s}\n", .{ id, rec });
+        return null;
+    }
+    return (try records.latestLaunch(gpa, a, rec)) orelse {
+        std.debug.print("workz: no launch recorded in {s}\n", .{rec});
+        return null;
+    };
+}
+
+/// Shows the launch in `dir`: interactively when both standard input and
 /// output are terminals and `once` is not set; otherwise as text, refreshed
 /// every `interval_ms` until the launch finishes, or once.
-pub fn watch(gpa: Allocator, io: std.Io, root: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
-    var launch_arena = std.heap.ArenaAllocator.init(gpa);
-    defer launch_arena.deinit();
-    const rec = try records.recordsDir(launch_arena.allocator(), root);
-    const dir = (try records.latestLaunch(gpa, launch_arena.allocator(), rec)) orelse {
-        std.debug.print("workz: no launch recorded in {s}\n", .{rec});
-        return false;
-    };
-    var tracker = try Tracker.init(gpa, dir);
-    defer tracker.deinit();
-    if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tracker, interval_ms, color);
+pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
+    var tr = try Tracker.init(gpa, dir);
+    defer tr.deinit();
+    if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tr, interval_ms, color);
     const tty = term.isTerminal(1);
     var obuf: [16384]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
-        _ = try tracker.update();
+        _ = try tr.update();
         if (tty and !once) try out.interface.writeAll("\x1b[H\x1b[2J");
-        try render(gpa, &out.interface, &tracker, sys.realNs());
+        try render(gpa, &out.interface, &tr, sys.realNs());
         try out.interface.flush();
-        if (once or tracker.finished) return true;
+        if (once or tr.finished) return true;
         const ts: linux.timespec = .{ .sec = @intCast(interval_ms / 1000), .nsec = @intCast((interval_ms % 1000) * std.time.ns_per_ms) };
         _ = linux.nanosleep(&ts, null);
     }
@@ -517,15 +170,15 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     defer arena.deinit();
     const a = arena.allocator();
     const rec = try records.recordsDir(a, root);
-    const names = try clean.launchNames(gpa, a, rec);
-    try w.writeAll("LAUNCH                          STATUS        ELAPSED   DONE  FAILED  OTHER\n");
+    const names = try records.launchNames(gpa, a, rec);
+    try w.writeAll("LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER\n");
     var shown: usize = 0;
     var i = names.len;
     while (i > 0 and shown < n) : (shown += 1) {
         i -= 1;
         const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
         const text = sys.readFile(gpa, path, 1 << 20) catch {
-            try w.print("{s:<31} {s:<13}\n", .{ names[i], "running?" });
+            try w.print("{s:<31} running?\n", .{names[i]});
             continue;
         };
         defer gpa.free(text);
@@ -540,10 +193,9 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
         const bad = cnt(counts, "failed") + cnt(counts, "blocked");
         const other = cnt(counts, "cancelled") + cnt(counts, "not_started");
         const elapsed = float(v, "elapsed_s") orelse 0;
-        var dur: [16]u8 = undefined;
-        var dw: std.Io.Writer = .fixed(&dur);
-        try duration(&dw, @intFromFloat(elapsed * 1e9));
-        try w.print("{s:<31} {s:<13} {s} {d:>5} {d:>7} {d:>6}", .{ names[i], str(v, "status") orelse "?", dw.buffered(), done, bad, other });
+        try w.print("{s:<31} {s:<13} ", .{ names[i], str(v, "status") orelse "?" });
+        try units.right(w, 8, units.duration, .{elapsed});
+        try w.print(" {d:>5} {d:>7} {d:>6}", .{ done, bad, other });
         if (str(v, "error")) |e| try w.print("  {s}", .{e[0..@min(e.len, 100)]});
         try w.writeAll("\n");
     }
@@ -588,12 +240,15 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         try w.splatByteAll(' ', col - (outcome.len + 2));
     } else try label(w, s, col, outcome);
     var dur: [32]u8 = undefined;
-    const took = std.fmt.bufPrint(&dur, "{d:.1} s", .{elapsed}) catch "";
+    var dw: std.Io.Writer = .fixed(&dur);
+    units.duration(&dw, elapsed) catch {};
+    const took = dw.buffered();
     if (std.mem.eql(u8, outcome, "refused")) {
         try w.print("{s}\n", .{str(v, "error") orelse ""});
     } else if (std.mem.eql(u8, outcome, "completed")) {
-        try w.print("{d} rules in {s}: {d} ran, {d} reused", .{ selected, took, completed, reused });
-        if (cancelled > 0) try w.print(", {d} stopped", .{cancelled});
+        try units.count(w, selected, "rule", "rules");
+        try w.print(" in {s}: {d} ran, {d} reused", .{ took, completed, reused });
+        if (cancelled > 0) try w.print(", {d} cancelled", .{cancelled});
         try w.writeAll("\n");
     } else {
         try w.print("after {s}: {d} completed, {d} reused", .{ took, completed, reused });
@@ -651,7 +306,10 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             }
         }.gt);
         try label(w, s, col, "slowest");
-        for (last.items[0..@min(last.items.len, 3)], 0..) |r, i| try w.print("{s}{s} {d:.1} s", .{ if (i == 0) "" else ", ", r.rule, r.wall_s });
+        for (last.items[0..@min(last.items.len, 3)], 0..) |r, i| {
+            try w.print("{s}{s} ", .{ if (i == 0) "" else ", ", r.rule });
+            try units.duration(w, r.wall_s);
+        }
         try w.writeAll("\n");
     }
     // The launch's own page sits among its records; a launch without one
@@ -679,19 +337,19 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     }
 }
 
-/// Prints the newest launch's summary, or its live view while it runs: with
-/// `human`, the readable summary, else its `summary.json` as written.
-pub fn status(gpa: Allocator, io: std.Io, root: []const u8, human: bool, color: bool) !bool {
+/// Prints the summary of the launch in `dir`: with `human`, the readable
+/// summary, else its `summary.json` as written. While the launch runs, it
+/// prints the plain view, or with JSON the launch so far in the summary's
+/// shape, with status `running`.
+pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: bool) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const rec = try records.recordsDir(a, root);
-    const dir = (try records.latestLaunch(gpa, a, rec)) orelse {
-        std.debug.print("workz: no launch recorded in {s}\n", .{rec});
-        return false;
-    };
     const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), 1 << 20) catch |err| switch (err) {
-        error.FileNotFound => return watch(gpa, io, root, true, 0, false),
+        error.FileNotFound => {
+            if (human) return watch(gpa, io, dir, true, 1000, color);
+            return runningJson(gpa, dir);
+        },
         else => return err,
     };
     defer gpa.free(summary);
@@ -703,5 +361,35 @@ pub fn status(gpa: Allocator, io: std.Io, root: []const u8, human: bool, color: 
         return true;
     }
     try sys.writeAll(1, summary);
+    return true;
+}
+
+/// A launch that is still running, as JSON in the shape of `summary.json`:
+/// status `running`, the counts so far and the time since it started.
+fn runningJson(gpa: Allocator, dir: []const u8) !bool {
+    var tr = try Tracker.init(gpa, dir);
+    defer tr.deinit();
+    _ = try tr.update();
+    const doc = .{
+        .launch = std.fs.path.basename(dir),
+        .status = "running",
+        .counts = .{
+            .completed = tr.count(.completed),
+            .reused = tr.count(.reused),
+            .failed = tr.count(.failed),
+            .blocked = tr.count(.blocked),
+            .cancelled = tr.count(.cancelled),
+            .running = tr.count(.running) + tr.count(.cancelling),
+            .waiting = tr.count(.waiting) + tr.count(.retrying),
+            .pending = tr.count(.pending),
+        },
+        .selected = tr.selected,
+        .elapsed_s = if (tr.started_ns > 0) seconds(sys.realNs() - tr.started_ns) else 0,
+        .launch_dir = dir,
+    };
+    var w: std.Io.Writer.Allocating = .init(gpa);
+    defer w.deinit();
+    try w.writer.print("{f}\n", .{std.json.fmt(doc, .{})});
+    try sys.writeAll(1, w.written());
     return true;
 }

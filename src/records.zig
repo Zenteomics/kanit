@@ -55,30 +55,17 @@ pub fn newLaunch(gpa: Allocator, a: Allocator, records: []const u8) !struct { id
     return .{ .id = id, .dir = dir };
 }
 
+/// The launch IDs under `records`, oldest first: an ID begins with its
+/// start time, so the names sort by time.
+pub fn launchNames(gpa: Allocator, a: Allocator, records: []const u8) ![]const []const u8 {
+    return (try sys.dirNames(gpa, a, try std.fs.path.join(a, &.{ records, "launches" }))) orelse &.{};
+}
+
 /// The newest launch directory, or null when there is none.
 pub fn latestLaunch(gpa: Allocator, a: Allocator, records: []const u8) !?[]const u8 {
-    const dir = try std.fs.path.join(gpa, &.{ records, "launches" });
-    defer gpa.free(dir);
-    const p = try sys.z(gpa, dir);
-    defer gpa.free(p);
-    const fd: sys.Fd = @intCast(sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => return err,
-    });
-    defer sys.close(fd);
-    var best: ?[]u8 = null;
-    defer if (best) |b| gpa.free(b);
-    // Launch IDs begin with their start time, so the newest sorts last.
-    var entries: sys.DirEntries = .{ .fd = fd };
-    while (try entries.next()) |e| {
-        if (e.name[0] == '.') continue;
-        if (best == null or std.mem.order(u8, e.name, best.?) == .gt) {
-            if (best) |b| gpa.free(b);
-            best = try gpa.dupe(u8, e.name);
-        }
-    }
-    const b = best orelse return null;
-    return try std.fs.path.join(a, &.{ records, "launches", b });
+    const names = try launchNames(gpa, a, records);
+    if (names.len == 0) return null;
+    return try std.fs.path.join(a, &.{ records, "launches", names[names.len - 1] });
 }
 
 /// Append-only JSON Lines event stream. Each line is one object with a

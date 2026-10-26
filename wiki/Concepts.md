@@ -61,7 +61,7 @@ Labels are not part of the [rule key](#rule-keys-and-reuse): adding or changing 
 
 ## Launches and attempts
 
-A **launch** is one execution of `workz run`. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.workz/launches/`.
+A **launch** is one execution of `workz run`; this guide also calls it a run where that reads better, as in the run lock. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.workz/launches/`.
 
 Within a launch, each rule that runs has one or more **attempts**, numbered from 1. A failed attempt is retried while the rule has retries left. Each attempt keeps its command, request, standard output and error, and a record of what it used, in `.workz/launches/<ID>/attempts/<rule>/<NNN>/`.
 
@@ -78,10 +78,14 @@ stateDiagram-v2
     running --> retrying: failed, retries left
     retrying --> waiting
     running --> failed: failed, no retries left
-    running --> cancelled: stopped
+    running --> stopping: stopped, or the launch stops
+    stopping --> cancelled
+    waiting --> cancelled: stopped before it started
+    pending --> not_started: the launch ended first
+    waiting --> not_started: the launch ended first
 ```
 
-A **waiting** rule is ready to run but does not fit yet; workz records what it waited for, such as `threads`, `memory` or a resource group. [Running workflows](Running-Workflows.md#failures) describes failures, retries and cancellation.
+A **waiting** rule is ready to run but does not fit yet; workz records what it waited for, such as `threads`, `memory` or a resource group. A **stopping** rule has been sent `SIGTERM` and is given its grace period to end. A launch that stops after a failure, or is cancelled, leaves the rules it never started `not_started`. [Running workflows](Running-Workflows.md#failures) describes failures, retries and cancellation.
 
 ## Budget and requests
 
@@ -97,10 +101,18 @@ A **shared input** is a large read-only file, such as a genome index, that many 
 
 ## Rule keys and reuse
 
-Each time a rule completes, workz records its **rule key**: a digest of its command, its keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and the names passed with `--pass-env`), its request, its declared outputs, the identities of its input files (or their content digests, where one is stored) and the keys of the rules that produce them (or, for producers with `cutoff = true`, the digests of their outputs). A rule is **reused** in a later launch when its key is the same and its outputs are still the files it wrote. Anything else makes it run again, and its consumers follow.
+Each time a rule completes, workz records its **rule key**: a digest of its command, its keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and the names passed with `--pass-env`), its request, its declared outputs, the identities of its input files (or their content digests, where one is stored) and the keys of the rules that produce them (or, for producers with `cutoff = true`, the digests of their outputs), and the engine key ([the rule key](Reuse-and-Resume.md#the-rule-key) lists each part). A rule is **reused** in a later launch when its key is the same and its outputs are still the files it wrote. Anything else makes it run again, and its consumers follow.
 
 A file's **identity** is its inode, size, and modification and change times, so workz notices an edited file without reading it. Some files are keyed on their content instead ([Reuse and resume](Reuse-and-Resume.md#content-digests)).
 
 ## Records
 
 Everything workz knows about earlier launches is in `.workz/`: `state.json` holds the key and outputs of every completed rule, and each launch directory holds its event stream, summary and attempts. The commands that show a launch only read these files, so they work from any terminal while the launch runs and after it ends. [Records](Records.md) describes every file.
+
+## Other terms
+
+- **Engine**: the `workz run` process that drives a launch. It starts attempts, watches them and writes the records; the reports give its own CPU time and memory as its cost.
+- **Scope**: the transient systemd user unit a launch runs in, which holds its cgroups and limits it to the budget ([Isolation](Running-Workflows.md#isolation)).
+- **Cgroup**: a Linux control group. With isolation, each attempt runs in one, which enforces its request and counts what it used.
+- **Holder**: the process that keeps a shared input's files in memory while rules still need them.
+- **Podman**: the rootless container runtime that runs container rules and shared services ([Containers and services](Containers-and-Services.md)).

@@ -132,9 +132,9 @@ const style =
     \\.st-running{fill:var(--run);background:var(--run);animation:pulse 1.2s ease-in-out infinite}.st-stopping{fill:var(--warn);background:var(--warn)}
     \\.st-waiting{fill:var(--sheet);stroke:var(--run);stroke-width:1.25;stroke-dasharray:2.5 1.5;background:var(--sheet);outline:1.25px dashed var(--run);outline-offset:-1.25px}
     \\.st-pending,.st-not_run{fill:var(--sheet);stroke:var(--hair);stroke-width:1;background:var(--sheet);outline:1px solid var(--hair);outline-offset:-1px}
-    \\.st-failed{fill:var(--fail);background:var(--fail)}.st-blocked{fill:url(#hatch-x);background:repeating-linear-gradient(45deg,var(--cancel) 0 1.5px,transparent 1.5px 4px)}
+    \\.st-failed{fill:var(--fail);background:var(--fail)}.st-blocked{fill:var(--fail);fill-opacity:.2;stroke:var(--fail);stroke-width:1;background:color-mix(in srgb,var(--fail) 20%,transparent);outline:1px solid var(--fail);outline-offset:-1px}
     \\.st-cancelled{fill:var(--cancel);background:var(--cancel)}
-    \\.hatch{stroke:var(--done);stroke-width:1.5}.hatch-x{stroke:var(--cancel);stroke-width:1.5}
+    \\.hatch{stroke:var(--done);stroke-width:1.5}
     \\@keyframes pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.st-running,.live{animation:none}}
     \\.legend{display:flex;flex-wrap:wrap;gap:6px 18px;list-style:none;padding:0;margin:12px 0 0;font-size:12.5px;color:var(--ink2)}
     \\.legend i{display:inline-block;width:11px;height:11px;margin-right:6px;vertical-align:-1px}.legend b{font-weight:600;color:var(--ink)}
@@ -167,7 +167,7 @@ const style =
     \\.matrix td.reused{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.35) 0 1.5px,transparent 1.5px 5px)}
     \\.matrix td.running{background:var(--run);color:#fff;animation:pulse 1.2s ease-in-out infinite}.matrix td.waiting{outline:1.25px dashed var(--run);outline-offset:-2px}
     \\.scale{display:inline-flex;gap:2px;vertical-align:-2px;margin:0 6px 0 2px}.scale i{width:14px;height:10px;margin:0}
-    \\.strip{width:180px;height:26px;display:block}.strip circle{fill:var(--c1);stroke:var(--sheet);stroke-width:2}
+    \\.strip{width:192px;height:26px;display:block}.strip circle{fill:var(--c1);stroke:var(--sheet);stroke-width:2}
     \\.strip circle.slow{fill:var(--warn)}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
     \\.failure{border:1px solid var(--hair);border-left:3px solid var(--fail);margin:10px 0}
     \\.failure summary{cursor:pointer;padding:9px 13px}.failure .why{color:var(--ink)}
@@ -424,7 +424,16 @@ const Page = struct {
         for (cols.items) |col| most_rows = @max(most_rows, col.items.len);
         const n_cols: f64 = @floatFromInt(cols.items.len);
         const gap: f64 = 40;
-        const box_w: f64 = @max(160, @min(230, (1170 - gap * (n_cols - 1)) / n_cols));
+        // One width for every box: what the sheet leaves for each column,
+        // widened to fit the longest step name beside its count; a wider
+        // drawing scales down to the sheet.
+        var need: f64 = 0;
+        for (l.steps) |s| {
+            var count_buf: [24]u8 = undefined;
+            const count = std.fmt.bufPrint(&count_buf, "{d}/{d}", .{ s.selected(), s.selected() }) catch "";
+            need = @max(need, 12 + @as(f64, @floatFromInt(s.name.len)) * 7.2 + 10 + @as(f64, @floatFromInt(count.len)) * 6.8 + 8 + 4);
+        }
+        const box_w: f64 = @min(@max(@max(160, @min(230, (1170 - gap * (n_cols - 1)) / n_cols)), need), 280);
         const box_h: f64 = 66;
         const vgap: f64 = 18;
         const margin: f64 = 6;
@@ -444,7 +453,6 @@ const Page = struct {
         try w.writeAll("<div class=\"wide\">");
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" style=\"min-width:{d:.0}px\" role=\"img\" aria-label=\"The pipeline: {d} steps\">\n", .{ width, height, @min(width, 900), l.steps.len });
         try w.writeAll("<defs><pattern id=\"hatch\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><line class=\"hatch\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"4\"/></pattern>");
-        try w.writeAll("<pattern id=\"hatch-x\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(-45)\"><line class=\"hatch-x\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"4\"/></pattern>");
         try w.writeAll("<marker id=\"arrow\" viewBox=\"0 0 6 6\" refX=\"6\" refY=\"3\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\"><path class=\"arrow\" d=\"M0,0 L6,3 L0,6 z\"/></marker></defs>\n");
         // Wires first, under the boxes, at right angles from the right side
         // of the producer to the left side of the consumer. A wire to the
@@ -583,7 +591,10 @@ const Page = struct {
             try w.writeAll(" CPU\"></i>");
         }
         try w.writeAll("</div>\n<ul class=\"legend\">");
+        // The legend names what the bar shows: a group with no completed run
+        // yet has no CPU time to show.
         for (self.groups.names, by) |g, v| {
+            if (v <= 0) continue;
             try w.print("<li><i class=\"g{d}\"></i><b>", .{self.groups.slot(g)});
             try escape(w, g);
             try w.writeAll("</b>&nbsp; ");
@@ -785,7 +796,7 @@ const Page = struct {
         const max = @max(s.walls.items[s.walls.items.len - 1], 0.001);
         const x0: f64 = 7;
         const width: f64 = 130;
-        try w.writeAll("<svg class=\"strip\" viewBox=\"0 0 180 26\" role=\"img\" aria-label=\"wall time of each run\">");
+        try w.writeAll("<svg class=\"strip\" viewBox=\"0 0 192 26\" role=\"img\" aria-label=\"wall time of each run\">");
         try w.print("<line class=\"gridline\" x1=\"{d:.0}\" y1=\"13\" x2=\"{d:.0}\" y2=\"13\"/>", .{ x0, x0 + width });
         try w.print("<line class=\"med\" x1=\"{d:.1}\" y1=\"5\" x2=\"{d:.1}\" y2=\"21\"/>", .{ x0 + s.median_s / max * width, x0 + s.median_s / max * width });
         for (s.rules.items) |ri| {
@@ -800,7 +811,7 @@ const Page = struct {
         var buf: [32]u8 = undefined;
         var fw: std.Io.Writer = .fixed(&buf);
         try duration(&fw, max);
-        try w.print("<text x=\"{d:.0}\" y=\"16\">{s}</text></svg>", .{ x0 + width + 6, fw.buffered() });
+        try w.print("<text x=\"{d:.0}\" y=\"16\">{s}</text></svg>", .{ x0 + width + 10, fw.buffered() });
     }
 
     // ---- FIG. 4: timeline ----

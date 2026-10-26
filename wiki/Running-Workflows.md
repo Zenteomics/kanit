@@ -20,7 +20,7 @@ Off a terminal, such as in a script or a log file, each start, completion and fa
 
 Every launch keeps a page of its own, `report.html` in its launch directory ([The HTML report](Reports.md#the-html-report)). `run` prints its path when the launch starts, unless `--quiet` is given, and draws the page again every 5 s, so a browser that has it open follows the launch: the pipeline fills in rule by rule and the timeline grows. On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time. When the launch ends, the page is drawn once more and stops reloading.
 
-Only one launch runs in a working directory at a time; a second one stops at once with `another run holds .../.workz/lock`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
+Only one launch runs in a working directory at a time; a second one stops at once with `another launch is running in DIR; watch it with workz watch, or run again after it ends`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
 
 ## What a command sees
 
@@ -40,7 +40,7 @@ A host rule's command is written to `command.sh` in its attempt directory and ru
 ```mermaid
 flowchart TB
     S[run scope<br/>CPU quota, memory limit, no swap] --> E[engine<br/>workz, network holder]
-    S --> T1[task cgroup per attempt<br/>memory.max, cpu.max]
+    S --> T1[cgroup per attempt<br/>memory.max, cpu.max]
     S --> H[shared input cgroup<br/>holder or service]
     S --> C[containers<br/>Podman clients]
 ```
@@ -49,7 +49,7 @@ flowchart TB
 - Shell rules run in one user and network namespace created for the run, with only loopback.
 - `--slice NAME.slice` places the run's scope inside a systemd slice of yours, so its limits sit within the slice's.
 
-If the engine itself is killed, by `kill -9`, the out-of-memory killer or a closed session, the process that holds the run's network namespace notices that the engine's end of its pipe closed and kills the run's cgroup. Every task, container and service of the launch ends with the engine, so a new launch never races with leftovers of the old one.
+If the engine itself is killed, by `kill -9`, the out-of-memory killer or a closed session, the process that holds the run's network namespace notices that the engine's end of its pipe closed and kills the run's cgroup. Every attempt, container and service of the launch ends with the engine, so a new launch never races with leftovers of the old one.
 
 ### Without isolation
 
@@ -58,7 +58,7 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 - Requests still reserve the budget, so admission and scheduling are the same.
 - Nothing enforces requests: there is no memory limit, no out-of-memory kill of the whole attempt, no CPU quota, and no cgroup counters in the records.
 - Rules share the machine's network.
-- If the engine is killed, a guard process kills the process groups of the tasks that were running.
+- If the engine is killed, a guard process kills the process groups of the attempts that were running.
 
 ## Failures
 

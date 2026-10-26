@@ -1,5 +1,7 @@
 This page walks through a small workflow from an empty directory: write it, check it, run it, run it again, change one input, and see exactly which rules run and why. It takes a few minutes and needs only workz on your `PATH` ([Installation](Installation.md)).
 
+A few words come up before [Concepts](Concepts.md) defines them properly: a **rule** is one command with the files it reads and writes; a **launch** is one execution of `workz run`, and an **attempt** is one try of a rule within it; a rule's **key** records what it ran with, so an unchanged rule is **reused** instead of run again.
+
 ## The workflow
 
 The example computes the GC content of three samples of reads, one rule per sample, and a fourth rule that gathers the three results into a table.
@@ -186,7 +188,7 @@ rule gc_s2: runs (inputs changed)
     now 20793027:44:1792986055339942288:1792986055339942288
 ```
 
-The `was` and `now` lines are the file's identity: inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
+The `was` and `now` lines are the file's [identity](Reuse-and-Resume.md#file-identity): inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
 
 ```sh
 workz run workflow.toml
@@ -209,10 +211,10 @@ workz status --history
 ```
 
 ```text
-LAUNCH                          STATUS        ELAPSED   DONE  FAILED  OTHER
-20261026T034055.364-945de71b    completed     00:00:00     4       0      0
-20261026T034055.329-130819e8    completed     00:00:00     4       0      0
-20261026T034055.284-855c8427    completed     00:00:00     4       0      0
+LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER
+20261026T221244.010-e42904d2    completed        0.0 s     4       0      0
+20261026T221243.991-70945caf    completed        0.0 s     4       0      0
+20261026T221243.941-80c7a25e    completed        0.0 s     4       0      0
 ```
 
 `workz report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `workz report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `workz watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.

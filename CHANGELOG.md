@@ -18,6 +18,8 @@ Three changes need action:
   - `--compare` and `--bottlenecks` group by step, and a step's figures come from the latest run of every rule, this launch's or the one it reused.
   - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
   - A rule cancelled before its attempt started is recorded as `task_finished` with status `cancelled`, not as `task_failed`, and `task_failed` always has an `attempt` field, null when no attempt started.
+  - `status` off a terminal prints JSON for a running launch too, the summary's fields so far with status `running`, instead of the plain view.
+  - A command refuses an argument it does not take, and options that exclude each other, with status 2 instead of ignoring them.
 
 ### Added
 
@@ -32,6 +34,11 @@ Three changes need action:
   - On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time.
   - The page is drawn once more when the launch ends and then stops reloading; the summary names it.
 - **`report -o FILE`** writes the report to a file; `--format html` refuses to print the page onto a terminal and says to use it.
+- **Fewer words to type.**
+  - A command given no WORKFLOW reads `workflow.toml` in the current directory, the file `workz init` writes.
+  - `watch` and `status` take `--launch ID` for an earlier launch, and `--no-color`.
+  - `--grace` takes a duration such as `30s` or `1m`, as `--timeout` does.
+  - Bash completion offers launch IDs after `--launch` and `--compare`.
 - **Run output on a terminal.**
   - `run` keeps a status line under its progress lines: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the rules running.
   - A failure line shows the last lines of the attempt's standard error, and each rule blocked by a failure gets a line.
@@ -58,6 +65,12 @@ Three changes need action:
   - The timeline has a time axis, the details view has gauges, and the log view shows errors in red and warnings in yellow.
   - Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
   - `X` cancels the launch only when pressed twice within 3 s, and the selection stays on the top row as rules finish, until a key moves it.
+  - The key hints put `?` second, so a narrow terminal still shows it, and the table's hints name `S`, `R` and `X`.
+- **Plain views and summaries** write durations and sizes as the reports do, such as `1m 27s` and `203 MiB`.
+  - The plain view of a launch that has ended drops its empty running table.
+  - Failure lines off a terminal give the path of standard error relative to the current directory.
+  - A rule being stopped is `stopping` and, once it has ended, `cancelled`, in every view and summary.
+  - `run`, `verify` and `clean` refuse a running launch's directory in the same words: `a launch is running in PATH`.
 - **Build.** `build.zig.zon` pins z-toml by URL and hash, so a fresh clone builds with `zig build` alone.
 
 ### Fixed
@@ -90,6 +103,8 @@ Three changes need action:
   - The HTML page marks a failure that a later attempt recovered from, and counts blocked rules apart from failed attempts.
   - A launch without a summary takes its elapsed time from its events, and reused rules whose records were cleaned up are counted.
   - CPU shares are left out when all the CPU time adds up to less than a second.
+  - A reused rule whose run took more than four attempts, after `workz control retry`, is found with that run.
+  - Reports and the launch page read a launch's records without a stat of every file below them, a fifth faster on 2000 rules.
 - **Comparisons.**
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.
   - A step with no completed run on one side shows `-` and says on which side, instead of a change of -100%; a step reused in the launch compares the run it reused.
@@ -97,13 +112,20 @@ Three changes need action:
 - **Messages.**
   - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
   - A rule that fails because its shared input could not be loaded prints a failure line with the reason.
+  - A blocked rule's recorded reason reads as its line on the terminal does: `it needs a rule that did not complete`.
   - An option without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
-  - A run whose scope cannot create task cgroups names the controllers to delegate, and other cgroup errors name the error.
+  - A run whose scope cannot create cgroups for its attempts names the controllers to delegate, and other cgroup errors name the error.
   - The refusal for an output changed outside workz gives its advice once.
   - A group count below 1 names the count, an output listed twice in one rule says so, and a rule that writes into the path of the service it joins says so.
   - `workz graph` escapes quotes in the workflow name.
 - **`workz init`** rejects options instead of writing a file named after them, and its starter workflow describes a resource group as units that rules take.
-- **`workz completion bash`** completes every option of every command, the `control` commands, and rule names after `control stop` and `control retry`.
+- **`workz completion bash`** completes every option of every command, the `control` commands, and rule names after `control stop` and `control retry`, also after `-d DIR`.
+- **Command line.**
+  - `control stop` and `control retry` refuse a rule that the launch does not run.
+  - `logs` says when the launch or attempt it was given does not exist, instead of blaming the rule, and refuses `--stdout` with `--stderr`.
+  - `status --history 3x` is refused instead of showing 10 launches, and `--history` with `--json` or `--launch` is refused.
+  - `status` no longer accepts `watch`'s `--once` and `--interval`, and `watch --interval` under 100 is refused instead of raised.
+  - An option is never taken as the value of the one before it: `report --launch --format html` says `--launch needs a value`.
 
 ## [0.3.0] - 2026-10-25
 
