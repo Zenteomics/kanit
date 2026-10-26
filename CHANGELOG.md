@@ -16,6 +16,7 @@ Every user-visible change to workz, newest first. The format follows [Keep a Cha
 
 - A rule that uses a shared file input counts the input's path as an input, so rebuilding an index reruns the rules that read it.
 - A `state.json` upgraded from an earlier version is saved with the current format version.
+- A rule that never completed is estimated by the median wall time of its kind, as the reports compute it, when ready rules are ordered by their chain of work.
 
 ## 0.3.0 - 2026-10-25
 

@@ -38,7 +38,7 @@ When nothing is running and the ready rules still cannot start, nothing will eve
 When several ready rules fit, workz starts them in this order:
 
 1. Higher `priority` first (default 0).
-2. Among equal priorities, the rule heading the longest estimated chain of remaining work. A rule's estimate is its wall time when it last completed, else the middle wall time of completed rules of its [kind](Concepts.md#kinds-of-rules), else 1 s; a chain's length is the sum along its longest path to the end of the graph.
+2. Among equal priorities, the rule heading the longest estimated chain of remaining work. A rule's estimate is its wall time when it last completed, else the median wall time of completed rules of its [kind](Concepts.md#kinds-of-rules), else 1 s; a chain's length is the sum along its longest path to the end of the graph.
 3. Then the rule that became ready first.
 4. Then the rule that comes first in the file.
 

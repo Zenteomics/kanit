@@ -462,6 +462,12 @@ test "pressure totals are read from their some and full lines" {
     try testing.expectEqual(@as(?u64, null), workz.cgroup.pressureTotal("garbage\n", "some"));
 }
 
+test "[edge] - [report]: the median of an even count averages the middle values" {
+    try testing.expectEqual(@as(f64, 0), workz.report.median(&.{}));
+    try testing.expectEqual(@as(f64, 3), workz.report.median(&.{ 1, 3, 9 }));
+    try testing.expectEqual(@as(f64, 2.5), workz.report.median(&.{ 1, 2, 3, 40 }));
+}
+
 test "kinds of rules drop their sample part" {
     try testing.expectEqualStrings("STAR_ALIGN", workz.report.pattern("pool_01_baseline__STAR_ALIGN"));
     try testing.expectEqualStrings("classify", workz.report.pattern("classify_03JW"));

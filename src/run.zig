@@ -509,7 +509,7 @@ const Engine = struct {
             est[i] = 1;
             if (by_kind.get(report.pattern(r.name))) |list| {
                 std.mem.sort(f64, list.items, {}, std.sort.asc(f64));
-                est[i] = list.items[list.items.len / 2];
+                est[i] = report.median(list.items);
             }
         };
         const ranks = try self.a.alloc(f64, n);

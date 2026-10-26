@@ -260,7 +260,8 @@ fn kindStats(a: Allocator, rows: []const Attempt) !std.StringArrayHashMapUnmanag
     return kinds;
 }
 
-fn median(xs: []const f64) f64 {
+/// The median of `xs`, which must be sorted ascending; 0 when empty.
+pub fn median(xs: []const f64) f64 {
     if (xs.len == 0) return 0;
     const m = xs.len / 2;
     return if (xs.len % 2 == 1) xs[m] else (xs[m - 1] + xs[m]) / 2;
