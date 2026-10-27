@@ -8,7 +8,7 @@ Reports look at a launch in two scopes:
 The reports use these terms:
 
 - **Attempt**: one run of a rule's command. A rule that is retried makes several in one launch.
-- **Waiting once ready**: the time from a rule's last producer ending to its start, by what it waited for: `threads`, `memory`, `jobs`, a group, `loading shared inputs`, or `starting` for the engine's own time after the budget had room.
+- **Waiting once ready**: the time from a rule's last producer ending to its start, by what it waited for: `threads`, `memory`, `jobs`, a group, `loading shared:NAME`, or `starting` for the engine's own time after the budget had room.
 - **Held**: on the critical path, the time a rule waited after the rule before it on the path ended, for its other producers.
 - **Rule-seconds**: seconds added up over rules, so ten rules waiting for 3 s make 30 rule-seconds; divided by the elapsed time, the number of rules waiting on average.
 - **Bound**: a time the launch could not be shorter than, given the work its attempts did, such as its critical path or its reserved thread-seconds over the thread budget.
@@ -23,7 +23,7 @@ The reports use these terms:
 ```text
 rule	attempt	status	wall_s	cpu_s	cpu_efficiency	threads	memory_mib	peak_mib	max_rss_mib	peak_per_request	oom_kills	limit_events	waited_s	wait_reason	cpu_stall	memory_stall	io_stall	idle	reason	step	sample	category	tool
 align_S1	1	completed	17.008	47.239	0.9258	3	1500	403.1	402.9	0.2687	0	0	0.000	-	0.001	0.000	0.000	false	-	align	S1	alignment	bowtie2
-align_S2	1	completed	20.000	56.145	0.9357	3	1500	402.5	403.8	0.2683	0	0	0.183	loading shared inputs	0.000	0.000	0.000	false	-	align	S2	alignment	bowtie2
+align_S2	1	completed	20.000	56.145	0.9357	3	1500	402.5	403.8	0.2683	0	0	0.183	loading shared:genome	0.000	0.000	0.000	false	-	align	S2	alignment	bowtie2
 trim_S4	1	failed	0.002	0.002	0.4501	2	512	1.0	3.7	0.0020	0	0	5.022	group:disk	0.002	0.000	0.000	false	exited with status 1: trim: temporary failure writing trimmed/S4.fq	trim	S4	trimming	fastp
 trim_S4	2	completed	3.004	2.985	0.4968	2	512	1.6	3.7	0.0032	0	0	5.006	threads	0.000	0.000	0.000	false	-	trim	S4	trimming	fastp
 ```
@@ -81,7 +81,7 @@ critical path (the longest chain of work in this launch, and when each rule wait
 waiting for resources (ready rules that waited, on average over the launch, and their rule-seconds)
   threads                             3.0 rules     2m 24s
   group:disk                          1.2 rules     58.2 s
-  loading shared inputs              <0.1 rules      0.2 s
+  loading shared:genome              <0.1 rules      0.2 s
 
 resource groups (while their rules waited)
   disk                              58.2 s waited; 1 run sample while they waited, too few to judge

@@ -425,6 +425,9 @@ sed -i 's/echo v1/echo v2/' wf.toml
 "$workz" plan wf.toml > plan.txt
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "a rebuilt service index runs the rules that join it again, after the rule that writes it" '[ "$(status_of s1.json completed)" = 2 ] && grep -q "run   use  (producer build runs)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(cat u.txt)" = v2 ]'
+ev="$(last_launch)/events.jsonl"
+"$workz" report wf.toml --bottlenecks > bottlenecks.txt
+check "records name the shared input each attempt held and the attempts each holder served" 'jq -e "select(.event == \"task_started\" and .rule == \"use\") | .shared == [\"ix\"]" "$ev" > /dev/null && jq -e "select(.event == \"shared_released\") | .users == 1 and .held_s > 0" "$ev" > /dev/null && grep -q "^  ix  *service  *1  *1 " bottlenecks.txt'
 
 new service-retry
 { header service-retry

@@ -45,6 +45,8 @@ pub const RuleView = struct {
     name: []const u8,
     status: Status = .waiting,
     attempt: u32 = 0,
+    /// The shared inputs its latest attempt holds.
+    shared: []const []const u8 = &.{},
     /// Attempt directory and cgroup of the latest attempt.
     dir: []const u8 = "",
     cg: ?[]const u8 = null,
@@ -72,6 +74,8 @@ pub const RuleView = struct {
 pub const SharedView = struct {
     name: []const u8,
     state: []const u8,
+    /// Rules whose attempts started using it, by rule index, each once.
+    users: std.ArrayList(usize) = .empty,
     /// The largest memory peak of any of its holders.
     memory_peak: ?u64 = null,
     /// cgroup of the current holder, for live counters.
@@ -314,6 +318,16 @@ pub const Tracker = struct {
                 r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
+                // The shared inputs the attempt holds.
+                if (v.object.get("shared")) |list| if (list == .array) {
+                    var names: std.ArrayList([]const u8) = .empty;
+                    for (list.array.items) |item| if (item == .string) {
+                        try names.append(a, try a.dupe(u8, item.string));
+                        const sv = try self.sharedView(item.string);
+                        if (std.mem.indexOfScalar(usize, sv.users.items, ri) == null) try sv.users.append(a, ri);
+                    };
+                    r.shared = names.items;
+                };
                 r.reason = "";
                 r.live_memory = null;
                 r.live_peak = null;

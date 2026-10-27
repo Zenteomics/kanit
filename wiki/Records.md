@@ -141,7 +141,7 @@ Launch events:
 Rule events:
 
 - `task_waiting`: `rule`, `reason`.
-- `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`.
+- `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`, `shared` (the shared inputs it holds).
 - `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.
 - `task_failed`: `rule`, `attempt` (null when the rule failed before an attempt started) and `reason`.
@@ -154,7 +154,7 @@ Shared input events:
 
 - `shared_loading`: `name`, `pid`, `cgroup`, and `path` and `bytes` for a file input, or `container` and `memory_mib` for a service.
 - `shared_loaded`: `name`, `bytes`, `holder_file_bytes`.
-- `shared_released`: `name`, `memory_peak`, `cpu_s`.
+- `shared_released`: `name`, `memory_peak`, `cpu_s`, `users` (attempts that started using it while it was held) and `held_s`.
 - `shared_retry`: `name`, `reason`, `next_start`.
 - `shared_failed`: `name`, `reason`, `memory_peak`.
 - `shared_timeout`: `name`.

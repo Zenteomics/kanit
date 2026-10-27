@@ -243,6 +243,10 @@ const Holder = struct {
     stop_fd: sys.Fd = -1,
     /// Starts of this holder in the launch, which name its containers.
     starts: u32 = 0,
+    /// Attempts that started using it since it last started, and when
+    /// that was (monotonic).
+    served: u32 = 0,
+    started_ns: i128 = 0,
     /// When a stopping holder is killed.
     kill_at: ?i128 = null,
     /// Why the holder failed; rules that need it fail with this reason.
@@ -742,7 +746,11 @@ const Engine = struct {
                 try self.setWait(i, null);
                 self.failStaged(i, why);
             } else if (waiting) {
-                try self.setWait(i, "loading shared inputs");
+                // Named by the first input not ready, as a group names itself.
+                const name = for (r.shared_index) |hi| {
+                    if (self.holders[hi].st != .ready) break self.wf.shared[hi].name;
+                } else unreachable;
+                try self.setWait(i, try std.fmt.allocPrint(self.a, "loading shared:{s}", .{name}));
             } else try self.start(i);
         }
     }
@@ -932,10 +940,11 @@ const Engine = struct {
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
         self.queueVersion(r) catch {};
+        for (r.shared_index) |hi| self.holders[hi].served += 1;
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
-        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s });
+        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
         self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
     }
 
@@ -1030,6 +1039,7 @@ const Engine = struct {
 
     fn startHolder(self: *Engine, hi: usize) !void {
         self.holders[hi].starts += 1;
+        self.holders[hi].started_ns = sys.monoNs();
         if (self.wf.shared[hi].isService()) return self.startService(hi);
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
@@ -1287,7 +1297,8 @@ const Engine = struct {
         }
         if (was == .stopping) {
             h.st = .idle;
-            self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped) });
+            self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped), .users = h.served, .held_s = @as(f64, @floatFromInt(sys.monoNs() - h.started_ns)) / 1e9 });
+            h.served = 0;
             // A rule admitted while the holder stopped needs it again.
             if (h.users > 0) try self.startHolderOrFail(hi);
             return;
