@@ -5,7 +5,7 @@ _workz() {
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
-    local commands="init schema validate plan explain graph run control watch status logs report verify clean completion help version"
+    local commands="init prepare schema validate plan explain graph run control watch status logs report verify clean completion help version"
     if [ "$COMP_CWORD" = 1 ]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
@@ -45,8 +45,9 @@ _workz() {
         run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet --json --no-color" ;;
         plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --pass-env --threads" ;;
         explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
-        validate) opts="$opts -t --target" ;;
+        validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
+        prepare) opts="-o --output --check" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
         status) opts="$opts --history --json --launch --no-color" ;;
@@ -54,7 +55,7 @@ _workz() {
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
         clean) opts="$opts --keep --previous --dry-run" ;;
         control) ;;
-        init) opts="-h --help" ;;
+        init) opts="-h --help --template" ;;
         completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
         help) COMPREPLY=($(compgen -W "$commands" -- "$cur")); return ;;
     esac

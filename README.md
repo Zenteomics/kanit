@@ -5,6 +5,7 @@ workz runs a prepared graph of file-producing rules on one Linux workstation. It
 ![The workz watch view of a running launch: gauges for progress, threads and memory against the budget, then every rule, with the running ones first showing their CPU use and a memory bar against their request.](wiki/images/watch.png)
 
 - **Explicit graphs.** A TOML file lists rules with their inputs, outputs, command and request; a script generates it for any number of samples.
+- **Steps written once.** A pipeline template describes each step once over a sample sheet; `workz prepare` writes the explicit workflow, one labelled rule per sample, and `--check` shows what an edit changes.
 - **Fits the machine.** Rules start in critical-path order within a thread, memory and job budget, with resource groups for limits such as disk bandwidth.
 - **Enforced requests.** Each attempt runs in its own cgroup inside a systemd scope, with no network; a rule that exceeds its memory is stopped, not the machine.
 - **Exact reuse.** A rule runs again only when its command, environment, request, declared outputs, inputs, producers or the engine key changed, or when you ask, and a changed output is never silently overwritten.
@@ -31,6 +32,8 @@ workz run workflow.toml --max-threads 2 --max-memory 1G   # run it on 2 threads 
 cat out/report.txt                                        # reads: 1000
 workz report --bottlenecks                                # what limited the run
 ```
+
+For one rule per sample, `workz init --template` writes a pipeline template and sample sheet instead, and `workz prepare` writes the workflow from them ([Writing workflows](wiki/Writing-Workflows.md#prepare-from-a-template)).
 
 Then follow [Getting started](wiki/Getting-Started.md), which builds, runs and changes a small workflow step by step.
 

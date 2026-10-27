@@ -202,6 +202,14 @@ workz clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
 
 Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. `--dry-run` names each launch whose `previous/` directories it would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
 
+## prepare
+
+```text
+workz prepare [TEMPLATE] [-o WORKFLOW] [--check]
+```
+
+Writes the workflow a pipeline template describes ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)): TEMPLATE defaults to `pipeline.toml` and WORKFLOW to `workflow.toml` beside it. The result is checked as `validate` would before it replaces WORKFLOW; one that is not valid is kept beside it as `WORKFLOW.prepare-tmp` to read, with exit status 2. `--check` writes nothing: it prints the rules the template would add, remove and change against WORKFLOW, and whether the other tables changed, and exits 1 if anything would.
+
 ## schema
 
 ```text
@@ -212,10 +220,10 @@ Prints a JSON Schema of the workflow format: every table and key `validate` acce
 
 
 ```text
-workz init [FILE]
+workz init [FILE] [--template]
 ```
 
-Writes a commented starter workflow to `FILE` (default `workflow.toml`) and never overwrites an existing file.
+Writes a commented starter workflow to `FILE` (default `workflow.toml`). With `--template`, writes a commented pipeline template instead (default `pipeline.toml`) and a `samples.tsv` beside it, for `workz prepare`. It never overwrites an existing file.
 
 ## completion
 

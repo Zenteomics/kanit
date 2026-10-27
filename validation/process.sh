@@ -587,6 +587,45 @@ new version-fail
 "$workz" report wf.toml --methods > methods.txt
 check "a version command that fails records no version" 'jq -e ".[0].status == \"failed\" and .[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
 
+new prepare
+mkdir reads && echo one > reads/a.txt && echo two > reads/b.txt
+printf 'sample\treads\nA\treads/a.txt\nB\treads/b.txt\n' > samples.tsv
+cat > pipeline.toml <<'TOML'
+[workflow]
+name = "prepared"
+[defaults]
+memory = "64M"
+[samples]
+sheet = "samples.tsv"
+[[steps]]
+name = "upper"
+for_each = "sample"
+input = ["{reads}"]
+output = ["up/{sample}.txt"]
+shell = "awk '{print toupper($0)}' {input} > {output}"
+[[steps]]
+name = "join"
+input = ["up/{sample}.txt"]
+output = ["all.txt"]
+shell = "cat {input} > {output}"
+TOML
+"$workz" prepare > prep.txt
+"$workz" prepare --check > check1.txt
+crc1=$?
+"$workz" run "${iso[@]}" -q > s.json
+check "prepare writes one rule per sample, labelled, and the workflow runs" 'grep -q "^wrote .*/workflow.toml: 3 rules from 2 steps" prep.txt && grep -q "^name = \"A__upper\"$" workflow.toml && grep -q "^sample = \"B\"$" workflow.toml && [ "$(status_of s.json completed)" = 3 ] && [ "$(cat all.txt)" = "$(printf "ONE\nTWO")" ] && [ $crc1 = 0 ] && grep -q "^unchanged" check1.txt'
+sed -i 's/toupper/tolower/' pipeline.toml
+"$workz" prepare --check > check2.txt
+crc2=$?
+cp workflow.toml before.toml
+printf '[[steps]]\nname = "again"\noutput = ["all.txt"]\nshell = "true"\n' >> pipeline.toml
+"$workz" prepare --check 2> badc.txt
+bcrc=$?
+[ -e workflow.toml.prepare-tmp ] && kept_c=1 || kept_c=0
+"$workz" prepare 2> bad.txt
+brc=$?
+check "prepare --check names changed rules; a template that clashes leaves the workflow alone" '[ $crc2 = 1 ] && grep -q "^change 2: A__upper, B__upper$" check2.txt && [ $brc = 2 ] && grep -q "both produce .all.txt." bad.txt && cmp -s before.toml workflow.toml && [ $bcrc = 2 ] && [ $kept_c = 0 ] && grep -q "prepares is not valid$" badc.txt && [ -e workflow.toml.prepare-tmp ]'
+
 new setup-failure
 { header setup-failure
   rule logged '[]' '["l.txt"]' '"touch l.txt"' 'log = "logs/l.log"'
@@ -905,6 +944,12 @@ mkdir data && seq 5 > data/reads.txt
 rc=$?
 "$workz" run workflow.toml "${iso[@]}" -q > s.json
 check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 2 ] && grep -q "does not overwrite" again.txt && [ "$(status_of s.json completed)" = 2 ] && [ "$(cat out/report.txt)" = "reads: 5" ]'
+mkdir tpl && cd tpl && mkdir data && seq 3 > data/S1.txt && seq 4 > data/S2.txt
+"$workz" init --template > init.txt
+"$workz" prepare > prep.txt
+"$workz" run "${iso[@]}" -q > s.json
+check "init --template writes a template and sample sheet that prepare and run" '[ "$(status_of s.json completed)" = 3 ] && [ "$(cat out/report.txt)" = "$(printf "3\n4")" ]'
+cd ..
 words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run workflow.toml -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
 opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz plan --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers rule names and command options" '[ "$words" = "count report" ] && [ "$opts" = "--summary" ]'

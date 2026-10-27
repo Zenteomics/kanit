@@ -177,6 +177,25 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 - Every group and shared input named must be declared.
 - Only container rules can use a service, and a rule can use one service.
 
+## Pipeline templates
+
+The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; shared inputs may use `[params]`.
+
+| Table          | Key        | Type   | Meaning                                    |
+| -------------- | ---------- | ------ | ------------------------------------------ |
+| `[samples]`    | `sheet`    | path   | TSV, or CSV for `.csv`, by the template    |
+| `[samples]`    | `names`    | names  | the samples, without a sheet               |
+| `[params]`     | any name   | value  | a string, number or boolean for `{name}`   |
+| `[[steps]]`    | `name`     | name   | the step, required                         |
+| `[[steps]]`    | `for_each` | string | `"sample"`: one rule per sample            |
+| `[[steps]]`    | rule keys  |        | as in `[[rules]]`                          |
+
+- The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow rule names.
+- A step takes every `[[rules]]` key except `step` and `sample`, which `prepare` sets, and `name`, which names the step. A template has no `[[rules]]`: a step without `for_each` is one rule.
+- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. A param may not share a column's name.
+- In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.
+- An unknown `{name}` is an error except in `shell` and a service's `command`, where it stays as written.
+
 ## What validate checks, and what it does not
 
 `workz validate` checks everything above and the graph: every key, every value, every name, unique outputs, and the absence of cycles. Some things are checked only when a launch starts, because they depend on the machine and the files, and only for the selected rules:

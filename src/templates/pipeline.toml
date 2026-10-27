@@ -1,0 +1,44 @@
+# A workz pipeline template: each step once, and the samples it runs for.
+# `workz prepare` writes the explicit workflow.toml from it, one rule per
+# sample for a step with `for_each = "sample"`; run and inspect that file as
+# any workflow.
+#
+#   workz prepare                     writes workflow.toml
+#   workz prepare --check             the rules an edit would add, remove or change
+#   workz graph --by step             the steps and what feeds them
+#   workz run
+#
+# {name} takes a column of the sample sheet, a [params] value or {step}; in
+# `shell`, {input}, {output} and {threads} are the rule's own. Other braces,
+# such as awk's {print $1} or ${HOME}, stay as written.
+
+[workflow]
+name = "example"
+version = "1"
+
+[defaults]
+memory = "256M"
+
+# One row per sample, with a header; the column `sample` names each.
+[samples]
+sheet = "samples.tsv"
+
+# Values every step may use.
+[params]
+outdir = "out"
+
+[[steps]]
+name = "count"
+for_each = "sample"                 # one rule per sample: S1__count, S2__count
+input = ["{reads}"]                 # a column of samples.tsv
+output = ["{outdir}/{sample}.count"]
+shell = "wc -l < {input} > {output}"
+version = "wc --version | head -1"
+threads = 1
+
+[[steps]]
+name = "report"                     # one rule
+input = ["{outdir}/{sample}.count"] # a column in a list: every sample's file
+output = ["{outdir}/report.txt"]
+shell = "cat {input} > {output}"
+memory = "64M"

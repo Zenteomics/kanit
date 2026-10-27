@@ -47,6 +47,33 @@ const rerun_opts = [_]Opt{
 
 const commands = [_]Command{
     .{
+        .name = "prepare",
+        .args = "[TEMPLATE] [-o WORKFLOW] [--check]",
+        .summary = "write the workflow a pipeline template describes",
+        .group = .write,
+        .common = .none,
+        .about =
+        \\Compiles a pipeline template (default: pipeline.toml) into the explicit
+        \\workflow the engine runs (default: workflow.toml beside it). Each [[steps]]
+        \\entry is one rule, or with for_each = "sample" one rule per row of the
+        \\sample sheet, named SAMPLE__STEP and labelled with its step and sample.
+        \\{name} takes a sample-sheet column, a [params] value or the step name; in
+        \\shell, {input}, {output} and {threads} name the rule's own. Other braces stay
+        \\as written. The result is checked as validate would before it replaces the
+        \\workflow; --check prints the rules it would add, remove and change, and
+        \\exits 1 if any, without writing.
+        ,
+        .options = &.{
+            .{ .flag = "-o, --output FILE", .desc = "the workflow to write (default: workflow.toml)" },
+            .{ .flag = "--check", .desc = "compare with the current workflow; write nothing" },
+        },
+        .examples =
+        \\workz prepare
+        \\workz prepare --check
+        \\workz prepare rnaseq.pipeline.toml -o rnaseq.toml
+        ,
+    },
+    .{
         .name = "schema",
         .args = "",
         .summary = "print a JSON Schema of the workflow format, for editors",
@@ -62,17 +89,20 @@ const commands = [_]Command{
     },
     .{
         .name = "init",
-        .args = "[FILE]",
-        .summary = "write a commented starter workflow",
+        .args = "[FILE] [--template]",
+        .summary = "write a commented starter workflow or pipeline template",
         .group = .write,
         .common = .none,
         .about =
         \\Writes a commented starter workflow to FILE (default: workflow.toml) in the
-        \\current directory. It never overwrites a file that exists.
+        \\current directory. With --template, writes a pipeline template instead
+        \\(default: pipeline.toml) and a samples.tsv beside it, for workz prepare. It
+        \\never overwrites a file that exists.
         ,
         .examples =
         \\workz init
         \\workz init rnaseq.toml
+        \\workz init --template
         ,
     },
     .{
@@ -520,7 +550,7 @@ pub fn main(init: std.process.Init) !u8 {
     const code: Exit = if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
         try out(init.io, "workz {s}\n", .{workz.version});
         break :blk .ok;
-    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
+    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "prepare")) try cmdPrepare(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
     return @intFromEnum(code);
 }
 
@@ -1001,16 +1031,130 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
 /// The workflow file of commands given none, and the file `init` writes.
 const default_workflow = "workflow.toml";
 const starter_workflow = @embedFile("templates/workflow.toml");
+const starter_pipeline = @embedFile("templates/pipeline.toml");
 const bash_completion = @embedFile("templates/completion.bash");
 
 fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
-    for (args) |arg| if (arg.len > 1 and arg[0] == '-') return try unknownOption(c, arg);
-    if (args.len > 1) return fail("init takes at most one file name", .{});
-    const path = if (args.len == 1) args[0] else default_workflow;
+    var template = false;
+    var file: ?[]const u8 = null;
+    for (args) |arg| {
+        if (std.mem.eql(u8, arg, "--template")) {
+            template = true;
+        } else if (arg.len > 1 and arg[0] == '-') {
+            return try unknownOption(c, arg);
+        } else if (file == null) {
+            file = arg;
+        } else return fail("init takes at most one file name", .{});
+    }
+    if (template) {
+        const path = file orelse "pipeline.toml";
+        const sheet = if (std.fs.path.dirname(path)) |d| try std.fs.path.join(c.a, &.{ d, "samples.tsv" }) else "samples.tsv";
+        for ([_][]const u8{ path, sheet }) |p| if (sys.exists(c.gpa, p)) return fail("{s} exists; init does not overwrite", .{p});
+        try sys.writeFile(c.gpa, path, starter_pipeline);
+        try sys.writeFile(c.gpa, sheet, "sample\treads\nS1\tdata/S1.txt\nS2\tdata/S2.txt\n");
+        try out(c.io, "wrote {s} and {s}; its steps read data/S1.txt and data/S2.txt, which it does not create. Edit them, then: workz prepare\n", .{ path, sheet });
+        return .ok;
+    }
+    const path = file orelse default_workflow;
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     try sys.writeFile(c.gpa, path, starter_workflow);
     try out(c.io, "wrote {s}; its example rules read data/reads.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
     return .ok;
+}
+
+fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
+    var template: ?[]const u8 = null;
+    var output: ?[]const u8 = null;
+    var check = false;
+    var i: usize = 0;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--check")) {
+            check = true;
+        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
+            if (i + 1 >= args.len) return fail("{s} needs a value", .{arg});
+            i += 1;
+            output = args[i];
+        } else if (arg.len > 1 and arg[0] == '-') {
+            return try unknownOption(c, arg);
+        } else if (template == null) {
+            template = arg;
+        } else return fail("prepare takes one template file", .{});
+    }
+    const cwd = try sys.cwd(c.a);
+    const shown = template orelse "pipeline.toml";
+    const path = try sys.absolute(c.a, cwd, shown);
+    if (!sys.exists(c.gpa, path)) return fail("no template {s}; a template is a pipeline file with [[steps]] (see workz help prepare)", .{shown});
+    const out_path = if (output) |o| try sys.absolute(c.a, cwd, o) else try std.fs.path.join(c.a, &.{ std.fs.path.dirname(path) orelse ".", default_workflow });
+    if (std.mem.eql(u8, out_path, path)) return fail("the template and the workflow it prepares are the same file: give another with -o", .{});
+    var problem: workz.prepare.Problem = .{};
+    const text = workz.prepare.compile(c.gpa, c.a, path, shown, &problem) catch |err| switch (err) {
+        error.Invalid => return fail("{s}", .{problem.message}),
+        else => return err,
+    };
+    // The prepared workflow passes the same checks as any other before it
+    // replaces the current one.
+    // A check leaves the directory alone: its copy goes to the temporary
+    // directory, so it also works where the workflow cannot be written.
+    const tmp = if (check)
+        try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{d}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", std.os.linux.getpid() })
+    else
+        try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
+    try sys.writeFile(c.gpa, tmp, text);
+    var keep_tmp = false;
+    defer if (!keep_tmp) sys.unlink(c.gpa, tmp) catch {};
+    const root = std.fs.path.dirname(out_path) orelse ".";
+    var wproblem: workflow.Problem = .{};
+    var wf = workflow.load(c.gpa, tmp, root, &wproblem) catch |err| switch (err) {
+        error.Invalid => {
+            notValid(c, shown, tmp, check, &keep_tmp, wproblem);
+            return .usage;
+        },
+        else => return err,
+    };
+    defer wf.deinit();
+    var g = graph.build(c.gpa, &wf, &wproblem) catch |err| switch (err) {
+        error.Cycle, error.Invalid => {
+            notValid(c, shown, tmp, check, &keep_tmp, wproblem);
+            return .usage;
+        },
+        else => return err,
+    };
+    defer g.deinit();
+    var steps: std.StringHashMapUnmanaged(void) = .empty;
+    for (wf.rules) |r| try steps.put(c.a, r.labels.step, {});
+    if (check) {
+        const old = sys.readFile(c.gpa, out_path, 64 << 20) catch |err| switch (err) {
+            error.FileNotFound => {
+                try out(c.io, "{s} does not exist: prepare would write {d} {s} from {d} {s}\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps" });
+                return .failed;
+            },
+            else => return err,
+        };
+        defer c.gpa.free(old);
+        var text_out: std.Io.Writer.Allocating = .init(c.gpa);
+        defer text_out.deinit();
+        const differs = try workz.prepare.writeDiff(c.a, &text_out.writer, old, text);
+        try sys.writeAll(1, text_out.written());
+        return if (differs) .failed else .ok;
+    }
+    try sys.rename(c.gpa, tmp, out_path);
+    keep_tmp = true;
+    try out(c.io, "wrote {s}: {d} {s} from {d} {s}. Next: workz graph --by step, then workz plan\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps" });
+    return .ok;
+}
+
+/// Reports a prepared workflow that is not valid. With `--check` the
+/// file is removed, as a check writes nothing; otherwise it is kept to read.
+fn notValid(c: Ctx, shown: []const u8, tmp: []const u8, check: bool, keep_tmp: *bool, problem: workflow.Problem) void {
+    if (check) {
+        std.debug.print("workz: the workflow {s} prepares is not valid\n", .{shown});
+    } else {
+        keep_tmp.* = true;
+        std.debug.print("workz: the workflow {s} prepares is not valid; it is kept as {s} to read\n", .{ shown, tmp });
+    }
+    printProblems(c, if (check) "the prepared workflow" else tmp, tmp, problem);
+    c.gpa.free(problem.message);
 }
 
 fn cmdSchema(c: Ctx, args: []const [:0]const u8) !Exit {

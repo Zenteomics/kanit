@@ -46,9 +46,60 @@ Give each rule its `step`, its `sample` when it works on one, and a `category` a
 
 Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names, as [Concepts](Concepts.md#steps-samples-categories-and-tools) describes: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
 
+## Prepare from a template
+
+Real workflows have one rule per sample and step. Write each step once in a pipeline template, list the samples in a sheet, and `workz prepare` writes the explicit workflow: the file the engine runs, reviews and diffs as before, with every rule spelled out.
+
+`samples.tsv`, a header line and one row per sample:
+
+```text
+sample	r1	r2
+s1	reads/s1_1.fq.gz	reads/s1_2.fq.gz
+s2	reads/s2_1.fq.gz	reads/s2_2.fq.gz
+```
+
+`pipeline.toml`:
+
+```toml
+[workflow]
+name = "rnaseq"
+
+[samples]
+sheet = "samples.tsv"
+
+[[steps]]
+name = "trim"
+for_each = "sample"
+input = ["{r1}", "{r2}"]
+output = ["trimmed/{sample}_1.fq.gz", "trimmed/{sample}_2.fq.gz"]
+shell = "fastp -i {r1} -I {r2} -o trimmed/{sample}_1.fq.gz -O trimmed/{sample}_2.fq.gz -w {threads}"
+threads = 4
+memory = "2G"
+
+[[steps]]
+name = "report"
+input = ["trimmed/{sample}_1.fq.gz"]
+output = ["report.tsv"]
+shell = "for f in {input}; do echo $f; done > {output}"
+memory = "256M"
+```
+
+```text
+$ workz prepare
+wrote .../workflow.toml: 3 rules from 2 steps. Next: workz graph --by step, then workz plan
+```
+
+- A step with `for_each = "sample"` becomes one rule per row, named `SAMPLE__STEP` (`s1__trim`) and labelled with its `step` and `sample`, so every report and view groups by them. A step without it is one rule, named as the step.
+- `{name}` takes a column of the sheet, a `[params]` value, or `{step}`. In `shell`, `{input}`, `{output}` and `{threads}` are the rule's own inputs, outputs (space-separated) and threads.
+- In a step without `for_each`, a list element naming a sheet column becomes one element per sample: the report above reads every sample's file.
+- Only those names are replaced. Other braces stay as written, so awk's `{print $1}` and the shell's `${HOME}` need no escaping; in a path, an unknown `{name}` is an error, and so is a column used outside a `for_each` step.
+- The workflow is checked as `validate` would before it replaces `workflow.toml`; one that is not valid is left beside it to read, and `workflow.toml` is unchanged.
+- `workz prepare --check` prints the rules an edit would add, remove and change, and exits 1 if any, without writing: review it before a long launch.
+- `workz init --template` writes a commented starter template and sample sheet. The format is in the [workflow reference](Workflow-Reference.md#pipeline-templates).
+
 ## Generate the file
 
-Real workflows have one rule per sample and step, so they are written by a program, not by hand. Any language works; the file is plain TOML. This bash script reads a sample sheet and writes a trim, align and count workflow:
+When a template cannot express a pipeline, a program can write the workflow file instead; any language works, since the file is plain TOML. This bash script reads a sample sheet and writes a trim, align and count workflow:
 
 `samples.tsv`
 

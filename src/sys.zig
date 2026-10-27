@@ -221,6 +221,16 @@ pub fn rename(gpa: Allocator, from: []const u8, to: []const u8) !void {
     _ = try check(linux.renameat(linux.AT.FDCWD, a, linux.AT.FDCWD, b));
 }
 
+/// Removes file `path`; a missing one is no error.
+pub fn unlink(gpa: Allocator, path: []const u8) !void {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    _ = check(linux.unlinkat(linux.AT.FDCWD, p, 0)) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
+}
+
 pub fn mkdir(gpa: Allocator, path: []const u8) !void {
     const p = try z(gpa, path);
     defer gpa.free(p);

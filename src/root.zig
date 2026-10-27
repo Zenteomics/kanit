@@ -25,3 +25,4 @@ pub const methods = @import("methods.zig");
 pub const views = @import("views.zig");
 pub const schema = @import("schema.zig");
 pub const lint = @import("lint.zig");
+pub const prepare = @import("prepare.zig");

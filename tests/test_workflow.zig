@@ -487,3 +487,81 @@ test "[unit] - [schema]: every key the parser accepts has a type in the schema" 
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("properties").?.object.get("rules") != null);
 }
+
+test "[unit] - [prepare]: a template becomes one rule per sample, with labels, gathers and literal braces" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.tsv", "sample\tr1\n# a comment\nS1\treads/a.fq\nS2\treads/b.fq\n");
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[params]
+        \\ref = "ref/idx"
+        \\[samples]
+        \\sheet = "samples.tsv"
+        \\[[steps]]
+        \\name = "count"
+        \\for_each = "sample"
+        \\input = ["{r1}", "{ref}"]
+        \\output = ["counts/{sample}.txt"]
+        \\shell = "awk '{print $1}' {r1} > counts/{sample}.txt -t {threads}"
+        \\threads = 2
+        \\memory = "1M"
+        \\[[steps]]
+        \\name = "merge"
+        \\input = ["counts/{sample}.txt"]
+        \\output = ["all.txt"]
+        \\shell = "cat {input} > {output}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    for ([_][]const u8{
+        "name = \"S1__count\"\nstep = \"count\"\nsample = \"S1\"\ninput = [\"reads/a.fq\", \"ref/idx\"]",
+        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t 2\"",
+        "input = [\"counts/S1.txt\", \"counts/S2.txt\"]",
+        "shell = \"cat counts/S1.txt counts/S2.txt > all.txt\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "[unit] - [prepare]: mistakes in a template are named" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("dup.tsv", "sample\nS1\nS1\n");
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [\"{x}.txt\"]\nshell = \"true\"\n", .want = "output names {x}, which is no sample-sheet column, param or placeholder" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nnames = [\"s1\"]\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"echo {sample}\"\n", .want = "a column of the sample sheet, but the step has no for_each" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"dup.tsv\"\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "lists sample S1 twice" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutputs = [\"a.txt\"]\nshell = \"true\"\n", .want = "unknown key 'outputs'; did you mean 'output'?" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[rules]]\nname = \"a\"\n", .want = "write rules as [[steps]]" },
+    }, 0..) |c, k| {
+        var name_buf: [16]u8 = undefined;
+        const path = try s.file(try std.fmt.bufPrint(&name_buf, "t{d}.toml", .{k}), c.text);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var problem: workz.prepare.Problem = .{};
+        try testing.expectError(error.Invalid, workz.prepare.compile(testing.allocator, arena.allocator(), path, "t.toml", &problem));
+        if (std.mem.indexOf(u8, problem.message, c.want) == null) {
+            std.debug.print("message: {s}\nexpected: {s}\n", .{ problem.message, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "[unit] - [prepare]: --check reads rule names that a comment follows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    const old = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"   # SAMPLE__STEP\nshell = \"true\"\n";
+    const new = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"\nshell = \"true\"\n";
+    try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
+    try testing.expectEqualStrings("change 1: S1__count\n", text.written());
+}

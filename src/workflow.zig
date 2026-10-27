@@ -496,7 +496,7 @@ pub fn parseDuration(text: []const u8) ?u64 {
     return if (total > 0) total else null;
 }
 
-fn validName(name: []const u8) bool {
+pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 161) return false;
     if (!std.ascii.isAlphanumeric(name[0])) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '-')) return false;
