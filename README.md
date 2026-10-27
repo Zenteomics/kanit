@@ -7,7 +7,7 @@ workz runs a prepared graph of file-producing rules on one Linux workstation. It
 - **Explicit graphs.** A TOML file lists rules with their inputs, outputs, command and request; a script generates it for any number of samples.
 - **Fits the machine.** Rules start in critical-path order within a thread, memory and job budget, with resource groups for limits such as disk bandwidth.
 - **Enforced requests.** Each attempt runs in its own cgroup inside a systemd scope, with no network; a rule that exceeds its memory is stopped, not the machine.
-- **Exact reuse.** A rule runs again only when its command, environment, request, outputs, inputs or producers changed, or when you ask, and a changed output is never silently overwritten.
+- **Exact reuse.** A rule runs again only when its command, environment, request, declared outputs, inputs, producers or the engine key changed, or when you ask, and a changed output is never silently overwritten.
 - **Shared indexes.** A large index is loaded once and counted once in memory, as mapped files or as a container service such as a STAR genome in shared memory.
 - **Containers.** Rules can run in local images through rootless Podman, inside the same limits and records.
 - **Answers, not logs.** A live terminal view, per-attempt reports, the critical path, waiting by reason, time per step, sample, category and tool, request suggestions, launch comparisons and a self-contained HTML report.
@@ -39,7 +39,7 @@ The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, cont
 
 ## Status
 
-workz 0.3.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog says at the top of each version what such a change needs from you.
+The latest release is workz 0.3.0; the main branch adds the changes listed under Unreleased in the changelog. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog says at the top of each version what such a change needs from you.
 
 ## License
 

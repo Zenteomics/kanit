@@ -12,11 +12,12 @@ const sys = @import("sys.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const monitor = @import("monitor.zig");
+const tracker = @import("tracker.zig");
 const term = @import("term.zig");
 const Allocator = std.mem.Allocator;
-const Tracker = monitor.Tracker;
-const Status = monitor.Status;
-const RuleView = monitor.RuleView;
+const Tracker = tracker.Tracker;
+const Status = tracker.Status;
+const RuleView = tracker.RuleView;
 
 pub const Key = union(enum) {
     char: u8,
@@ -1254,10 +1255,11 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
     }
     const Hint = struct { key: []const u8, what: []const u8 };
     const hints: []const Hint = switch (ui.mode) {
-        .table => &.{ .{ .key = "q", .what = "quit" }, .{ .key = "enter", .what = "log" }, .{ .key = "i", .what = "details" }, .{ .key = "t", .what = "timeline" }, .{ .key = "/", .what = "search" }, .{ .key = "s", .what = "sort" }, .{ .key = "a r w f d", .what = "filter" }, .{ .key = "?", .what = "keys" } },
-        .timeline => &.{ .{ .key = "q", .what = "back" }, .{ .key = "j k", .what = "move" }, .{ .key = "enter", .what = "log" }, .{ .key = "t", .what = "table" }, .{ .key = "?", .what = "keys" } },
-        .log => &.{ .{ .key = "q", .what = "back" }, .{ .key = "o", .what = "stdout/stderr" }, .{ .key = "j k", .what = "rule" }, .{ .key = "?", .what = "keys" } },
-        .details => &.{ .{ .key = "q", .what = "back" }, .{ .key = "j k", .what = "rule" }, .{ .key = "enter", .what = "log" }, .{ .key = "S", .what = "stop" }, .{ .key = "R", .what = "retry" }, .{ .key = "?", .what = "keys" } },
+        // "?" comes second, so a narrow terminal still shows where the keys are.
+        .table => &.{ .{ .key = "q", .what = "quit" }, .{ .key = "?", .what = "keys" }, .{ .key = "enter", .what = "log" }, .{ .key = "i", .what = "details" }, .{ .key = "t", .what = "timeline" }, .{ .key = "S R X", .what = "stop retry cancel" }, .{ .key = "/", .what = "search" }, .{ .key = "s", .what = "sort" }, .{ .key = "a r w f d", .what = "filter" } },
+        .timeline => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "j k", .what = "move" }, .{ .key = "enter", .what = "log" }, .{ .key = "t", .what = "table" } },
+        .log => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "o", .what = "stdout/stderr" }, .{ .key = "j k", .what = "rule" } },
+        .details => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "j k", .what = "rule" }, .{ .key = "enter", .what = "log" }, .{ .key = "S", .what = "stop" }, .{ .key = "R", .what = "retry" } },
         .help => &.{.{ .key = "q", .what = "back" }},
     };
     // The view's state on the right: filter, sort and search.

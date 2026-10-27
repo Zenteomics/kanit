@@ -19,28 +19,6 @@ pub const Options = struct {
 
 pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0 };
 
-/// Launch directory names, oldest first (names sort by time).
-pub fn launchNames(gpa: Allocator, a: Allocator, rec: []const u8) ![]const []const u8 {
-    const dir = try std.fs.path.join(a, &.{ rec, "launches" });
-    var names: std.ArrayList([]const u8) = .empty;
-    const fd = openDir(gpa, dir) catch |err| switch (err) {
-        error.FileNotFound => return names.items,
-        else => return err,
-    };
-    defer sys.close(fd);
-    var entries: sys.DirEntries = .{ .fd = fd };
-    while (try entries.next()) |e| {
-        if (e.name[0] == '.') continue;
-        try names.append(a, try a.dupe(u8, e.name));
-    }
-    std.mem.sort([]const u8, names.items, {}, struct {
-        fn lt(_: void, x: []const u8, y: []const u8) bool {
-            return std.mem.lessThan(u8, x, y);
-        }
-    }.lt);
-    return names.items;
-}
-
 fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
     const p = try sys.z(gpa, path);
     defer gpa.free(p);
@@ -97,7 +75,7 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
     }
 
     const keep = opts.keep orelse return result;
-    const names = try launchNames(gpa, a, rec);
+    const names = try records.launchNames(gpa, a, rec);
     if (names.len <= keep) return result;
     // Launches that hold the recorded attempt of a rule stay.
     var held: std.StringHashMapUnmanaged(void) = .empty;

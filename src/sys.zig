@@ -115,18 +115,23 @@ pub fn fsync(fd: Fd) !void {
     _ = try check(linux.fsync(fd));
 }
 
-/// Reads a whole file, refusing files larger than `limit` bytes.
+/// Reads a whole file, refusing files larger than `limit` bytes. Reads go
+/// straight into a buffer sized from the file, so reading many small
+/// records costs no more than their bytes; a file without a size, such as
+/// one under /proc, grows the buffer as it is read.
 pub fn readFile(gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     const fd = try openRead(gpa, path);
     defer close(fd);
-    var list: std.ArrayList(u8) = .empty;
+    const size: usize = if (statFd(fd)) |id| @intCast(id.size) else |_| 0;
+    if (size > limit) return error.FileTooBig;
+    var list: std.ArrayList(u8) = try .initCapacity(gpa, size + 1);
     errdefer list.deinit(gpa);
-    var buf: [64 * 1024]u8 = undefined;
     while (true) {
-        const n = try read(fd, &buf);
+        if (list.unusedCapacitySlice().len == 0) try list.ensureUnusedCapacity(gpa, @max(list.items.len, 4096));
+        const n = try read(fd, list.unusedCapacitySlice());
         if (n == 0) break;
-        if (list.items.len + n > limit) return error.FileTooBig;
-        try list.appendSlice(gpa, buf[0..n]);
+        list.items.len += n;
+        if (list.items.len > limit) return error.FileTooBig;
     }
     return list.toOwnedSlice(gpa);
 }
@@ -399,6 +404,31 @@ pub fn realpath(gpa: Allocator, path: []const u8) !?[]u8 {
     var buf: [4096]u8 = undefined;
     const n = try check(linux.readlinkat(linux.AT.FDCWD, proc, &buf, buf.len));
     return try gpa.dupe(u8, buf[0..n]);
+}
+
+/// The names in the directory `path`, sorted, without those that begin with
+/// a dot; null when it does not exist or is not a directory. The names are
+/// allocated in `a`.
+pub fn dirNames(gpa: Allocator, a: Allocator, path: []const u8) !?[]const []const u8 {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    const fd: Fd = @intCast(check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)) catch |err| switch (err) {
+        error.FileNotFound, error.NotDir => return null,
+        else => return err,
+    });
+    defer close(fd);
+    var names: std.ArrayList([]const u8) = .empty;
+    var entries: DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| {
+        if (e.name[0] == '.') continue;
+        try names.append(a, try a.dupe(u8, e.name));
+    }
+    std.mem.sort([]const u8, names.items, {}, struct {
+        fn lt(_: void, x: []const u8, y: []const u8) bool {
+            return std.mem.lessThan(u8, x, y);
+        }
+    }.lt);
+    return names.items;
 }
 
 /// The entries of an open directory, without "." and "..", read with

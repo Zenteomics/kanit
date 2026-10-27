@@ -1,7 +1,7 @@
 # bash completion for workz: source this file, or put it in
 # ~/.local/share/bash-completion/completions/workz.
 _workz() {
-    local cur prev cmd wf i words
+    local cur prev cmd wf wd i words
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
@@ -10,22 +10,34 @@ _workz() {
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
     fi
-    # The workflow file named so far, for rule names, and the other words.
+    # The workflow file and working directory named so far, and the other
+    # words, without the values of options.
     words=()
     for ((i = 2; i < COMP_CWORD; i++)); do
         case ${COMP_WORDS[i]} in
-            *.toml | *.oxoflow) wf=${COMP_WORDS[i]} ;;
+            -d | --workdir) wd=${COMP_WORDS[i+1]}; ((i++)) ;;
+            -t | --target | --rerun-rule | --pass-env | -j | --jobs | --max-threads | --max-memory | -r | --retry | \
+                --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | \
+                --compare | --keep | --interval) ((i++)) ;;
+            *.toml) wf=${COMP_WORDS[i]} ;;
             -*) ;;
             *) words+=("${COMP_WORDS[i]}") ;;
         esac
     done
+    if [ -z "$wd" ]; then
+        if [ -n "$wf" ]; then wd=$(dirname "$wf"); else wd=.; fi
+    fi
     case $prev in
         -t | --target | --rerun-rule)
             COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
             return ;;
         -d | --workdir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
-        --input-manifest) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        --input-manifest | -o | --output) COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --format) COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); return ;;
+        --launch) COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur")); return ;;
+        --compare)
+            COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur") $(compgen -d -- "$cur"))
+            return ;;
     esac
     local opts="-h --help -d --workdir"
     case $cmd in
@@ -34,12 +46,13 @@ _workz() {
         explain) opts="$opts -t --target --rerun --rerun-rule --pass-env" ;;
         validate | graph) opts="$opts -t --target" ;;
         verify) opts="$opts -t --target --content" ;;
-        watch) opts="$opts --once --interval" ;;
-        status) opts="$opts --history --json" ;;
-        report) opts="$opts --launch --format --bottlenecks --suggest --compare" ;;
+        watch) opts="$opts --once --interval --launch --no-color" ;;
+        status) opts="$opts --history --json --launch --no-color" ;;
+        report) opts="$opts --launch --format --bottlenecks --suggest --compare -o --output" ;;
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
         clean) opts="$opts --keep --dry-run" ;;
-        init | control) opts="-h --help" ;;
+        control) ;;
+        init) opts="-h --help" ;;
         completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
         help) COMPREPLY=($(compgen -W "$commands" -- "$cur")); return ;;
     esac
@@ -47,9 +60,16 @@ _workz() {
         COMPREPLY=($(compgen -W "$opts" -- "$cur"))
     elif [ "$cmd" = control ] && [ ${#words[@]} = 0 ]; then
         COMPREPLY=($(compgen -W "stop retry cancel" -- "$cur"))
-    elif { [ "$cmd" = control ] && [ ${#words[@]} = 1 ] && [ "${words[0]}" != cancel ]; } || { [ "$cmd" = explain ] && [ -n "$wf" ]; } || [ "$cmd" = logs ]; then
+    elif [ "$cmd" = control ] && [ ${#words[@]} = 1 ] && [ "${words[0]}" != cancel ]; then
         COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
     elif [ "$cmd" = control ]; then
+        COMPREPLY=()
+    elif { [ "$cmd" = explain ] || [ "$cmd" = logs ]; } && [ ${#words[@]} = 0 ]; then
+        # The rule, of the workflow named or of workflow.toml; a workflow
+        # file may come first.
+        COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
+        [ -z "$wf" ] && COMPREPLY+=($(compgen -f -X '!*.toml' -- "$cur"))
+    elif [ "$cmd" = explain ] || [ "$cmd" = logs ]; then
         COMPREPLY=()
     else
         COMPREPLY=($(compgen -f -- "$cur"))

@@ -46,7 +46,7 @@ For a colon-separated list such as `PATH` it names the entries added or removed,
 
 No other variable is part of the key. Host rules also receive `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM`, but a change to one of them reruns nothing; name a variable with `--pass-env` to pass it and key it. Everything else stays out of rules ([Running workflows](Running-Workflows.md#what-a-command-sees)).
 
-The engine key is 2 in workz 0.3.0. Rebuilding or upgrading workz reruns nothing unless the engine key changes; the executable's own digest is recorded in each launch, not in rule keys.
+The engine key is 2 in workz 0.3.0. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; the version after 0.3.0 reruns every rule once, because file identities no longer include the device number.
 
 ## File identity
 
@@ -77,6 +77,7 @@ workz run workflow.toml
 ```
 
 ```text
+[0/2] page .workz/launches/.../report.html, drawn again every 5 s while the launch runs
 [0/2] started sort_calls (attempt 1)
 [1/2] completed sort_calls (0.0 s)
 ```
@@ -138,4 +139,4 @@ Differences are listed as `missing`, `changed` or `content`, and the exit status
 
 ## Resume after a crash
 
-There is nothing special to do: run the same command again. workz writes a journal entry before each attempt starts and after its result is saved in `state.json`, which happens at most once a second. A rule that was running when the engine, the session or the machine went down has no completed record and runs again, as does a rule that completed in the last second before the crash; every rule whose result was saved is reused. Running tasks end with the engine ([Running workflows](Running-Workflows.md#isolation)), so nothing from the crashed launch keeps writing behind the new one.
+There is nothing special to do: run the same command again. workz writes a journal entry before each attempt starts and after its result is saved in `state.json`, which happens at most once a second. A rule that was running when the engine, the session or the machine went down has no completed record and runs again, as does a rule that completed in the last second before the crash; every rule whose result was saved is reused. Running attempts end with the engine ([Running workflows](Running-Workflows.md#isolation)), so nothing from the crashed launch keeps writing behind the new one.

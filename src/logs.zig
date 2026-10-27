@@ -7,7 +7,6 @@ const linux = std.os.linux;
 const sys = @import("sys.zig");
 const records = @import("records.zig");
 const state = @import("state.zig");
-const clean = @import("clean.zig");
 const Allocator = std.mem.Allocator;
 
 pub const Stream = enum { both, stdout, stderr };
@@ -22,7 +21,7 @@ pub const Options = struct {
 /// The attempt directory to show, or null when the rule never ran.
 pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, opts: Options) !?[]const u8 {
     const rec = try records.recordsDir(a, root);
-    const launches = if (opts.launch) |id| try a.dupe([]const u8, &.{id}) else try clean.launchNames(gpa, a, rec);
+    const launches = if (opts.launch) |id| try a.dupe([]const u8, &.{id}) else try records.launchNames(gpa, a, rec);
     var i = launches.len;
     while (i > 0) {
         i -= 1;

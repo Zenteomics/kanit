@@ -229,12 +229,12 @@ new container-sizing
 { header container-sizing; crule big '[]' '["b.txt"]' '"x=$(head -c 200000000 /dev/zero | tr \"\\\\0\" a); touch b.txt"'; } > wf.toml
 sed -i 's/memory = "64M"/memory = "1G"/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
-"$workz" report -d . --bottlenecks > report.txt
-# STEP N WALL REQ RSS PEAK SUGGEST: sized by the container's peak, not the client's RSS.
-check "a container rule's suggested request covers its cgroup peak" 'awk '"'"'$1 == "big" { gsub(/M/, ""); exit !($6 > $5 && $7 >= $6) }'"'"' report.txt'
 "$workz" report -d . --suggest > suggest.tsv
 "$workz" report -d . --suggest --format json > suggest.json
-check "report --suggest gives the same sizing as tsv and json" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 >= $7 && $7 > 300) }'"'"' suggest.tsv && jq -e ".[0].step == \"big\" and .[0].suggest_mib >= .[0].peak_mib" suggest.json > /dev/null'
+# step runs threads threads_used suggest_threads memory_mib used_mib used_basis peak_mib suggest_mib note:
+# a container rule is sized by its cgroup peak, not the client's RSS.
+check "a container rule's suggested request covers its cgroup peak" 'awk -F"\t" '"'"'$1 == "big" { exit !($8 == "cgroup" && $10 >= $7 && $7 > 300) }'"'"' suggest.tsv'
+check "report --suggest gives the same sizing as tsv and json" 'jq -e ".[0].step == \"big\" and .[0].used_basis == \"cgroup\" and .[0].suggest_mib >= .[0].used_mib" suggest.json > /dev/null'
 
 new container-mounts
 echo "workz-check release" > os-release
@@ -569,8 +569,7 @@ new budget
 overlap=$(cat m1.txt m2.txt m3.txt | paste - - | sort -n | awk 'NR > 1 && $1 < prev { o = 1 } { prev = $2 } END { print o + 0 }')
 check "memory admission never exceeds the budget" '[ "$overlap" = 0 ]'
 "$workz" report -d . --bottlenecks > b.txt
-held=$(awk '/^  at / { for (i = 1; i <= NF; i++) if ($i == "waited") w = $(i + 1) } END { print (w + 0 > 0.4) }' b.txt)
-check "the critical path shows the wait of a rule held by the budget" '[ "$held" = 1 ]'
+check "rules that run one at a time for memory are reported as limited by the memory budget" 'grep -q "^  > memory " b.txt && grep -q "the memory budget limited this launch" b.txt'
 { header toolarge; rule big '[]' '["b.txt"]' '"true"'; } | sed 's/memory = "64M"/memory = "8G"/' > big.toml
 "$workz" run big.toml --max-memory 1G -q > /dev/null 2> err.txt
 rc=$?
@@ -606,7 +605,8 @@ new delegated
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report -d . > r.tsv
 "$workz" report -d . --bottlenecks > b.txt
-check "work handed to another supervisor is reported as delegated, without sizing advice" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt'
+"$workz" report -d . --suggest > g.tsv
+check "work handed to another supervisor is reported as delegated and keeps its request" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt && awk -F"\t" "NR == 2 { exit !(\$11 == \"delegated\" && \$10 == \$6 && \$5 == \$3) }" g.tsv'
 
 new slice
 { header slice; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
@@ -629,7 +629,11 @@ base=$(basename "$(last_launch)")
 check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun-rule c3 -q > s3.json
 "$workz" report -d . --compare "$base" > compare-one.txt
-check "report --compare marks a step with no completed attempt on one side" 'grep -q "^  short1 *0 .*no completed attempt in the launch" compare-one.txt && ! grep -q "%.*no completed attempt" compare-one.txt'
+check "report --compare compares a step reused in the launch with the run it reused" 'grep -q "^  short1 *1 .*[0-9]%.*  reused in the launch$" compare-one.txt && grep -q "^  c3 *1 .*[0-9]%" compare-one.txt && ! grep -q "^  c3 .*reused" compare-one.txt'
+sed -i 's/sleep 0.3; touch c3.txt/exit 1/' wf.toml
+"$workz" run wf.toml --max-threads 2 --max-memory 1G -q > s4.json
+"$workz" report -d . --compare "$base" > compare-failed.txt
+check "report --compare marks a step with no completed run on one side" 'grep -q "^  c3 .*no completed run in the launch" compare-failed.txt && ! grep -q "%.*no completed run" compare-failed.txt'
 
 # ---------------------------------------------------------------- inputs and formats
 new manifest
@@ -704,6 +708,25 @@ check "bash completion offers rule names and command options" '[ "$words" = "cou
 ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz control ""); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
+ids=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --launch ""); COMP_CWORD=3; _workz; echo "${COMPREPLY[*]}"')
+check "bash completion offers launch IDs" '[ "$ids" = "$(basename "$(last_launch)")" ]'
+"$workz" validate > default.txt
+rc1=$?
+"$workz" validate workflow.toml extra 2> extra.txt
+rc2=$?
+check "WORKFLOW defaults to workflow.toml, and a stray argument is refused" '[ $rc1 = 0 ] && grep -q "^valid: " default.txt && [ $rc2 = 2 ] && grep -q "unexpected argument .extra." extra.txt'
+"$workz" status --launch "$(basename "$(last_launch)")" --json > byid.json
+"$workz" status --launch 20000101T000000.000-00000000 2> noid.txt
+rc=$?
+check "status --launch shows a launch by ID and names a missing one" 'jq -e ".status == \"completed\"" byid.json > /dev/null && [ $rc = 1 ] && grep -q "no launch 20000101T000000.000-00000000" noid.txt'
+"$workz" logs --stdout --stderr x 2> streams.txt
+rc1=$?
+"$workz" run --grace 2x 2> grace.txt
+rc2=$?
+check "conflicting stream options and a bad --grace duration are refused" '[ $rc1 = 2 ] && grep -q "give --stdout or --stderr" streams.txt && [ $rc2 = 2 ] && grep -q "use a duration" grace.txt'
+"$workz" report --launch --format html 2> novalue.txt
+rc=$?
+check "an option is never taken as another option's value" '[ $rc = 2 ] && grep -q "^workz: --launch needs a value" novalue.txt'
 
 new command-line
 "$workz" help run > help-run.txt
@@ -739,9 +762,15 @@ new watch
 "$workz" run wf.toml "${iso[@]}" -q > s.json &
 runner=$!
 sleep 1.2
+cp "$(last_launch)/report.html" live.html
 "$workz" watch -d . --once > view.txt
+"$workz" status -d . --json > running.json
+"$workz" control -d . stop nosuch 2> ctl.txt
+ctl_rc=$?
 wait $runner
-check "watch shows the running task with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " Mi\| Ki" view.txt'
+check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
+check "watch shows the running rule with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " [KMG]iB" view.txt'
+check "a launch keeps its page, which reloads while the launch runs and stops once it ends" 'grep -q "http-equiv=\"refresh\"" live.html && grep -q "live\">running</span>" live.html && ! grep -q "http-equiv=\"refresh\"" "$(last_launch)/report.html" && grep -q "s-ok\">completed</span>" "$(last_launch)/report.html"'
 "$workz" status -d . > status.txt
 check "status prints the finished summary" 'jq -e ".status == \"completed\"" status.txt > /dev/null'
 
@@ -807,17 +836,18 @@ for _ in $(seq 50); do [ "$(ls .workz/launches | wc -l)" = 3 ] && break; sleep 0
 "$workz" clean -d . --keep 1 > /dev/null 2> busy.txt
 rc=$?
 wait $runner
-check "clean refuses while a run holds the working directory" '[ $rc != 0 ] && grep -q "a run holds" busy.txt'
+check "clean refuses while a launch is running" '[ $rc != 0 ] && grep -q "a launch is running in" busy.txt'
 
 new report-html
 { header report-html
   rule ok '[]' '["ok.txt"]' '"touch ok.txt"'
   rule bad '[]' '["bad.txt"]' '"echo \"<boom & stuff>\" >&2; exit 4"'
 } > wf.toml
-"$workz" run wf.toml "${iso[@]}" -k -q > s.json
+"$workz" run wf.toml "${iso[@]}" -k > s.json 2> err.txt
 "$workz" report -d . --format html > r.html
-check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -Eq "class=\"(st-[a-z]+|g[0-9]) crit\"" r.html && grep -Eq "text-anchor=\"end\"( class=\"crit\")?>bad</text>" r.html'
-check "the html report has no scripts or remote assets, and has dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html'
+check "run names the launch's page when it starts" 'grep -q "^\[0/2\] page \.workz/launches/[^/]*/report\.html, drawn again every 5 s" err.txt'
+check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -q "stroke:var(--ink);stroke-width:1.5" r.html && grep -Eq "text-anchor=\"end\"( style=\"[^\"]*\")?>bad</text>" r.html && grep -q "id=\"pipeline\"" r.html && grep -q "class=\"st-failed\"" r.html'
+check "the html report has no scripts or remote assets, a theme switch, and dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html && grep -q "<label for=\"theme-dark\">dark</label>" r.html'
 
 new labels
 { header labels
@@ -834,7 +864,7 @@ sed -i 's/category = "report"/category = "summary"/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "changing a label reruns nothing" '[ "$(status_of s2.json reused)" = 3 ]'
 "$workz" report -d . --launch "$first" --bottlenecks > bn.txt
-check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (completed attempts)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
+check "the bottleneck report adds up time per category and per sample" 'grep -q "^time per category" bn.txt && grep -Eq "^  report +1 +1 " bn.txt && grep -q "^samples (the latest run of every rule)" bn.txt && grep -Eq "^  s1 +1 +1 .*ALIGN" bn.txt'
 "$workz" report -d . --launch "$first" --format html > r.html
 check "the html report draws samples by step" 'grep -q "Samples by step" r.html && grep -q "<td class=\"row\">s1</td>" r.html && grep -q ">MERGE</th>" r.html'
 
@@ -1016,7 +1046,7 @@ for _ in $(seq 100); do [ -f started.txt ] && break; sleep 0.05; done
 "$workz" run wf.toml --max-threads 1 --max-memory 128M -q > second.json 2> err.txt
 rc=$?
 wait $first
-check "a second run in the same directory is refused while the first holds the lock" '[ $rc = 1 ] && grep -q "another run holds" err.txt && [ "$(status_of first.json completed)" = 1 ]'
+check "a second run in the same directory is refused while the first holds the lock" '[ $rc = 1 ] && grep -q "another launch is running in" err.txt && [ "$(status_of first.json completed)" = 1 ]'
 
 for name in ordinary shared_inputs log_is_input log_hardlink relative_alias log_output_hardlink input_output_hardlink log_symlink duplicate_side_write; do
   new "alias-$name"

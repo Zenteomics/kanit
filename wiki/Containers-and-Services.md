@@ -111,6 +111,7 @@ workz run workflow.toml --max-threads 4 --max-memory 4G
 ```
 
 ```text
+[0/2] page .workz/launches/.../report.html, drawn again every 5 s while the launch runs
 [0/2] starting shared service genome (1024 MiB)
 [0/2] started align_s1 (attempt 1)
 [0/2] started align_s2 (attempt 1)
@@ -142,6 +143,8 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 
 ```text
 shared inputs
-  NAME                           KIND     STARTS   LOAD S   MEMORY     PEAK  SUGGEST
-  genome                         service       1      0.2    1024M     154M     192M  declares 832M more than it held
+  NAME                           TYPE     STARTS       LOAD     MEMORY       PEAK    SUGGEST
+  genome                         service       1      0.2 s    1.0 GiB    154 MiB    192 MiB  declares 832 MiB more than the suggestion
 ```
+
+A service holds mostly what it loaded, so its suggestion is the peak plus a twentieth, rounded up to a multiple of 64 MiB. A service loaded more than once, or one that failed, says so at the end of its line.

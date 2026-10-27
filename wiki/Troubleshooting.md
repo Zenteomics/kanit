@@ -2,13 +2,13 @@ The errors you are most likely to meet, what each means, and what to do about it
 
 ## Starting a run
 
-- `systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)`: workz isolates a run in a systemd user scope. Run it in a session with a systemd user manager, or use `--no-isolation` and give up per-task limits ([Without isolation](Running-Workflows.md#without-isolation)).
+- `systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)`: workz isolates a run in a systemd user scope. Run it in a session with a systemd user manager, or use `--no-isolation` and give up per-attempt limits ([Without isolation](Running-Workflows.md#without-isolation)).
 
-- `the run's scope cannot create task cgroups: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation`: The run's scope did not get the `cpu`, `memory` and `pids` controllers. Delegate them to the user manager as shown in [Installation](Installation.md#check-isolation).
+- `the run's scope cannot create cgroups for attempts: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation`: The run's scope did not get the `cpu`, `memory` and `pids` controllers. Delegate them to the user manager as shown in [Installation](Installation.md#check-isolation).
 
 - `cannot create the run's network namespace: ...`: Unprivileged user namespaces are disabled or restricted on this system. Check `sysctl user.max_user_namespaces`, ask your administrator, or use `--no-isolation`.
 
-- `another run holds .../.workz/lock`: A launch is already running in this working directory, and only one can. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end.
+- `another launch is running in PATH; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse the same way while it runs.
 
 - `the workflow has container rules but podman is not on PATH`: Install rootless Podman, or put it on the `PATH` of the shell that runs workz.
 
@@ -75,7 +75,7 @@ A failure prints the reason and the path of the attempt's standard error. `workz
 
 - `shared input NAME could not be loaded: ...`: A shared service or file holder failed, so the rules that need it fail too. For a service, its standard error is in `.workz/launches/<ID>/shared/`.
 
-- `a producing rule did not complete`: The rule is blocked because a rule it depends on failed. Fix that one; with `--keep-going`, the rest of the launch ran on.
+- `it needs a rule that did not complete`: The rule is blocked because a rule it depends on failed. Fix that one; with `--keep-going`, the rest of the launch ran on.
 
 - `inputs of rule NAME changed during the run`: Something modified a rule's input while the launch ran, so the rule's result cannot be trusted and it is not recorded as completed. Find what writes into the inputs, and run again.
 
