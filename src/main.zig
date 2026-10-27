@@ -1219,9 +1219,6 @@ const RunExtra = struct {
             o.color = false;
             return 1;
         }
-        // Accepted, and ignored, so command lines written for an earlier runner
-        // of the same workflow format keep working.
-        if (eq(u8, arg, "--resume-failed") or eq(u8, arg, "--provenance")) return 1;
         const takes_value = for ([_][]const u8{ "-j", "--jobs", "--max-threads", "--max-memory", "-r", "--retry", "--timeout", "--grace", "--input-manifest", "--slice", "--pass-env" }) |name| {
             if (eq(u8, arg, name)) break true;
         } else false;

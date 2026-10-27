@@ -19,6 +19,7 @@ All notable changes to workz will be documented in this file. The format follows
 
 ### Removed
 
+- `run` refuses `--resume-failed` and `--provenance`, which 0.4.0 accepted and ignored; remove them from command lines.
 - A resource group no longer takes a `wait` key. Its only accepted value, `"queue"`, described how every group works; delete the line where a workflow has it.
 
 ## [0.4.0] - 2026-10-27
