@@ -92,6 +92,8 @@ const Task = struct {
     timed_out: bool = false,
     cancelled: bool = false,
     reason: []const u8 = "",
+    /// The diagnostics kept from the last attempt, as the rule wrote them.
+    diagnostics: []const []const u8 = &.{},
     /// When the current attempt became ready (monotonic).
     ready_ns: i128 = 0,
     /// What keeps the ready attempt from starting, and since when.
@@ -376,8 +378,14 @@ const Engine = struct {
     /// On a terminal, the last `n` lines of an attempt's standard error under
     /// its event line, aligned with the event's text.
     fn showTail(self: *Engine, dir: []const u8, n: usize) void {
-        if (!self.console.on) return;
         const path = std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}) catch return;
+        self.showLines(path, n, null);
+    }
+
+    /// On a terminal, the last `n` lines of file `path`, indented under the
+    /// rule's line, after `title` when given.
+    fn showLines(self: *Engine, path: []const u8, n: usize, title: ?[]const u8) void {
+        if (!self.console.on) return;
         var digits: usize = 1;
         var v = self.selected;
         while (v >= 10) : (v /= 10) digits += 1;
@@ -386,6 +394,10 @@ const Engine = struct {
         if (lines.len == 0) return;
         const s: term.Style = .{ .on = self.console.color };
         self.clearStatus();
+        if (title) |t| {
+            for (0..indent) |_| std.debug.print(" ", .{});
+            std.debug.print("{s}{s}:{s}\n", .{ s.dim(), t, s.reset() });
+        }
         for (lines) |line| {
             for (0..indent) |_| std.debug.print(" ", .{});
             std.debug.print("{s}| {s}{s}\n", .{ s.dim(), line, s.reset() });
@@ -1329,6 +1341,9 @@ const Engine = struct {
         var reason: []const u8 = "";
         // The last line of standard error, for a command that failed.
         var said: []const u8 = "";
+        // Quote stderr's last line, else a diagnostic's, for a command that
+        // exited with a status of its own.
+        var quote = false;
         const code = reaped.exitCode();
         const sig = reaped.signal();
         if (t.cancelled) {
@@ -1356,6 +1371,7 @@ const Engine = struct {
             } else {
                 reason = try std.fmt.allocPrint(self.a, "exited with status {d}", .{c});
                 said = try self.errorLine(t.dir);
+                quote = true;
             }
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
@@ -1365,6 +1381,13 @@ const Engine = struct {
         self.writeSideFiles(r, t, ok, wall_s, reaped, counters) catch |err| {
             ok = false;
             reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{@errorName(err)});
+        };
+        // A failed attempt keeps the tails of the files the rule names for
+        // its own failures; one that cannot be kept fails nothing else.
+        t.diagnostics = if (!ok and !t.cancelled) self.keepDiagnostics(r, t.dir) catch &.{} else &.{};
+        if (quote and said.len == 0) for (t.diagnostics) |d| {
+            said = try self.errorLineOf(try std.fs.path.join(self.a, &.{ t.dir, "diagnostics", d }));
+            if (said.len > 0) break;
         };
         // The recorded reason quotes that line; a terminal shows the error
         // lines themselves under the brief reason.
@@ -1409,6 +1432,7 @@ const Engine = struct {
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
             .labels = r.labels,
             .outputs = outputs.items,
+            .diagnostics = t.diagnostics,
             .queue = .{ .waited_s = t.queued_s, .reasons = t.waits.items },
             .key = if (t.key) |k| k.key else null,
         });
@@ -1476,10 +1500,17 @@ const Engine = struct {
             if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, brief }) else {
                 self.alert("failed", "{s}: {s}", .{ r.name, brief });
                 self.showTail(t.dir, 3);
+                for (t.diagnostics) |d|
+                    self.showLines(try std.fs.path.join(self.a, &.{ t.dir, "diagnostics", d }), 3, d);
             }
         } else {
             const log = monitor.shownPath(self.a, t.dir);
-            if (t.cancelled) self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log }) else self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
+            if (t.cancelled)
+                self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log })
+            else if (t.diagnostics.len > 0)
+                self.alert("failed", "{s}: {s} (see {s}/stderr.log and {s}/diagnostics)", .{ r.name, reason, log, log })
+            else
+                self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
         }
         if (!t.cancelled and !self.opts.keep_going) self.beginStop();
     }
@@ -1526,7 +1557,12 @@ const Engine = struct {
     /// The last line of an attempt's standard error for its recorded
     /// reason: control characters blanked, cut to 200 bytes.
     fn errorLine(self: *Engine, dir: []const u8) ![]const u8 {
-        const line = try self.lastLine(dir);
+        return self.errorLineOf(try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}));
+    }
+
+    /// The last line of file `path`, made fit for a recorded reason.
+    fn errorLineOf(self: *Engine, path: []const u8) ![]const u8 {
+        const line = try self.lastLineOf(path);
         var end = @min(line.len, 200);
         // Cut before a UTF-8 continuation byte, never inside a character.
         while (end < line.len and end > 0 and line[end] & 0xc0 == 0x80) end -= 1;
@@ -1543,6 +1579,30 @@ const Engine = struct {
         const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
         const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
         return self.a.dupe(u8, trimmed[begin..]);
+    }
+
+    /// Keeps the last `diagnostics_max` bytes of each of the rule's
+    /// diagnostics files that exists, in the attempt's `diagnostics/` under
+    /// the path as written, and returns the paths kept. Only regular files
+    /// that resolve inside the working directory and outside `.workz/` are
+    /// read, so a symlink cannot copy a file from elsewhere into the records.
+    fn keepDiagnostics(self: *Engine, r: *const workflow.Rule, dir: []const u8) ![]const []const u8 {
+        if (r.diagnostics.len == 0) return &.{};
+        const root = (try sys.realpath(self.a, self.wf.root)) orelse return &.{};
+        var kept: std.ArrayList([]const u8) = .empty;
+        for (r.diagnostics, r.diagnostics_abs) |written, abs| {
+            const real = (sys.realpath(self.a, abs) catch null) orelse continue;
+            if (!workflow.within(root, real) or workflow.inRecords(root, real)) continue;
+            const id = (sys.stat(self.gpa, real) catch null) orelse continue;
+            if (!id.isReg()) continue;
+            const tail = sys.readTail(self.gpa, real, diagnostics_max) catch continue;
+            defer self.gpa.free(tail);
+            const copy = try std.fs.path.join(self.a, &.{ dir, "diagnostics", written });
+            try sys.mkdirAll(self.gpa, std.fs.path.dirname(copy).?);
+            try sys.writeFile(self.gpa, copy, tail);
+            try kept.append(self.a, written);
+        }
+        return kept.items;
     }
 
     fn recordFiles(self: *Engine, r: *const workflow.Rule) !void {
@@ -1920,6 +1980,8 @@ fn budgetReason(reason: []const u8) bool {
 }
 
 /// Interval between run samples.
+/// How much of the end of each diagnostics file a failed attempt keeps.
+const diagnostics_max = 64 * 1024;
 const sample_interval_ns: i128 = 5 * std.time.ns_per_s;
 
 fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
@@ -1980,7 +2042,7 @@ const Summary = struct {
     changed_outputs: []const ChangedOutput = &.{},
 };
 
-const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8, diagnostics: []const []const u8 };
 const ChangedOutput = struct { rule: []const u8, path: []const u8 };
 
 /// Writes a launch's page, replacing the file in one step so a browser
@@ -2426,6 +2488,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             .status = @tagName(t.status),
             .reason = t.reason,
             .stderr = if (t.dir.len > 0) try std.fmt.allocPrint(a, "{s}/stderr.log", .{t.dir}) else null,
+            .diagnostics = try records.diagnosticPaths(a, t.dir, t.diagnostics),
         }),
         else => {},
     };

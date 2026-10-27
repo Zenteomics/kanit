@@ -121,7 +121,7 @@ Prints the summary of the newest launch, or `--launch ID`, once it has ended: on
 workz logs [WORKFLOW] RULE [options]
 ```
 
-Prints the standard output and error of the rule's newest attempt.
+Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed; `--follow` prints them once the attempt has ended.
 
 | Option             | Argument | Meaning                                         |
 | ------------------ | -------- | ----------------------------------------------- |

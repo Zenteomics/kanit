@@ -91,6 +91,7 @@ td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;col
 .failure.retried{border-left-color:var(--cancel)}
 pre{margin:0;padding:11px 13px;background:var(--wash);font:12px/1.5 var(--mono);overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word}
 .failure pre{border-top:1px solid var(--hair)}
+.failure .diag{margin:0;padding:7px 13px 0;border-top:1px solid var(--hair);color:var(--muted);font-size:12px}.failure .diag+pre{border-top:0}
 footer{color:var(--muted);font:600 11px/1.6 var(--label);letter-spacing:.1em;text-transform:uppercase;text-align:right;margin-top:16px}
 @media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}.r1>.cell:last-child{grid-column:1/-1}}
 @media print{

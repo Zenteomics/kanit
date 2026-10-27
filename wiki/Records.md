@@ -24,6 +24,7 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
             stdout.log  stderr.log  the command's output
             record.json             what the attempt used and how it ended
             previous/               earlier outputs, moved aside before it ran
+            diagnostics/            tails of the rule's diagnostics files, kept when it failed
 ```
 
 A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs.
@@ -72,7 +73,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `engine_cost` is the CPU time and peak memory of the engine itself.
 - A refused launch counts every selected rule as `not_started`.
 - `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal; then `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
-- `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started.
+- `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started, and `diagnostics`, the paths of the copies its last attempt kept ([Writing workflows](Writing-Workflows.md#diagnostics)).
 - `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
 
 ## Attempt files
@@ -98,6 +99,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `request`              | `threads`, `memory_mib`, `groups`, `shared`, `container`   |
 | `labels`               | `step`, `sample`, `category`, `tool`; `declared` for each  |
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
+| `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |
 

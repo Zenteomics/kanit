@@ -6,6 +6,10 @@ All notable changes to workz will be documented in this file. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- **Failures you can read.** A rule may name `diagnostics`, files such as STAR's `Log.out` where a tool writes why it failed. A failed attempt keeps the last 64 KiB of each in its `diagnostics/` directory; the terminal, `status`, `workz logs` and the HTML page show them, and the failure reason quotes the first one when standard error is empty. `record.json` and the summary's `failures` list them.
+
 ### Removed
 
 - A resource group no longer takes a `wait` key. Its only accepted value, `"queue"`, described how every group works; delete the line where a workflow has it.

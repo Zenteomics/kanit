@@ -27,6 +27,10 @@ pub const Rule = struct {
     log_abs: ?[]const u8,
     benchmark: ?[]const u8,
     benchmark_abs: ?[]const u8,
+    /// Files the command writes about its own failure, such as a tool's own
+    /// log; their tails are kept with a failed attempt. Not part of the key.
+    diagnostics: []const []const u8 = &.{},
+    diagnostics_abs: []const []const u8 = &.{},
     retries: ?u32,
     timeout_s: ?u64,
     /// Hash outputs after success so consumers are reused when they repeat.
@@ -180,7 +184,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{"max"};
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -430,8 +434,8 @@ fn relativeLocal(p: []const u8) bool {
 
 /// Whether `abs`, a path at or below `root`, is the engine's record
 /// directory or inside it.
-fn inRecords(root: []const u8, abs: []const u8) bool {
-    const rel = abs[root.len..];
+pub fn inRecords(root: []const u8, abs: []const u8) bool {
+    const rel = if (std.mem.eql(u8, root, "/")) abs else abs[root.len..];
     return std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz");
 }
 
@@ -603,6 +607,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
         var input = try p.strings(r, "input", &at, name);
         const output = try p.strings(r, "output", &at, name);
+        const diagnostics = try p.strings(r, "diagnostics", &at, name);
         const mounts = try p.imageMounts(r, &at, "rule", name, root);
         if (mounts.len > 0) {
             // Each mount source is also an input of the rule.
@@ -742,6 +747,8 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .log_abs = if (log) |l| try sys.absolute(arena, root, l) else null,
             .benchmark = bench,
             .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
+            .diagnostics = diagnostics,
+            .diagnostics_abs = try absAll(arena, root, diagnostics),
             .retries = retries,
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
@@ -891,6 +898,13 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             try checkWritable(gpa, wf, &cache, r.name, written, abs, problem);
             if (side.get(abs)) |other| return problem.set(gpa, "rules {s} and {s} write the same log or benchmark '{s}'", .{ other, r.name, written });
             try side.put(gpa, abs, r.name);
+        }
+        // Diagnostics are only read, after a failure: any file inside the
+        // working directory but outside the records.
+        for (r.diagnostics, r.diagnostics_abs) |written, abs| {
+            if (!relativeLocal(written))
+                return problem.set(gpa, "rule {s}: diagnostics '{s}' must be a relative path inside the working directory", .{ r.name, written });
+            if (inRecords(wf.root, abs)) return problem.set(gpa, "rule {s}: diagnostics '{s}' is inside the engine record directory", .{ r.name, written });
         }
         for (r.groups) |g| {
             const max = wf.groupMax(g.name) orelse return problem.set(gpa, "rule {s} uses undeclared resource group '{s}'", .{ r.name, g.name });

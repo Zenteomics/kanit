@@ -170,6 +170,23 @@ Every attempt's standard output and error are always kept in its attempt directo
 
 Log and benchmark paths follow the rules for outputs, but they are not outputs: no rule may read them.
 
+## Diagnostics
+
+Some tools write the reason they failed to a log of their own, not to standard error: STAR writes it to `Log.out`. Name such files in `diagnostics`, and a failed attempt keeps them:
+
+```toml
+[[rules]]
+name = "align_s1"
+output = ["aligned/s1/Aligned.sortedByCoord.out.bam"]
+diagnostics = ["aligned/s1/Log.out"]
+shell = "STAR --outFileNamePrefix aligned/s1/ ..."
+```
+
+- When an attempt fails, the last 64 KiB of each listed file that exists is copied into the attempt's `diagnostics/` directory, so the next attempt cannot overwrite it.
+- The failure line on a terminal shows the last lines of each, `workz logs` prints them after the two streams, and the HTML page shows them under the failure.
+- When standard error is empty, the failure reason quotes the last line of the first diagnostics file that has one.
+- Only regular files that resolve inside the working directory and outside `.workz/` are read; a missing file is skipped, and listing one file twice is an error. Diagnostics are not outputs and not part of the rule key: adding one reruns nothing.
+
 ## Order, retries and time limits
 
 - `priority` (default 0) orders ready rules; higher starts first. Among equal priorities, the rule heading the longest chain of remaining work starts first ([Resources and scheduling](Resources-and-Scheduling.md#which-rule-starts-first)).

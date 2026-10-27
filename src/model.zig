@@ -62,6 +62,8 @@ pub const Attempt = struct {
     /// The attempt mapped shared inputs, which count in its RSS but are
     /// charged to their holders.
     uses_shared: bool,
+    /// The diagnostics files a failed attempt kept, as the rule wrote them.
+    diagnostics: []const []const u8 = &.{},
     /// Ran in a container: its process is the Podman client.
     in_container: bool = false,
     /// Start time, nanoseconds since the epoch; 0 when not recorded.
@@ -117,6 +119,15 @@ pub const Attempt = struct {
 /// A string field, or "" when it is missing.
 fn str(v: Value, key: []const u8) []const u8 {
     return fields.str(v, key) orelse "";
+}
+
+/// The strings of array `v`; others and a missing array give none.
+fn stringsOf(a: Allocator, v: ?Value) ![]const []const u8 {
+    const x = v orelse return &.{};
+    if (x != .array) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (x.array.items) |item| if (item == .string) try out.append(a, item.string);
+    return out.items;
 }
 
 fn optStr(v: ?Value) ?[]const u8 {
@@ -214,6 +225,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
         .io_stall = stall(cg, "io_some_us", wall),
         .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
         .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
+        .diagnostics = try stringsOf(a, get(v, "diagnostics")),
         .started_ns = tracker.parseTime(str(v, "started")) orelse 0,
         .step = labels.step,
         .category = labels.category,

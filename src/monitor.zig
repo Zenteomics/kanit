@@ -308,6 +308,14 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             try w.splatByteAll(' ', name_w + 2);
             try w.print("{s}| {s}{s}\n", .{ s.dim(), said, s.reset() });
         }
+        // The last line of each diagnostics file it kept, after its name.
+        for (r.diagnostics) |d| {
+            const line = lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "diagnostics", d }), 160);
+            if (line.len == 0 or std.mem.indexOf(u8, r.reason, line) != null) continue;
+            try label(w, s, col, "");
+            try w.splatByteAll(' ', name_w + 2);
+            try w.print("{s}| {s}: {s}{s}\n", .{ s.dim(), d, line, s.reset() });
+        }
         shown += 1;
     }
     if (failures > shown) {
@@ -402,7 +410,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+    const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8, diagnostics: []const []const u8 };
     const ChangedOutput = struct { rule: []const u8, path: []const u8 };
     var failures: std.ArrayList(Failure) = .empty;
     for (tr.rules.items) |r| switch (r.status) {
@@ -411,6 +419,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
             .status = @tagName(r.status),
             .reason = r.reason,
             .stderr = if (r.dir.len > 0) try std.fs.path.join(a, &.{ r.dir, "stderr.log" }) else null,
+            .diagnostics = if (r.dir.len > 0) try records.keptDiagnostics(gpa, a, r.dir) else &.{},
         }),
         else => {},
     };

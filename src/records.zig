@@ -12,7 +12,8 @@
 //!   .workz/launches/<id>/control      commands for the running launch
 //!   .workz/launches/<id>/shared/      service scripts, logs and stop pipes
 //!   .workz/launches/<id>/attempts/<rule>/<NNN>/ command.sh, request.json,
-//!       stdout.log, stderr.log, record.json (written last), previous/
+//!       stdout.log, stderr.log, record.json (written last), previous/,
+//!       diagnostics/ (the tails a failed attempt kept)
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -22,6 +23,29 @@ pub const event_version = 1;
 
 pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ root, ".workz" });
+}
+
+/// Where an attempt keeps its copies of the diagnostics files the rule
+/// wrote as `written`.
+pub fn diagnosticPaths(a: Allocator, dir: []const u8, written: []const []const u8) ![]const []const u8 {
+    const out = try a.alloc([]const u8, written.len);
+    for (written, out) |w, *o| o.* = try std.fs.path.join(a, &.{ dir, "diagnostics", w });
+    return out;
+}
+
+/// The diagnostics an ended attempt kept, as its `record.json` lists them;
+/// none when it has no record yet.
+pub fn keptDiagnostics(gpa: Allocator, a: Allocator, dir: []const u8) ![]const []const u8 {
+    const path = try std.fs.path.join(a, &.{ dir, "record.json" });
+    const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else &.{};
+    defer gpa.free(bytes);
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else &.{};
+    if (v != .object) return &.{};
+    const list = v.object.get("diagnostics") orelse return &.{};
+    if (list != .array) return &.{};
+    var written: std.ArrayList([]const u8) = .empty;
+    for (list.array.items) |item| if (item == .string) try written.append(a, item.string);
+    return diagnosticPaths(a, dir, written.items);
 }
 
 /// Takes the run lock; error.Busy when another run holds it.

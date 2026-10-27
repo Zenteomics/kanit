@@ -463,6 +463,21 @@ new missing-output
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "exit 0 without the declared output fails" 'grep -q "without output never.txt" err.txt'
 
+new diagnostics
+echo not-for-the-records > ../diagnostics-secret
+{ header diagnostics
+  rule align '[]' '["a/s1.bam"]' '"mkdir -p a/s1; printf \"loaded\\nFATAL ERROR: genome too large\\n\" > a/s1/Log.out; ln -sf ../../../diagnostics-secret a/s1/leak.log; exit 4"' 'diagnostics = ["a/s1/Log.out", "a/s1/absent.log", "a/s1/leak.log"]'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
+"$workz" logs align > logs.txt
+d="$(last_launch)/attempts/align/001"
+check "a failed rule keeps the tail of its diagnostics, quoted when stderr is empty" 'grep -q "exited with status 4: FATAL ERROR: genome too large" err.txt && [ "$(jq -c .diagnostics "$d/record.json")" = "[\"a/s1/Log.out\"]" ] && grep -q loaded "$d/diagnostics/a/s1/Log.out" && jq -e ".failures[0].diagnostics == [\"$PWD/$d/diagnostics/a/s1/Log.out\"]" s.json > /dev/null'
+check "diagnostics never copy a file from outside the working directory" '! grep -rq not-for-the-records "$d"'
+check "logs and the page show the diagnostics" 'grep -q "^==> .*/diagnostics/a/s1/Log.out <==" logs.txt && grep -q "FATAL ERROR: genome too large" logs.txt && grep -q "class=\"diag mono\">a/s1/Log.out<" "$(last_launch)/report.html"'
+printf '[workflow]\nname = "d"\n\n[[rules]]\nname = "x"\noutput = ["x"]\nshell = "true"\nmemory = "1M"\ndiagnostics = [".workz/x"]\n' > bad.toml
+"$workz" validate bad.toml > /dev/null 2> bad.txt
+check "diagnostics stay outside the engine records" 'grep -q "diagnostics .\.workz/x. is inside the engine record directory" bad.txt'
+
 new setup-failure
 { header setup-failure
   rule logged '[]' '["l.txt"]' '"touch l.txt"' 'log = "logs/l.log"'

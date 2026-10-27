@@ -1115,7 +1115,7 @@ const Page = struct {
         const w = self.w;
         const l = self.l;
         try w.print("<section class=\"fig\" id=\"failures\"><div class=\"fig-h\"><span class=\"no\">TABLE 2</span><h2>Failures ({d})</h2>", .{failedCount(l)});
-        try w.writeAll("<span class=\"note\">attempts that did not complete, with the end of their standard error</span></div><div class=\"fig-b\">\n");
+        try w.writeAll("<span class=\"note\">attempts that did not complete, with the end of their standard error and diagnostics</span></div><div class=\"fig-b\">\n");
         var shown: usize = 0;
         for (l.rows) |r| {
             if (r.completed()) continue;
@@ -1133,25 +1133,39 @@ const Page = struct {
                 try w.writeAll("</span>");
             }
             if (recovered) try w.writeAll(" <span class=\"muted\">&middot; a later attempt completed</span>");
-            try w.writeAll("</summary><pre>");
-            const tail = sys.readTail(l.gpa, try std.fs.path.join(self.a, &.{ r.dir, "stderr.log" }), 8192) catch null;
-            if (tail) |t| {
-                defer l.gpa.free(t);
-                // The last forty lines.
-                var start = t.len;
-                var lines: usize = 0;
-                while (start > 0 and lines < 41) : (start -= 1) {
-                    if (t[start - 1] == '\n') lines += 1;
-                }
-                if (std.mem.trim(u8, t[start..], " \r\n").len == 0) try w.writeAll("(no standard error)") else try escape(w, t[start..]);
-            } else try w.writeAll("(no standard error)");
-            try w.writeAll("</pre></details>\n");
+            try w.writeAll("</summary>");
+            try self.tail(try std.fs.path.join(self.a, &.{ r.dir, "stderr.log" }), "(no standard error)");
+            for (r.diagnostics) |d| {
+                try w.writeAll("<p class=\"diag mono\">");
+                try escape(w, d);
+                try w.writeAll("</p>");
+                try self.tail(try std.fs.path.join(self.a, &.{ r.dir, "diagnostics", d }), "(empty)");
+            }
+            try w.writeAll("</details>\n");
         }
         if (shown == 0) try w.writeAll(if (l.rows.len == 0) "<p class=\"muted\">No attempt ran in this launch.</p>\n" else "<p class=\"muted\">Every attempt of this launch completed.</p>\n");
         var blocked: usize = 0;
         for (l.rules) |r| blocked += @intFromBool(r.selected and r.state == .blocked);
         if (blocked > 0) try w.print("<p class=\"lead\">{d} {s} did not start because a producer failed.</p>\n", .{ blocked, if (blocked == 1) "rule was blocked: it" else "rules were blocked: they" });
         try self.endFigure();
+    }
+
+    /// The last forty lines of file `path`, within its last 8 KiB, as a
+    /// preformatted block, or `none` when it is missing or blank.
+    fn tail(self: Page, path: []const u8, none: []const u8) !void {
+        const w = self.w;
+        try w.writeAll("<pre>");
+        const bytes = sys.readTail(self.l.gpa, path, 8192) catch null;
+        if (bytes) |t| {
+            defer self.l.gpa.free(t);
+            var start = t.len;
+            var lines: usize = 0;
+            while (start > 0 and lines < 41) : (start -= 1) {
+                if (t[start - 1] == '\n') lines += 1;
+            }
+            if (std.mem.trim(u8, t[start..], " \r\n").len == 0) try w.writeAll(none) else try escape(w, t[start..]);
+        } else try w.writeAll(none);
+        try w.writeAll("</pre>");
     }
 
     // ---- TABLE 3: attempts ----
