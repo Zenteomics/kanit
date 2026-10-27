@@ -49,7 +49,8 @@ fn middle(a: Allocator, name: []const u8, max: usize) []const u8 {
 fn tickStep(span: f64, most: f64) f64 {
     const steps = [_]f64{ 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400 };
     for (steps) |s| if (span / s <= most) return s;
-    return 86400;
+    // Longer spans step by whole days, still at most `most` ticks.
+    return 86400 * @ceil(span / 86400 / most);
 }
 
 /// An axis tick label: `0`, `0.5s`, `30s`, `2m`, `2m30s`, `1h`, `1h30m`; ticks
@@ -60,7 +61,7 @@ fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
     else if (step < 1)
         std.fmt.bufPrint(buf, "{d:.1}s", .{s})
     else blk: {
-        const v: u64 = @intFromFloat(@round(s));
+        const v: u64 = std.math.lossyCast(u64, @round(s));
         break :blk if (v < 60)
             std.fmt.bufPrint(buf, "{d}s", .{v})
         else if (v < 3600 and v % 60 == 0)
@@ -349,10 +350,11 @@ const Page = struct {
         try duration(w, l.elapsed_s);
         try w.writeAll("</div><div class=\"sub\">");
         if (l.binding) |bi| {
-            const b = l.bounds[bi];
-            try w.writeAll("limited by ");
-            try report.boundName(w, b);
-            try w.print(", {d:.0}% over the least it needed", .{if (b.seconds > 0) @max(l.elapsed_s / b.seconds - 1, 0) * 100 else 0});
+            if (l.overBound()) |over| {
+                try w.writeAll("limited by ");
+                try report.boundName(w, l.bounds[bi]);
+                try w.print(", {d:.0}% over that bound", .{over});
+            } else try w.writeAll("too short to say what limited it");
         } else try w.writeAll(if (l.finished) "nothing ran in this launch" else "starting");
         try w.writeAll("</div></div>\n");
 
@@ -441,7 +443,11 @@ const Page = struct {
         const l = self.l;
         try self.figure("pipeline", "FIG. 1", "Pipeline", "each box a step, in graph order; each cell a rule");
         if (l.steps.len == 0) {
-            try w.writeAll("<p class=\"muted\">No rule was selected, or the workflow snapshot cannot be read.</p>");
+            if (l.snapshot_problem) |why| {
+                try w.writeAll("<p class=\"muted\">The workflow snapshot cannot be read: ");
+                try escape(w, why);
+                try w.writeAll("</p>");
+            } else try w.writeAll("<p class=\"muted\">No rule was selected.</p>");
             return self.endFigure();
         }
         // Columns by graph depth; within a column, steps follow their
@@ -805,11 +811,11 @@ const Page = struct {
             try w.writeAll("</td><td>");
             try self.strip(s);
             try w.writeAll("</td><td class=\"n\">");
-            if (s.runs > 0 and !s.mostlyDelegated()) try w.print("{d:.1} of {d:.0}", .{ s.cores, s.threads }) else try w.writeAll("-");
+            if (s.runs > 0 and s.judged() and !s.mostlyIdle()) try w.print("{d:.1} of {d:.0}", .{ s.cores, s.threads }) else try w.writeAll("-");
             try w.writeAll("</td>");
-            if (s.runs == 0 or s.mostlyDelegated()) {
+            if (s.runs == 0 or s.mostlyIdle()) {
                 try w.writeAll("<td class=\"muted\">");
-                try w.writeAll(if (s.mostlyDelegated()) "delegated: the work ran outside workz" else "-");
+                try w.writeAll(if (s.mostlyIdle()) "idle: used almost none of its request" else "-");
                 try w.writeAll("</td>");
             } else {
                 const req = @max(s.request_mib, 1);
@@ -822,11 +828,14 @@ const Page = struct {
             }
             try w.writeAll("<td class=\"n\">");
             switch (s.sizing.note) {
-                .none, .delegated => try w.writeAll("-"),
+                .none, .idle => try w.writeAll("-"),
                 .measured, .out_of_memory => {
                     try w.print("{d:.0} {s}, ", .{ s.sizing.threads, if (s.sizing.threads == 1) "thread" else "threads" });
                     try size(w, s.sizing.memory_mib);
                     if (s.sizing.note == .out_of_memory) try w.writeAll("<small class=\"sub\" style=\"color:var(--fail)\">out of memory: a guess above the request</small>");
+                    if (s.sizing.at_thread_limit) try w.writeAll("<small class=\"sub\">kept all its threads busy: it may use more if given them</small>");
+                    // A suggestion from few runs covers only the inputs measured.
+                    if (s.runs < 3) try w.print("<small class=\"sub\">from {d} {s}</small>", .{ s.runs, if (s.runs == 1) "run" else "runs" });
                 },
             }
             try w.writeAll("</td></tr>\n");
@@ -1085,9 +1094,20 @@ const Page = struct {
             try duration(w, l.path_ran_s);
             try w.writeAll(" of work. Once ready, its rules waited ");
             try duration(w, l.path_waited_s);
-            try w.writeAll(" for resources, and they were held ");
+            try w.writeAll(", and they were held ");
             try duration(w, l.path_held_s);
-            try w.writeAll(" for producers off the path.</p>\n<div class=\"wide\"><table><thead><tr><th>rule</th><th>step</th><th class=\"n\">started</th><th class=\"n\">held</th><th class=\"n\">waited</th><th class=\"n\">ran</th><th>over the launch</th></tr></thead><tbody>\n");
+            try w.writeAll(" for producers off the path");
+            if (l.path_between_s >= 0.05) {
+                try w.writeAll("; ");
+                try duration(w, l.path_between_s);
+                try w.writeAll(" passed between attempts");
+            }
+            if (l.path_after_s >= 0.05) {
+                try w.writeAll("; the launch ended ");
+                try duration(w, l.path_after_s);
+                try w.writeAll(" after the path did");
+            }
+            try w.writeAll(". Together these make up the elapsed time.</p>\n<div class=\"wide\"><table><thead><tr><th>rule</th><th>step</th><th class=\"n\">started</th><th class=\"n\">held</th><th class=\"n\">waited</th><th class=\"n\">ran</th><th>over the launch</th></tr></thead><tbody>\n");
             for (l.path) |p| {
                 const r = l.rules[p.rule];
                 try w.print("<tr><td class=\"name\"><i class=\"g{d}\"></i>", .{self.slotOfStep(r.step)});
@@ -1103,7 +1123,17 @@ const Page = struct {
                 const held_from = @max(ready - p.held_s, 0) / span * 100;
                 const wait_from = ready / span * 100;
                 const at = p.start_s / span * 100;
-                try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-held\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"b-wait\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"g{d}\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ held_from, wait_from - held_from, wait_from, at - wait_from, self.slotOfStep(r.step), at, @max(p.ran_s / span * 100, 0.5) });
+                // With retries the run spans its attempts and the time between them.
+                const run_w = @max((p.end_s - p.start_s) / span * 100, 0.5);
+                try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-held\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"b-wait\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"g{d}\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ held_from, wait_from - held_from, wait_from, at - wait_from, self.slotOfStep(r.step), at, run_w });
+            }
+            if (l.path_after_s >= 0.05) {
+                const last = l.path[l.path.len - 1].end_s;
+                try w.writeAll("<tr><td class=\"name muted\">after the path</td><td></td><td class=\"n\">");
+                try duration(w, last);
+                try w.writeAll("</td><td></td><td></td><td class=\"n\">");
+                try duration(w, l.path_after_s);
+                try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-cache\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ last / span * 100, l.path_after_s / span * 100 });
             }
             try w.writeAll("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"b-held\"></i>held for producers off the path</li><li><i class=\"b-wait\"></i>ready, waiting for resources</li><li><i class=\"g0\"></i>running, in the color of its category</li></ul>\n");
         }
@@ -1133,9 +1163,11 @@ const Page = struct {
             try duration(w, g.seconds);
             try w.writeAll(" of waiting. ");
             if (g.fit) |fit| {
-                if (fit >= 0.25) {
-                    try w.print("In {d:.0}% of the samples taken while a rule waited for it, the free threads and memory would have fitted that rule: a higher <code>max</code> would have started it earlier.", .{fit * 100});
-                } else try w.print("The budget was full in {d:.0}% of those samples: a higher <code>max</code> would not help much.", .{(1 - fit) * 100});
+                if (g.samples < 3) {
+                    try w.print("Only {d} run {s} were taken while its rules waited, too few to judge.", .{ g.samples, if (g.samples == 1) "sample" else "samples" });
+                } else if (fit >= 0.25) {
+                    try w.print("In {d:.0}% of the {d} samples taken while a rule waited for it, the free threads and memory would have fitted a waiting rule: a higher <code>max</code> would have started it earlier.", .{ fit * 100, g.samples });
+                } else try w.print("The budget was full in {d:.0}% of the {d} samples taken while its rules waited: a higher <code>max</code> would not help much.", .{ (1 - fit) * 100, g.samples });
             } else try w.writeAll("No run samples were taken while its rules waited.");
             try w.writeAll("</p>\n");
         }

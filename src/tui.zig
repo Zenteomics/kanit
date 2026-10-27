@@ -500,7 +500,7 @@ const Line = struct {
         var taken: usize = 0;
         if (total > 0) for (parts, 0..) |p, i| {
             const share = @max(p.value, 0) / total * @as(f64, @floatFromInt(width));
-            var n: usize = @intFromFloat(@floor(share));
+            var n: usize = std.math.lossyCast(usize, @floor(share));
             if (n == 0 and p.value > 0) n = 1;
             n = @min(n, width - taken);
             cells_of[i] = n;

@@ -101,9 +101,13 @@ pub const Counters = struct {
     oom_kill: u64 = 0,
     memory_max_events: u64 = 0,
     cpu_usage_usec: ?u64 = null,
-    anon: ?u64 = null,
+    /// Page cache still charged to the group when it is read, after the
+    /// attempt ended.
     file: ?u64 = null,
-    file_mapped: ?u64 = null,
+    /// The largest anonymous memory (heap, stacks) the run's samples saw
+    /// while the attempt ran; the engine fills it in. Anonymous memory is
+    /// gone once the processes exit, so it cannot be read at the end.
+    anon_peak: ?u64 = null,
     /// Pressure stall totals in microseconds: time at least one task of the
     /// group ("some") or all of them ("full") waited for the resource.
     cpu_some_us: ?u64 = null,
@@ -143,11 +147,16 @@ pub fn read(gpa: Allocator, path: []const u8) Counters {
     }
     if (readKeyed(gpa, path, "memory.stat")) |kv| {
         defer gpa.free(kv);
-        c.anon = field(kv, "anon");
         c.file = field(kv, "file");
-        c.file_mapped = field(kv, "file_mapped");
     }
     return c;
+}
+
+/// The group's anonymous memory now, in bytes.
+pub fn anon(gpa: Allocator, path: []const u8) ?u64 {
+    const kv = readKeyed(gpa, path, "memory.stat") orelse return null;
+    defer gpa.free(kv);
+    return field(kv, "anon");
 }
 
 pub fn readNumber(gpa: Allocator, dir: []const u8, file: []const u8) ?u64 {

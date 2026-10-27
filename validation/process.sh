@@ -507,6 +507,12 @@ check "an OOM kill ends the whole task, its shell included" 'jq -e ".signal == 9
 "$workz" run swap.toml "${iso[@]}" -q > swap.json
 check "the run's scope allows tasks no swap" '[ "$(cat s.txt)" = 0 ]'
 
+# Anonymous memory is gone when the processes exit, so it is sampled while the attempt runs.
+new anon
+{ header anon; rule heap '[]' '["h.txt"]' '"python3 -I -c \"import time; b = bytearray(100 * 1024 * 1024); time.sleep(6)\"; touch h.txt"' | sed 's/memory = "64M"/memory = "256M"/'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "an attempt's record keeps the largest anonymous memory sampled while it ran" 'jq -e ".cgroup.anon_peak >= 90 * 1048576 and (.cgroup | has(\"anon\") | not)" "$(last_launch)/attempts/heap/001/record.json" > /dev/null'
+
 new interrupt
 { header interrupt
   rule long1 '[]' '["l1.txt"]' '"sleep 60; touch l1.txt"'
@@ -604,11 +610,11 @@ new group-advice
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report -d . --bottlenecks > advice.txt
-check "the report says when a group, not the budget, held rules back" 'grep -q "^  disk .* a higher max would have started it earlier" advice.txt'
+check "the report judges a group from enough run samples only" 'grep -q "^  disk .* waited; [0-2] run samples\? while they waited, too few to judge" advice.txt'
 
 new budget
 { header budget
-  for i in 1 2 3; do printf '[[rules]]\nname = "m%s"\ninput = []\noutput = ["m%s.txt"]\nshell = "date +%%s.%%N > m%s.txt; sleep 0.3; date +%%s.%%N >> m%s.txt"\n[rules.resources]\nthreads = 1\nmemory = "600M"\n\n' $i $i $i $i; done
+  for i in 1 2 3; do printf '[[rules]]\nname = "m%s"\ninput = []\noutput = ["m%s.txt"]\nshell = "date +%%s.%%N > m%s.txt; sleep 1; date +%%s.%%N >> m%s.txt"\n[rules.resources]\nthreads = 1\nmemory = "600M"\n\n' $i $i $i $i; done
 } > wf.toml
 "$workz" run wf.toml --max-threads 4 --max-memory 1G -q > s.json
 overlap=$(cat m1.txt m2.txt m3.txt | paste - - | sort -n | awk 'NR > 1 && $1 < prev { o = 1 } { prev = $2 } END { print o + 0 }')
@@ -619,6 +625,14 @@ check "rules that run one at a time for memory are reported as limited by the me
 "$workz" run big.toml --max-memory 1G -q > /dev/null 2> err.txt
 rc=$?
 check "a rule larger than the budget is rejected before the run" '[ $rc = 2 ] && grep -q "needs 8192 MiB" err.txt'
+
+new dispatch
+{ header dispatch; for i in $(seq 30); do rule "t$i" '[]' "[\"t$i.txt\"]" "\"touch t$i.txt\""; done; } > wf.toml
+"$workz" run wf.toml --max-threads 2 --max-memory 1G -q > s.json
+cat "$(last_launch)"/attempts/*/001/record.json | jq -s '[.[] | .queue.reasons | map({(.reason): .seconds}) | add // {}]' > waits.json
+check "a wait for threads ends when a thread is free; the engine's own time after it counts as starting" '[ "$(status_of s.json completed)" = 30 ] && jq -e "map(select(.threads)) | length > 0 and all(.starting > 0)" waits.json > /dev/null'
+"$workz" report -d . --bottlenecks > b.txt
+check "a launch shorter than 2 s is too short to say what limited it" 'grep -q "^  too short to say what limited it: it took" b.txt && grep -q "^  . engine " b.txt'
 
 new shared
 mkdir ref && head -c $((64 * 1024 * 1024)) /dev/urandom > ref/index.bin
@@ -645,13 +659,13 @@ new samples
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 check "run samples show the CPU in use and attempts keep their pressure totals" 'jq -e "select(.event == \"sample\") | select(.cpu_cores_used > 0.5)" "$(last_launch)/events.jsonl" > /dev/null && jq -e ".cgroup.cpu_some_us != null and .cgroup.io_some_us != null" "$(last_launch)/attempts/busy/001/record.json" > /dev/null'
 
-new delegated
-{ header delegated; rule hand '[]' '["h.txt"]' '"systemd-run --user --wait -q timeout 1.5 sh -c \"while :; do :; done\" || true; touch h.txt"'; } > wf.toml
+new idle
+{ header idle; rule hand '[]' '["h.txt"]' '"systemd-run --user --wait -q timeout 1.5 sh -c \"while :; do :; done\" || true; touch h.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report -d . > r.tsv
 "$workz" report -d . --bottlenecks > b.txt
 "$workz" report -d . --suggest > g.tsv
-check "work handed to another supervisor is reported as delegated and keeps its request" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "work ran outside workz" b.txt && awk -F"\t" "NR == 2 { exit !(\$11 == \"delegated\" && \$10 == \$6 && \$5 == \$3) }" g.tsv'
+check "work handed to another supervisor is reported as idle and keeps its request" '[ "$(status_of s.json completed)" = 1 ] && awk -F"\t" "NR == 2 { exit !(\$19 == \"true\") }" r.tsv && grep -q "handed its work to a process outside its cgroup" b.txt && awk -F"\t" "NR == 2 { exit !(\$11 == \"idle\" && \$10 == \$6 && \$5 == \$3) }" g.tsv'
 
 new slice
 { header slice; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
@@ -677,7 +691,7 @@ check "among equal priorities the head of the longest chain starts first ($first
 base=$(basename "$(last_launch)")
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun -q > s2.json
 "$workz" report -d . --compare "$base" > compare.txt
-check "report --compare puts two launches side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
+check "report --compare puts two launches and their budgets side by side" 'grep -q "^baseline .*$base" compare.txt && grep -q "^budget   2 threads, 1.0 GiB, 2 jobs against 2 threads, 1.0 GiB, 2 jobs$" compare.txt && ! grep -q "^note:" compare.txt && grep -q "^  elapsed s " compare.txt && grep -q "^  c1 *1 " compare.txt'
 "$workz" run wf.toml --max-threads 2 --max-memory 1G --rerun-rule c3 -q > s3.json
 "$workz" report -d . --compare "$base" > compare-one.txt
 check "report --compare compares a step reused in the launch with the run it reused" 'grep -q "^  short1 *1 .*[0-9]%.*  reused in the launch$" compare-one.txt && grep -q "^  c3 *1 .*[0-9]%" compare-one.txt && ! grep -q "^  c3 .*reused" compare-one.txt'

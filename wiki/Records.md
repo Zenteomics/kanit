@@ -96,7 +96,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |
 
-The `cgroup` object holds `memory_peak`, `memory_current`, `oom`, `oom_kill` and `memory_max_events`, `cpu_usage_usec`, the `anon`, `file` and `file_mapped` memory, and the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
+The `cgroup` object holds `memory_peak`, `memory_current`, `oom`, `oom_kill` and `memory_max_events`, `cpu_usage_usec`, `file` (page cache still charged when the attempt ended), `anon_peak` (the largest anonymous memory, heap and stacks, that the run's samples every 5 s saw while the attempt ran; null for an attempt shorter than one sample), and the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
 
 ## Events
 

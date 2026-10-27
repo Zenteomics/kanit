@@ -12,20 +12,20 @@ test "[edge] - [report]: the median of an even count averages the middle values"
     try testing.expectEqual(@as(f64, 2.5), workz.model.median(&.{ 1, 2, 3, 40 }));
 }
 
-test "an attempt that ran but used almost none of its requests is delegated" {
+test "an attempt that ran but used almost none of its requests is idle" {
     const base: workz.model.Attempt = .{ .rule = "r", .attempt = 1, .status = "completed", .reason = "", .wall_s = 30, .cpu_s = 29, .threads = 1, .request_mib = 3072, .peak_mib = 900, .rss_mib = 880, .oom_kill = 0, .limit_events = 0, .waited_s = 0, .wait_reason = "", .cpu_stall = null, .memory_stall = null, .io_stall = null, .uses_shared = false };
-    try testing.expect(!base.delegated());
+    try testing.expect(!base.idle());
     var client = base;
     client.cpu_s = 0.04;
     client.peak_mib = 4;
     client.rss_mib = 4;
-    try testing.expect(client.delegated());
+    try testing.expect(client.idle());
     var quick = client;
     quick.wall_s = 0.3;
-    try testing.expect(!quick.delegated());
+    try testing.expect(!quick.idle());
     var failed = client;
     failed.status = "failed";
-    try testing.expect(!failed.delegated());
+    try testing.expect(!failed.idle());
 }
 
 test "html report text is escaped" {
@@ -290,11 +290,125 @@ test "[unit] - [report]: the critical path is the longest chain of work, and the
     // join became ready when p1 ended, a second after p2 did.
     try testing.expectApproxEqAbs(@as(f64, 1.0), l.path[1].held_s, 1e-6);
     try testing.expectApproxEqAbs(@as(f64, 0.0), l.path_waited_s, 1e-6);
+    // Work, waits, holds, the time between attempts and after the path make
+    // up the elapsed time.
+    try testing.expectApproxEqAbs(l.elapsed_s, l.path_ran_s + l.path_waited_s + l.path_held_s + l.path_between_s + l.path_after_s, 1e-6);
     const b = l.bounds[l.binding.?];
     try testing.expect(b.kind == .threads);
     try testing.expectApproxEqAbs(@as(f64, 5.0), b.seconds, 1e-6);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try workz.report.writeVerdict(&out.writer, &l);
-    try testing.expectEqualStrings("the thread budget limited this launch: it took 5.0 s, 0% more than its work needs at that limit", out.written());
+    try testing.expectEqualStrings("the thread budget limited this launch: it took 5.0 s, 0% more than its rules' thread requests need at that limit", out.written());
+}
+
+test "[edge] - [report]: values that cannot be true read as missing, never as a crash" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/a", "launch/attempts/a/001" }) |d| _ = try s.dir(d);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // A snapshot that no longer validates: the rule declares no memory.
+    _ = try s.file("launch/workflow",
+        \\[workflow]
+        \\name = "t"
+        \\version = "1"
+        \\
+        \\[[rules]]
+        \\name = "a"
+        \\output = ["a.txt"]
+        \\shell = "true"
+        \\
+    );
+    _ = try s.file("launch/launch.json", try std.fmt.allocPrint(a, "{{\"workdir\":\"{s}\",\"max_threads\":1,\"max_memory_mib\":1024}}", .{s.path}));
+    _ = try s.file("launch/summary.json",
+        \\{"status":"completed","elapsed_s":1e25,"selected":-1,"counts":{"completed":1}}
+    );
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","selected":4294967296,"max_threads":4294967296,"max_memory_mib":1024,"jobs":-3,"rules":["a"]}
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"task_started","rule":"a","attempt":4294967296,"threads":4294967296,"memory_mib":64}
+        \\{"time":"2026-01-01T00:00:01.000Z","event":"output_preserved","rule":"ghost","path":"g.txt"}
+        \\{"time":"2026-01-01T00:00:01.000Z","event":"task_finished","rule":"a","attempt":1,"status":"completed","wall_s":1e999,"memory_peak":67108864}
+        \\
+    );
+    _ = try s.file("launch/attempts/a/001/record.json",
+        \\{"rule":"a","attempt":1e30,"status":"completed","wall_s":1e999,"cpu_s":1e300,"started":"2026-01-01T00:00:00.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":0,"reasons":[]}}
+    );
+    const dir = try std.fs.path.join(a, &.{ s.path, "launch" });
+    var l = try workz.model.load(testing.allocator, a, dir);
+    defer l.deinit();
+    // Only task events name the launch's rules.
+    try testing.expectEqual(@as(usize, 1), l.rules.len);
+    try testing.expect(std.mem.indexOf(u8, l.snapshot_problem.?, "memory") != null);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, dir);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "the workflow snapshot cannot be read: line") != null);
+    try workz.report.writeTsv(&out.writer, l.rows);
+    try workz.report.writeSuggestions(&out.writer, &l, false);
+    try workz.html.write(testing.allocator, a, &out.writer, dir);
+}
+
+test "[edge] - [report]: durations and sizes print for any number" {
+    var buf: [64]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buf);
+    try workz.units.duration(&w, 59.96);
+    try testing.expectEqualStrings("1m 00s", w.buffered());
+    w = .fixed(&buf);
+    try workz.units.duration(&w, std.math.inf(f64));
+    try testing.expectEqualStrings("-", w.buffered());
+    w = .fixed(&buf);
+    try workz.units.duration(&w, 1e25);
+    w = .fixed(&buf);
+    try workz.units.size(&w, std.math.nan(f64));
+    try testing.expectEqualStrings("-", w.buffered());
+}
+
+test "[unit] - [report]: a group's run samples count once however many rules waited" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/a", "launch/attempts/a/001", "launch/attempts/b", "launch/attempts/b/001", "launch/attempts/c", "launch/attempts/c/001" }) |d| _ = try s.dir(d);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var wf: std.Io.Writer.Allocating = .init(a);
+    try wf.writer.writeAll("[workflow]\nname = \"t\"\nversion = \"1\"\n\n[resource_groups.disk]\nmax = 1\n\n");
+    for ([_][]const u8{ "a", "b", "c" }) |r| try wf.writer.print("[[rules]]\nname = \"{s}\"\noutput = [\"{s}.txt\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"64M\"\ngroups = {{ disk = 1 }}\n\n", .{ r, r });
+    _ = try s.file("launch/workflow", wf.written());
+    _ = try s.file("launch/launch.json", try std.fmt.allocPrint(a, "{{\"workdir\":\"{s}\",\"max_threads\":4,\"max_memory_mib\":1024}}", .{s.path}));
+    _ = try s.file("launch/summary.json",
+        \\{"status":"completed","elapsed_s":6.0,"selected":3,"counts":{"completed":3}}
+    );
+    // b and c wait for the group while a runs; three samples see one thread
+    // of four reserved, so a higher max would have started them.
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","selected":3,"max_threads":4,"max_memory_mib":1024,"rules":["a","b","c"]}
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"task_started","rule":"a","attempt":1,"threads":1,"memory_mib":64}
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"task_waiting","rule":"b","reason":"group:disk"}
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"task_waiting","rule":"c","reason":"group:disk"}
+        \\{"time":"2026-01-01T00:00:01.000Z","event":"sample","threads_reserved":1,"memory_reserved_mib":64}
+        \\{"time":"2026-01-01T00:00:02.000Z","event":"sample","threads_reserved":1,"memory_reserved_mib":64}
+        \\{"time":"2026-01-01T00:00:03.000Z","event":"sample","threads_reserved":1,"memory_reserved_mib":64}
+        \\{"time":"2026-01-01T00:00:04.000Z","event":"task_finished","rule":"a","attempt":1,"status":"completed"}
+        \\{"time":"2026-01-01T00:00:04.000Z","event":"task_started","rule":"b","attempt":1,"threads":1,"memory_mib":64}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"task_finished","rule":"b","attempt":1,"status":"completed"}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"task_started","rule":"c","attempt":1,"threads":1,"memory_mib":64}
+        \\{"time":"2026-01-01T00:00:06.000Z","event":"task_finished","rule":"c","attempt":1,"status":"completed"}
+        \\
+    );
+    _ = try s.file("launch/attempts/a/001/record.json",
+        \\{"rule":"a","attempt":1,"status":"completed","wall_s":4.0,"cpu_s":4.0,"started":"2026-01-01T00:00:00.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":0,"reasons":[]}}
+    );
+    _ = try s.file("launch/attempts/b/001/record.json",
+        \\{"rule":"b","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-01T00:00:04.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":4.0,"reasons":[{"reason":"group:disk","seconds":4.0}]}}
+    );
+    _ = try s.file("launch/attempts/c/001/record.json",
+        \\{"rule":"c","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-01T00:00:05.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":5.0,"reasons":[{"reason":"group:disk","seconds":5.0}]}}
+    );
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 1), l.groups.len);
+    try testing.expectEqual(@as(usize, 3), l.groups[0].samples);
+    try testing.expectApproxEqAbs(@as(f64, 1.0), l.groups[0].fit.?, 1e-9);
 }

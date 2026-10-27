@@ -79,6 +79,8 @@ const Task = struct {
     key: ?state.Key = null,
     pid: linux.pid_t = 0,
     cg: ?[]const u8 = null,
+    /// The largest anonymous memory sampled while the attempt runs.
+    anon_peak: ?u64 = null,
     dir: []const u8 = "",
     started_ns: i128 = 0,
     started_real: i128 = 0,
@@ -310,6 +312,9 @@ const Engine = struct {
     dirty: bool = false,
     pending_done: std.ArrayList([]const u8) = .empty,
     last_save_ns: i128 = 0,
+    /// When the budget last got something back: an attempt ended, or a
+    /// shared input's memory was returned.
+    freed_ns: i128 = 0,
     /// Run samples: the next sample time and the CPU counter at the last one.
     next_sample_ns: i128 = 0,
     last_sample_ns: i128 = 0,
@@ -567,7 +572,9 @@ const Engine = struct {
     /// `blocker` as if `freed_mib` of reserved memory were returned.
     fn blockerFreeing(self: *Engine, i: usize, freed_mib: u64) ?[]const u8 {
         const r = self.rule(i);
-        if (self.jobs_used + 1 > self.max_jobs) return "jobs";
+        // Threads and memory first: when they and the job count are full
+        // together, as with one-thread rules and the default --jobs, the
+        // reason names the resource.
         if (self.threads_used + r.threads > self.max_threads) return "threads";
         var mem = r.memory_mib;
         for (r.shared_index) |hi| {
@@ -575,6 +582,7 @@ const Engine = struct {
             if (!h.held) mem += h.mib;
         }
         if (self.memory_used - freed_mib + mem > self.max_memory) return "memory";
+        if (self.jobs_used + 1 > self.max_jobs) return "jobs";
         for (r.groups) |gu| {
             const gi = groupIndex(self.wf, gu.name);
             if (self.group_used[gi] + gu.count > self.wf.groups[gi].max) return self.group_reasons[gi];
@@ -594,8 +602,26 @@ const Engine = struct {
         if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why });
     }
 
+    /// Ends the wait of a rule that starts. A wait for a part of the budget
+    /// lasted until the budget last got something back; the time after it
+    /// went to the engine itself, recording the attempts that ended and
+    /// starting the rules before this one, and counts as `starting`.
+    fn endWait(self: *Engine, i: usize) !void {
+        const t = &self.tasks[i];
+        if (t.wait_reason) |cur| if (budgetReason(cur) and self.freed_ns > t.wait_since) {
+            const s = @as(f64, @floatFromInt(self.freed_ns - t.wait_since)) / 1e9;
+            try self.addWait(t, cur, s);
+            t.wait_reason = "starting";
+            t.wait_since = self.freed_ns;
+        };
+        try self.setWait(i, null);
+    }
+
     fn closeWait(self: *Engine, t: *Task, reason: []const u8) !void {
-        const s = @as(f64, @floatFromInt(sys.monoNs() - t.wait_since)) / 1e9;
+        try self.addWait(t, reason, @as(f64, @floatFromInt(sys.monoNs() - t.wait_since)) / 1e9);
+    }
+
+    fn addWait(self: *Engine, t: *Task, reason: []const u8, s: f64) !void {
         for (t.waits.items) |*w| if (std.mem.eql(u8, w.reason, reason)) {
             w.seconds += s;
             return;
@@ -613,6 +639,7 @@ const Engine = struct {
             self.jobs_used -= 1;
             self.threads_used -= r.threads;
             self.memory_used -= r.memory_mib;
+            self.freed_ns = sys.monoNs();
         }
         for (r.groups) |gu| {
             const gi = groupIndex(self.wf, gu.name);
@@ -730,12 +757,13 @@ const Engine = struct {
         const r = self.rule(i);
         t.attempts += 1;
         t.cg = null;
+        t.anon_peak = null;
         t.dir = try std.fmt.allocPrint(self.a, "{s}/attempts/{s}/{d:0>3}", .{ self.launch_dir, r.name, t.attempts });
         try sys.mkdirAll(self.gpa, t.dir);
         t.timed_out = false;
         t.cancelled = false;
         t.kill_at = null;
-        try self.setWait(i, null);
+        try self.endWait(i);
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
 
         const script = try std.fmt.allocPrint(self.a, "{s}/command.sh", .{t.dir});
@@ -1137,6 +1165,7 @@ const Engine = struct {
             self.stopHolder(h);
         } else if (h.pid == 0 and h.held) {
             self.memory_used -= h.mib;
+            self.freed_ns = sys.monoNs();
             h.held = false;
         }
     }
@@ -1194,6 +1223,7 @@ const Engine = struct {
         const peak = if (counters) |c| c.memory_peak else null;
         if (h.held and h.users == 0) {
             self.memory_used -= h.mib;
+            self.freed_ns = sys.monoNs();
             h.held = false;
         }
         if (was == .stopping) {
@@ -1268,6 +1298,7 @@ const Engine = struct {
         var counters: ?cgroup.Counters = null;
         if (t.cg) |cg| {
             counters = cgroup.read(self.gpa, cg);
+            counters.?.anon_peak = t.anon_peak;
             // Descendants left behind by the command end with it.
             if (cgroup.populated(self.gpa, cg)) cgroup.kill(self.gpa, cg);
             cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
@@ -1686,6 +1717,9 @@ const Engine = struct {
         var cpu_cores: ?f64 = null;
         if (self.tree) |tree| {
             memory_current = cgroup.readNumber(self.gpa, tree.root, "memory.current");
+            for (self.tasks) |*t| if (t.status == .running) if (t.cg) |cg| if (cgroup.anon(self.gpa, cg)) |b| {
+                t.anon_peak = @max(t.anon_peak orelse 0, b);
+            };
             const cpu = cgroup.cpuUsage(self.gpa, tree.root);
             if (cpu != null and self.last_cpu_us != null and now > self.last_sample_ns)
                 cpu_cores = @as(f64, @floatFromInt(cpu.? -| self.last_cpu_us.?)) / (@as(f64, @floatFromInt(now - self.last_sample_ns)) / 1e3);
@@ -1839,6 +1873,12 @@ const Engine = struct {
         }
     }
 };
+
+/// A wait for a part of the budget, which ends when the budget gets it back.
+fn budgetReason(reason: []const u8) bool {
+    for ([_][]const u8{ "jobs", "threads", "memory" }) |r| if (std.mem.eql(u8, reason, r)) return true;
+    return std.mem.startsWith(u8, reason, "group:");
+}
 
 /// Interval between run samples.
 const sample_interval_ns: i128 = 5 * std.time.ns_per_s;

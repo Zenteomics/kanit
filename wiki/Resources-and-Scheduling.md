@@ -22,12 +22,12 @@ workz: rule assemble requests 32 threads; the run allows 8
 
 A rule is ready when every rule that produces one of its inputs has completed. A ready rule starts when all of these fit, checked in this order:
 
-1. One more job fits under `--jobs`.
-2. Its threads fit in the threads not reserved by running rules.
-3. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+1. Its threads fit in the threads not reserved by running rules.
+2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+3. One more job fits under `--jobs`.
 4. For each resource group it uses, its units fit in the group's free capacity.
 
-The first check that fails is the reason it waits: `jobs`, `threads`, `memory` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared inputs`. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
+The first check that fails is the reason it waits: `threads`, `memory`, `jobs` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared inputs`. Once the budget has room, the time until the engine starts the rule counts as `starting`: the engine was recording the attempts that ended and starting the rules before it, which shows when rules take only milliseconds. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
 
 Every ready rule that fits starts at once, so a large rule waiting for room never holds back a small rule behind it, and the machine stays busy. The other side of that choice: nothing is reserved for a waiting rule, so a large rule can keep waiting while smaller ones take the room as it frees. Its waiting time shows in the reports, and a smaller request or a resource group around the small rules lets it in sooner.
 

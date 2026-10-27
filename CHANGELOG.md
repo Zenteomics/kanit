@@ -13,7 +13,10 @@ Three changes need action:
 - **Expect every rule to run once.** Recorded file identities no longer include the device number, and a rule that uses a shared file input now counts that file as an input.
 - **Pass `--json` for the JSON summary on a terminal.** On a terminal, `run` and `status` print a short readable summary; standard output that goes to a file or a pipe still gets JSON.
 - **Update scripts that read reports, events or exit statuses.**
-  - `report --suggest` names its first column and JSON field `step` instead of `kind`, counts `runs` instead of `attempts`, and replaces `peak_mib` and `delegated` with `used_mib` (the memory it sizes), `used_basis` (`process` or `cgroup`), `peak_mib` (the cgroup peak) and `note` (`measured`, `delegated` or `out_of_memory`). A delegated step keeps its current request instead of a suggestion from memory it did not use.
+  - `report --suggest` names its first column and JSON field `step` instead of `kind`, counts `runs` instead of `attempts`, and replaces `peak_mib` and `delegated` with `used_mib` (the memory it sizes), `used_basis` (`process` or `cgroup`), `peak_mib` (the cgroup peak) and `note` (`measured`, `idle` or `out_of_memory`). An idle step keeps its current request instead of a suggestion from memory it did not use.
+  - An attempt's `record.json` drops `cgroup.anon` and `cgroup.file_mapped`, which read 0 once its processes had exited, and adds `cgroup.anon_peak`, the largest anonymous memory sampled while it ran.
+  - `report` renames its TSV column and JSON field `delegated` to `idle`: an attempt that used almost none of its request waited, or handed its work outside its cgroup.
+  - `report --suggest` adds a last column and JSON field, `at_thread_limit`.
   - `report --format json` uses the TSV's field names (`memory_mib`, `max_rss_mib`, `oom_kills` and so on) and adds `started_ns` and `directory`.
   - `--compare` and `--bottlenecks` group by step, and a step's figures come from the latest run of every rule, this launch's or the one it reused.
   - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
@@ -66,10 +69,10 @@ Three changes need action:
   - Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
   - `X` cancels the launch only when pressed twice within 3 s, and the selection stays on the top row as rules finish, until a key moves it.
   - The key hints put `?` second, so a narrow terminal still shows it, and the table's hints name `S`, `R` and `X`.
-- **What limited a launch** is answered from lower bounds on its elapsed time: the longest chain of work, and the work each limit of the budget carried, threads, memory, jobs and every resource group.
-  - `report --bottlenecks` and the HTML page name the largest bound and how far the launch ran over it, such as `the thread budget limited this launch: it took 1m 32s, 5% more than its work needs at that limit`.
+- **What limited a launch** is answered from lower bounds on the elapsed time of the attempts it made: the longest chain of work, the work each limit of the budget carried (threads, memory, jobs and every resource group), the CPU time its rules used, and the engine's own CPU time. A launch shorter than 2 s is not judged.
+  - `report --bottlenecks` and the HTML page name the largest bound and how far the launch ran over it, such as `the thread budget limited this launch: it took 1m 32s, 5% more than its rules' thread requests need at that limit; they kept 66% of the threads they reserved busy`.
   - The critical path is the longest chain of work, the chain the scheduler ranks rules by, instead of the chain that ended last, which in a launch held back by its budget followed whichever rule started last.
-  - Each rule on the critical path shows the time it waited for resources once ready and the time it was held for producers off the path, so its work, waits and holds add up to the elapsed time.
+  - Each rule on the critical path shows the time it waited once ready, the time it was held for producers off the path and the time between its attempts; with the time from the end of the path to the end of the launch, these add up to the elapsed time.
   - Waiting for resources is shown as the ready rules that waited on average, beside the rule-seconds.
 - **Plain views and summaries** write durations and sizes as the reports do, such as `1m 27s` and `203 MiB`.
   - The plain view of a launch that has ended drops its empty running table.
@@ -113,9 +116,21 @@ Three changes need action:
   - The HTML page marks a failure that a later attempt recovered from, and counts blocked rules apart from failed attempts.
   - A launch without a summary takes its elapsed time from its events, and reused rules whose records were cleaned up are counted.
   - CPU shares are left out when all the CPU time adds up to less than a second.
+  - A resource group's advice counts each run sample once, however many rules waited at it, says how many samples it rests on, and calls fewer than three too few to judge.
+  - A step's CPU use is its CPU time over the thread-seconds its runs reserved, so a long run weighs more than a short one; runs adding up to less than a second show no CPU use or character.
+  - A step busy on fewer cores than it reserved is `runs fewer threads`, and one that used little CPU is `mostly idle` only where stall shares show it was not working; without them it reads `-`.
+  - A step whose runs kept nine tenths or more of their threads busy is noted as possibly needing more: its request capped what it could use. The HTML page says when a suggestion rests on fewer than three runs.
+  - A ready rule's wait for threads, memory, jobs or a group ends when the budget last got some of it back; the time until the engine starts the rule counts as `starting`. A launch of rules that take milliseconds no longer shows the engine's own work as a wait for threads.
+  - A rule that waits while its threads and the job count are both full waits for `threads`, not `jobs`, as with one-thread rules under the default `--jobs`.
   - A reused rule whose run took more than four attempts, after `workz control retry`, is found with that run.
   - Reports and the launch page read a launch's records without a stat of every file below them, a fifth faster on 2000 rules.
+- **Damaged records.**
+  - A record or event with a value that cannot be true, such as a number too large for its field, a number that is not finite or a negative count, reads as missing instead of stopping `report`, `watch` or the launch page.
+  - An event that is not about a task no longer adds a rule to the views.
+  - The reports say why a launch's workflow snapshot cannot be read, with its line, instead of only that it cannot.
+  - A duration just under a minute prints as `1m 00s`, not `60.0 s`.
 - **Comparisons.**
+  - `--compare` prints both launches' budgets and notes when the budgets, the workflow file or the engine differ, gives no change where a value is under 0.1 s or 8 MiB, and notes a step whose median wall time moved less than its runs differ among themselves.
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.
   - A step with no completed run on one side shows `-` and says on which side, instead of a change of -100%; a step reused in the launch compares the run it reused.
   - Each metric has its own BASELINE, LAUNCH and CHANGE columns.

@@ -5,14 +5,17 @@ const std = @import("std");
 
 /// A duration: `48.2 s` under a minute, `3m 07s` under an hour, `2h 05m`.
 pub fn duration(w: *std.Io.Writer, s: f64) !void {
-    if (s < 60) return w.print("{d:.1} s", .{@max(s, 0)});
-    const whole: u64 = @intFromFloat(@round(s));
+    if (!std.math.isFinite(s)) return w.writeAll("-");
+    // 59.96 s rounds to 60.0, so it is shown as 1m 00s.
+    if (s < 59.95) return w.print("{d:.1} s", .{@max(s, 0)});
+    const whole: u64 = std.math.lossyCast(u64, @round(s));
     if (whole < 3600) return w.print("{d}m {d:0>2}s", .{ whole / 60, whole % 60 });
     return w.print("{d}h {d:0>2}m", .{ whole / 3600, whole % 3600 / 60 });
 }
 
 /// A size given in MiB: `9.8 MiB`, `512 MiB`, `1.5 GiB`, `120 GiB`, `1.2 TiB`.
 pub fn size(w: *std.Io.Writer, mib: f64) !void {
+    if (!std.math.isFinite(mib)) return w.writeAll("-");
     if (mib >= 1024 * 1024) return w.print("{d:.1} TiB", .{mib / (1024 * 1024)});
     if (mib >= 100 * 1024) return w.print("{d:.0} GiB", .{mib / 1024});
     if (mib >= 1024) return w.print("{d:.1} GiB", .{mib / 1024});
