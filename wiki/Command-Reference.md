@@ -19,7 +19,7 @@ WORKFLOW defaults to `workflow.toml` in the current directory, the file `workz i
 workz validate [WORKFLOW]
 ```
 
-Checks the file, every key and value, and the graph ([what it checks](Workflow-Reference.md#what-validate-checks-and-what-it-does-not)). Prints `valid: NAME (R rules, S selected, G groups, H shared)`.
+Checks the file, every key and value, and the graph ([what it checks](Workflow-Reference.md#what-validate-checks-and-what-it-does-not)). It reports every problem it finds, up to 50 and a count of the rest, each with its line where it has one ([Troubleshooting](Troubleshooting.md#workflow-errors)). Prints `valid: NAME (R rules, S selected, G groups, H shared)`.
 
 ## plan
 

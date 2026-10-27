@@ -65,8 +65,9 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
         var text: std.Io.Writer.Allocating = .init(a);
         for (cycle) |i| try text.writer.print("{s} -> ", .{wf.rules[i].name});
         try text.writer.writeAll(wf.rules[cycle[0]].name);
+        cycle_message.current_line = wf.rules[cycle[0]].line;
         _ = cycle_message.set(gpa, "the rule graph has a cycle: {s} (each rule writes an input of the next)", .{text.written()}) catch {};
-        cycle_message.line = wf.rules[cycle[0]].line;
+        cycle_message.current_line = 0;
         return error.Cycle;
     }
     g.order = order.items;
@@ -115,6 +116,7 @@ fn checkServiceInputs(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow
             while (it.next()) |e| {
                 if (!workflow.within(sp, e.key_ptr.*) or seen[e.value_ptr.*]) continue;
                 const out = std.mem.trimStart(u8, e.key_ptr.*[wf.root.len..], "/");
+                problem.current_line = r.line;
                 if (e.value_ptr.* == u)
                     return problem.set(gpa, "rule {s} joins service '{s}' and writes {s}, which the service loads; the service would start before the file exists", .{ r.name, s.name, out });
                 return problem.set(gpa, "rule {s} joins service '{s}', which loads {s} from rule {s}; make an output of {s} an input of {s}", .{ r.name, s.name, out, wf.rules[e.value_ptr.*].name, wf.rules[e.value_ptr.*].name, r.name });

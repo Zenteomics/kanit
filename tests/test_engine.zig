@@ -55,7 +55,7 @@ test "a service may load produced files only for rules that depend on their prod
     defer wf.deinit();
     try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf, &problem));
     defer testing.allocator.free(problem.message);
-    try testing.expectEqualStrings("rule use joins service 'idx', which loads idx/SA from rule build; make an output of build an input of use", problem.message);
+    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule use joins service 'idx', which loads idx/SA from rule build; make an output of build an input of use"));
 
     var s2 = try Scratch.init();
     defer s2.deinit();

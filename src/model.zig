@@ -712,13 +712,12 @@ fn pairKey(a: Allocator, x: []const u8, y: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}\x00{s}", .{ x, y });
 }
 
-/// The reason a workflow snapshot gave no graph: the problem's line and
-/// message, or the error's name.
+/// The reason a workflow snapshot gave no graph: its problems, which name
+/// their lines, on one line, or the error's name.
 fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]const u8 {
     if (err == error.OutOfMemory) return error.OutOfMemory;
     if (p.message.len == 0) return @errorName(err);
-    if (p.line > 0) return std.fmt.allocPrint(a, "line {d}: {s}", .{ p.line, p.message });
-    return a.dupe(u8, p.message);
+    return std.mem.replaceOwned(u8, a, p.message, "\n", "; ");
 }
 
 /// A JSON record, or null when it is missing or cannot be parsed; running

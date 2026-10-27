@@ -307,7 +307,7 @@ test "an input reaching a declared output through a symlinked directory is refus
     const text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"real/x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"b\"\ninput = [\"alias/x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     try testing.expectError(error.Invalid, loadText(&s, text, &problem));
-    try testing.expectEqualStrings("rule b: declare the producer path instead of the symlink 'alias/x'", problem.message);
+    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule b: declare the producer path instead of the symlink 'alias/x'"));
 }
 
 test "a shared timeout belongs to a service" {
@@ -359,4 +359,114 @@ test "[unit] - [workflow]: a thread override sets every rule of its step and no 
     try testing.expectEqual(@as(u32, 16), wf.rules[1].threads);
     try testing.expectEqual(@as(u32, 1), wf.rules[2].threads);
     try testing.expectEqual(@as(usize, 0), wf.overrideThreads("algn", 2));
+}
+
+test "[unit] - [workflow]: validation reports every problem, each with its line" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[resource_groups.disk]
+        \\max = 0
+        \\
+        \\[[rules]]
+        \\name = "a"
+        \\outputs = ["a"]
+        \\output = ["a"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["b"]
+        \\shell = "true"
+        \\memory = "lots"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "resource_groups.disk.max must be between 1 and 1000000") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'outputs' in a rule; did you mean 'output'?") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "invalid memory") != null or std.mem.indexOf(u8, problem.message, "'lots'") != null);
+    var lines = std.mem.splitScalar(u8, problem.message, '\n');
+    while (lines.next()) |line| try testing.expect(std.mem.startsWith(u8, line, "line "));
+}
+
+test "[unit] - [workflow]: checks across rules report every rule at fault" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[[rules]]
+        \\name = "a"
+        \\output = ["x"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["x"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "c"
+        \\output = ["c"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[rules.resources]
+        \\groups = { disk = 1 }
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 2), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rules a and b both produce 'x'") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rule c uses undeclared resource group 'disk'") != null);
+}
+
+test "[unit] - [workflow]: every unknown key and the problems around them are reported" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s,
+        \\[workflow]
+        \\version = "1"
+        \\
+        \\[[rules]]
+        \\name = "a"
+        \\outptu = ["a"]
+        \\shel = "true"
+        \\output = ["a"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "workflow.name is required") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'outptu'") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'shel'") != null);
+}
+
+test "[unit] - [workflow]: a bad output does not hide a conflict with the rule's next output" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[[rules]]
+        \\name = "a"
+        \\output = ["../bad", "shared.txt"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\diagnostics = ["log.txt", "./log.txt"]
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["shared.txt"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "'../bad' must be a relative path") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rule a lists diagnostics './log.txt' twice") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rules a and b both produce 'shared.txt'") != null);
 }

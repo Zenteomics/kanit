@@ -15,6 +15,7 @@ All notable changes to workz will be documented in this file. The format follows
 
 ### Changed
 
+- **Workflows you can fix in one pass.** `validate`, and every command that reads a workflow, reports every problem it finds, up to 50 and a count of the rest, each with its line where it has one, instead of stopping at the first. Each rule, resource group and shared input reports every unknown key and its first bad value; checks between rules run once every rule reads well, and report every item at fault.
 - **Projects you can move.** Rule keys and `state.json` name paths inside the working directory relative to it, so moving or renaming a project within one file system keeps every rule reused; paths outside it stay absolute. `state.json` moves to format 4, which 0.4.0 refuses, and the engine key to 3, so every rule runs once after the upgrade.
 - **Containers inside the budget.** Each running container rule and service reserves 32 MiB of the memory budget for its Podman client and conmon, which run beside the container and take about 20 MiB; before, they shared the engine's 256 MiB of headroom, which 16 container rules at once outgrew. A container rule whose request is within 32 MiB of `--max-memory` is now refused before the launch, and fewer container rules may run at once on a tight budget. The refusal names what a rule's memory need includes.
 

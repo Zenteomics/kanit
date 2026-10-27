@@ -524,6 +524,10 @@ check "logs and the page show the diagnostics" 'grep -q "^==> .*/diagnostics/a/s
 printf '[workflow]\nname = "d"\n\n[[rules]]\nname = "x"\noutput = ["x"]\nshell = "true"\nmemory = "1M"\ndiagnostics = [".workz/x"]\n' > bad.toml
 "$workz" validate bad.toml > /dev/null 2> bad.txt
 check "diagnostics stay outside the engine records" 'grep -q "diagnostics .\.workz/x. is inside the engine record directory" bad.txt'
+printf '[workflow]\nname = "m"\n\n[resource_groups.disk]\nmax = 0\n\n[[rules]]\nname = "a"\noutputs = ["a"]\noutput = ["a"]\nshell = "true"\nmemory = "1M"\n\n[[rules]]\nname = "b"\noutput = ["b"]\nshell = "true"\nmemory = "lots"\n' > many.toml
+"$workz" validate many.toml > /dev/null 2> many.txt
+rc=$?
+check "validate reports every problem at once, each with its line" '[ $rc = 2 ] && grep -q "many.toml: 3 problems" many.txt && grep -q "^  line 5: resource_groups.disk.max" many.txt && grep -q "^  line 9: unknown key .outputs." many.txt && grep -q "^  line 14: rule b: invalid memory" many.txt'
 
 new methods
 { printf '[workflow]\nname = "methods"\nversion = "2.1"\n\n'

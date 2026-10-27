@@ -23,6 +23,19 @@ workz: typo.toml: line 9: unknown key 'memroy' in a rule; did you mean 'memory'?
   9 | memroy = "64M"
 ```
 
+A file with several problems gets them all at once, up to 50 and a count of the rest, each with its line where it has one, and the first shown:
+
+```text
+workz: workflow.toml: 3 problems
+  line 5: resource_groups.disk.max must be between 1 and 1000000
+  line 9: unknown key 'outputs' in a rule; did you mean 'output'?
+  line 14: rule b: invalid memory 'lots'
+  5 | max = 0
+```
+
+- Each rule, resource group and shared input reports every unknown key and its first bad value. Checks between rules, such as two rules writing one file or a rule using an undeclared group, run once every rule reads well and report every item at fault, so fixing the first list can show a second.
+- A file that is not valid TOML, or that lacks its `[workflow]` table, stops at that one problem.
+
 - `rule NAME must declare output files`: Every rule writes at least one file that workz can check. A rule that only has side effects can write a marker file, such as `touch done/NAME`.
 
 - `rules A and B both produce 'PATH'`: Two rules declare the same output. Give each its own file.

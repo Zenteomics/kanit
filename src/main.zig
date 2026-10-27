@@ -608,6 +608,20 @@ fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
     w.interface.flush() catch {};
 }
 
+/// Prints what is wrong with a workflow: one problem as one line, several
+/// under their count, then the source line of the first.
+fn printProblems(c: Ctx, wpath: []const u8, wf_abs: []const u8, problem: workflow.Problem) void {
+    if (problem.count <= 1) {
+        std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
+    } else {
+        std.debug.print("workz: {s}: {d} problems\n", .{ wpath, problem.count });
+        var lines = std.mem.splitScalar(u8, problem.message, '\n');
+        while (lines.next()) |line| std.debug.print("  {s}\n", .{line});
+        if (problem.count > workflow.Problem.max_listed) std.debug.print("  and {d} more\n", .{problem.count - workflow.Problem.max_listed});
+    }
+    showSnippet(c, wf_abs, problem);
+}
+
 /// Loads, checks and selects; prints the reason and returns null when invalid.
 fn load(c: Ctx, common: *const Common) !?Loaded {
     const wpath = common.workflow orelse default: {
@@ -620,8 +634,7 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     var problem: workflow.Problem = .{};
     var wf = workflow.load(c.gpa, wf_abs, root, &problem) catch |err| switch (err) {
         error.Invalid => {
-            std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
-            showSnippet(c, wf_abs, problem);
+            printProblems(c, wpath, wf_abs, problem);
             c.gpa.free(problem.message);
             return null;
         },
@@ -630,8 +643,7 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     errdefer wf.deinit();
     var g = graph.build(c.gpa, &wf, &problem) catch |err| switch (err) {
         error.Cycle, error.Invalid => {
-            std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
-            showSnippet(c, wf_abs, problem);
+            printProblems(c, wpath, wf_abs, problem);
             c.gpa.free(problem.message);
             wf.deinit();
             return null;
