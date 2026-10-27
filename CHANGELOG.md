@@ -171,7 +171,7 @@ Three changes need action:
   - `logs` says when the launch or attempt it was given does not exist, instead of blaming the rule, and refuses `--stdout` with `--stderr`.
   - `status --history 3x` is refused instead of showing 10 launches, and `--history` with `--json` or `--launch` is refused.
   - `status --history` names its last column `CANCELLED`, the rules a launch stopped or never started, and shows `running` for the newest launch while a run holds the working directory's lock and `unfinished` for a launch whose engine ended without recording its end, where both showed `running?`.
-  - `run`'s status line counts blocked rules apart from failed ones and gives its time as the reports do, `1m 05s`.
+  - `run`'s status line counts blocked rules apart from failed ones, and it and the event lines give times as the reports do, `1m 05s` or `4 ms`.
   - A step killed for its memory notes that its suggestion is at least half again the request it exceeded.
   - `status` no longer accepts `watch`'s `--once` and `--interval`, and `watch --interval` under 100 is refused instead of raised.
   - An option is never taken as the value of the one before it: `report --launch --format html` says `--launch needs a value`.

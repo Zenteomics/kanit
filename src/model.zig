@@ -286,10 +286,6 @@ pub const State = enum {
     /// The launch ended before it was ready.
     not_run,
 
-    pub fn done(s: State) bool {
-        return s == .completed or s == .reused;
-    }
-
     pub fn active(s: State) bool {
         return s == .running or s == .stopping;
     }
@@ -616,7 +612,7 @@ pub const Launch = struct {
             t.runs += 1;
             t.wall_s += run.wall_s;
             t.cpu_s += run.cpu_s;
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ name, r.labels.step });
+            const pair = try pairKey(a, name, r.labels.step);
             if (!seen.contains(pair)) {
                 try seen.put(a, pair, {});
                 t.steps += 1;
@@ -646,7 +642,7 @@ pub const Launch = struct {
             row.wall_s += run.wall_s;
             row.cpu_s += run.cpu_s;
             if (row.slowest == null or run.wall_s > self.rules[row.slowest.?].run.?.wall_s) row.slowest = i;
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ name, r.labels.step });
+            const pair = try pairKey(a, name, r.labels.step);
             if (!seen.contains(pair)) {
                 try seen.put(a, pair, {});
                 row.steps += 1;
@@ -692,6 +688,16 @@ pub const Launch = struct {
     }
 };
 
+/// "workz X.Y.Z" from an engine ID, without the executable's digest.
+fn engineName(id: []const u8) []const u8 {
+    return if (std.mem.indexOf(u8, id, " sha256:")) |i| id[0..i] else id;
+}
+
+/// A key for a pair of names, such as a sample and a step.
+fn pairKey(a: Allocator, x: []const u8, y: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}\x00{s}", .{ x, y });
+}
+
 /// The reason a workflow snapshot gave no graph: the problem's line and
 /// message, or the error's name.
 fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]const u8 {
@@ -734,9 +740,8 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     if (try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }))) |v| {
         l.workdir = str(v, "workdir");
         if (l.workdir.len > 0) l.name = std.fs.path.basename(l.workdir);
-        const engine = str(v, "engine");
-        l.engine = if (std.mem.indexOf(u8, engine, " sha256:")) |i| engine[0..i] else engine;
-        l.engine_id = engine;
+        l.engine_id = str(v, "engine");
+        l.engine = engineName(l.engine_id);
         l.workflow_sha256 = str(v, "workflow_sha256");
         l.started_text = str(v, "started");
         l.max_threads = num(get(v, "max_threads")) orelse 0;
@@ -760,10 +765,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
             l.engine_cpu_s = num(get(c, "cpu_s"));
             l.engine_rss_mib = num(get(c, "max_rss_mib"));
         }
-        if (l.engine.len == 0) {
-            const engine = str(s, "engine");
-            l.engine = if (std.mem.indexOf(u8, engine, " sha256:")) |i| engine[0..i] else engine;
-        }
+        if (l.engine.len == 0) l.engine = engineName(str(s, "engine"));
     } else if (tr.finished) {
         l.finished = true;
         l.status = tr.final_status;
@@ -896,7 +898,7 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
         if (r.labels.category != null) l.by_category = true;
         if (r.labels.sample) |name| {
             try samples.put(a, name, {});
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ r.labels.step, name });
+            const pair = try pairKey(a, r.labels.step, name);
             if (!pairs.contains(pair)) {
                 try pairs.put(a, pair, {});
                 s.samples += 1;
@@ -1011,8 +1013,8 @@ fn collectPath(a: Allocator, l: *Launch) !void {
     const work = try a.alloc(f64, n);
     const waited = try a.alloc(f64, n);
     const tries = try a.alloc(i64, n);
-    // When each rule first became ready and when its last attempt ended,
-    // in seconds from the launch's start.
+    // Each rule's first attempt, which tells when the rule became ready,
+    // and when its last attempt ended, in seconds from the launch's start.
     const first = try a.alloc(?Attempt, n);
     const ended = try a.alloc(f64, n);
     @memset(work, 0);

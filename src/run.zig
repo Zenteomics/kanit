@@ -1445,7 +1445,10 @@ const Engine = struct {
             try self.pending_done.append(self.gpa, r.name);
             self.finished += 1;
             self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "completed", .wall_s = wall_s, .cpu_s = taskCpu(counters, reaped), .maxrss_kib = reaped.usage.maxrss, .memory_peak = if (counters) |c| c.memory_peak else null });
-            self.progress("completed", "{s} ({d:.1} s)", .{ r.name, wall_s });
+            var took: [32]u8 = undefined;
+            var tw: std.Io.Writer = .fixed(&took);
+            units.duration(&tw, wall_s) catch {};
+            self.progress("completed", "{s} ({s})", .{ r.name, tw.buffered() });
             return;
         }
         t.reason = reason;
