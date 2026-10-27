@@ -276,8 +276,8 @@ test "[unit] - [workflow]: declared labels replace the derived ones and are not 
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const ka = (try state.computeKey(arena.allocator(), &ids, &plain.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
-    const kb = (try state.computeKey(arena.allocator(), &ids, &labelled.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const ka = (try state.computeKey(arena.allocator(), &ids, &plain.rules[0], plain.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const kb = (try state.computeKey(arena.allocator(), &ids, &labelled.rules[0], labelled.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings(ka.key, kb.key);
 }
 

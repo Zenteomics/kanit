@@ -40,7 +40,9 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 - `manifest`: the digests of input-manifest files, with the identity each was hashed at.
 - `envs`: the keyed environment of each recorded rule, for `explain` to name what changed.
 
-workz 0.4.0 reads the state of earlier versions. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
+
+workz reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
 ## Launch files
 
@@ -59,7 +61,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 ```json
 {
   "engine": "workz 0.4.0 sha256:...",
-  "engine_key": 2,
+  "engine_key": 3,
   "launch": "20261027T025023.762-56876086",
   "status": "completed",
   "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },

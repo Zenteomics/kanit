@@ -20,8 +20,8 @@ When a rule completes, workz records its key, made of seven parts:
 1. **Command**: the `shell` text, with the rule's `workdir` and `links`, and for container rules the image ID, mounts and joined service.
 2. **Environment**: the values of `PATH`, `LANG`, `LC_ALL` and `TZ`, and of every name given with `--pass-env`.
 3. **Request**: threads, memory, resource groups and shared inputs, as written.
-4. **Writes**: the declared outputs, log and benchmark paths.
-5. **Inputs**: the identity of every input file, or its content digest where one is stored.
+4. **Writes**: the declared outputs, log and benchmark paths, as written.
+5. **Inputs**: the identity of every input file, or its content digest where one is stored, under its path relative to the working directory when inside it ([Moving a project](#moving-a-project)).
 6. **Producers**: the key of every rule that produces one of the inputs.
 7. **Engine key**: a number raised only when a change to workz can change what a rule produces.
 
@@ -46,13 +46,27 @@ For a colon-separated list such as `PATH` it names the entries added or removed,
 
 No other variable is part of the key. Host rules also receive `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM`, but a change to one of them reruns nothing; name a variable with `--pass-env` to pass it and key it. Everything else stays out of rules ([Running workflows](Running-Workflows.md#what-a-command-sees)).
 
-The engine key is 2 in workz 0.4.0. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; 0.4.0 runs every rule once after 0.3.0, because file identities no longer include the device number.
+The engine key is 3. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; 0.4.0 runs every rule once after 0.3.0, because file identities no longer include the device number.
 
 ## File identity
 
 A file's identity is its inode, size, and modification and change times, which workz reads with one `statx` call. A rewrite changes them even when it restores the old modification time, because programs cannot set the change time. workz therefore notices every edit without reading the file. The device number is left out: btrfs numbers its subvolumes anew at each mount, so it would change with every reboot.
 
 A directory's identity covers every file below it, so adding, removing or editing any of them changes it.
+
+## Moving a project
+
+Paths inside the working directory enter rule keys and `state.json` relative to it, and a file moved within one file system keeps its identity. Moving or renaming the whole working directory, `.workz/` with it, therefore keeps every rule reused:
+
+```sh
+mv ~/runs/rnaseq ~/projects/rnaseq-2026
+workz plan ~/projects/rnaseq-2026/workflow.toml    # 0 to run
+```
+
+- An absolute path inside the project changes with it: a rule's `shell` that names one, a `PATH` entry under it, or an input written through a symlinked spelling of the project's directory. Write paths inside the project relative to it.
+- A copy is not a move: `cp`, `rsync` or a move to another file system give every file a new identity, so the rules run again.
+- A shared service's `command` names absolute paths, since it runs in `/tmp`; after a move it must be rewritten, and the rules that join it run again.
+ Containers that a killed launch left behind carry the old path, so `clean` in the new place does not find them; remove them with `podman rm`.
 
 ## Content digests
 

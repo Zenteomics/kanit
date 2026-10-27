@@ -785,6 +785,16 @@ fn absAll(arena: Allocator, root: []const u8, paths: []const []const u8) ![]cons
     return out;
 }
 
+/// How rule keys and `state.json` name path `abs`: relative to the working
+/// directory `root` when inside it, so moving the project keeps them, else
+/// absolute.
+pub fn keyPath(root: []const u8, abs: []const u8) []const u8 {
+    if (std.mem.eql(u8, root, "/")) return abs;
+    if (std.mem.eql(u8, abs, root)) return ".";
+    if (abs.len > root.len and std.mem.startsWith(u8, abs, root) and abs[root.len] == '/') return abs[root.len + 1 ..];
+    return abs;
+}
+
 /// True when `path` is `root` or lies beneath it.
 pub fn within(root: []const u8, path: []const u8) bool {
     if (!std.mem.startsWith(u8, path, root)) return false;
