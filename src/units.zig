@@ -3,9 +3,11 @@
 //! page. Machine output (TSV, JSON) keeps plain numbers.
 const std = @import("std");
 
-/// A duration: `48.2 s` under a minute, `3m 07s` under an hour, `2h 05m`.
+/// A duration: `42 ms` under a tenth of a second, `48.2 s` under a minute,
+/// `3m 07s` under an hour, `2h 05m`.
 pub fn duration(w: *std.Io.Writer, s: f64) !void {
     if (!std.math.isFinite(s)) return w.writeAll("-");
+    if (s < 0.0995) return w.print("{d:.0} ms", .{@max(s, 0) * 1000});
     // 59.96 s rounds to 60.0, so it is shown as 1m 00s.
     if (s < 59.95) return w.print("{d:.1} s", .{@max(s, 0)});
     const whole: u64 = std.math.lossyCast(u64, @round(s));

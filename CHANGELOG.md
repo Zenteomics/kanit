@@ -69,6 +69,10 @@ Three changes need action:
   - Tables list the failures and every attempt.
   - The pipeline, CPU, samples and steps figures cover the latest run of every rule, so a launch that reused rules still shows the whole pipeline; the rest cover the launch itself.
   - A page written while the launch runs reloads itself every 5 s.
+  - The timeline names its rows up to 250 attempts, and marks the critical path with a heavier edge; FIG. 6's legend shows a running bar in its category's color, the CPU and memory axes label their zero with its unit, and the samples matrix aligns its CPU time header with its figures.
+  - The page prints its colors, on A4 in landscape. On a narrow screen the title block leaves no cell alone on its row, and a figure wider than the screen shades the edge it scrolls past.
+  - Text and marks meet contrast levels in both themes: muted labels 5.2:1 on the light sheet, text on the matrix shades and on failed cells at least 5:1, cancelled and not-ready marks and the dark frames at least 3:1, and the dark sheet stands apart from its paper.
+  - Rule states are drawn in ink, by form: done solid, reused hatched, running outlined and pulsing, waiting dashed, a stopping rule grey. No state takes a category's hue, so a category drawn in blue is never read as running; a slow run is an ink ring and its `!`, and bars of memory and the run dots are a neutral ink.
   - The page follows the reader's color scheme, and a theme tag at its corner picks auto, light or dark without a script. It prints in light and loads nothing from elsewhere.
 - **The live view** shows the launch in gauges.
   - A progress bar is split by state, and the threads and memory reserved against the budget sit beside the cores and memory in use.
@@ -140,6 +144,7 @@ Three changes need action:
   - An event that is not about a task no longer adds a rule to the views.
   - The reports say why a launch's workflow snapshot cannot be read, with its line, instead of only that it cannot.
   - A duration just under a minute prints as `1m 00s`, not `60.0 s`.
+  - A duration under a tenth of a second prints in milliseconds, `42 ms`, instead of `0.0 s`.
 - **Comparisons.**
   - `--compare` prints both launches' budgets and notes when the budgets, the workflow file or the engine differ, gives no change where a value is under 0.1 s or 8 MiB, and notes a step whose median wall time moved less than its runs differ among themselves.
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.

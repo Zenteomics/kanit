@@ -357,6 +357,9 @@ test "[edge] - [report]: durations and sizes print for any number" {
     try workz.units.duration(&w, 59.96);
     try testing.expectEqualStrings("1m 00s", w.buffered());
     w = .fixed(&buf);
+    try workz.units.duration(&w, 0.042);
+    try testing.expectEqualStrings("42 ms", w.buffered());
+    w = .fixed(&buf);
     try workz.units.duration(&w, std.math.inf(f64));
     try testing.expectEqualStrings("-", w.buffered());
     w = .fixed(&buf);

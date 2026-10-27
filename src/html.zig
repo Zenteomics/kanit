@@ -79,28 +79,30 @@ fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
 // The page is drawn on paper with a faint grid: ink line work, hairline
 // frames, condensed capitals for labels and monospace figures. Categories
 // (or steps) take eight inks in a fixed order, validated for color vision
-// deficiency against each paper; magnitude uses one ink ramp; red is kept
-// for failure. Dark mode is a blueprint: blue paper, pale ink.
+// deficiency against each paper; magnitude uses one ink ramp. States are
+// drawn in ink, by form: done solid, reused hatched, running outlined,
+// waiting dashed; so no state takes a category's hue, and red is kept for
+// failure. Dark mode is a charcoal sheet with pale ink.
 // The sheet in light: ink on paper. Categories c1-c8 keep one hue each in
 // both themes; q1-q7 shade the samples matrix from fast to slow; --rule draws
 // frames and dividers, --tab the figure numbers.
 const light_theme =
-    \\color-scheme:light;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#7d8894;--hair:#cfd3d8;
+    \\color-scheme:light;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#5f6b78;--hair:#cfd3d8;--pend:#7d8894;
     \\--rule:#1d2b3a;--tab:#1d2b3a;--tab-ink:#fbfaf6;--g1:rgba(29,43,58,.04);--g2:rgba(29,43,58,.08);--wash:rgba(29,43,58,.05);
     \\--c1:#2b5fae;--c2:#c46a1a;--c3:#23896b;--c4:#8a5cc2;--c5:#a6841a;--c6:#2c86ad;--c7:#b84f7a;--c8:#6d7f2d;--c0:#9aa3ad;
-    \\--q1:#e4e9f0;--q2:#c6d0dc;--q3:#a2b1c3;--q4:#7d91a8;--q5:#5a718c;--q6:#3b5370;--q7:#1d2b3a;--t4:#fff;--t5:#fff;
-    \\--done:#1d2b3a;--run:#2b5fae;--fail:#c62828;--warn:#d68a00;--cancel:#9aa3ad
+    \\--q1:#e4e9f0;--q2:#c6d0dc;--q3:#a2b1c3;--q4:#8a9cb1;--q5:#5a718c;--q6:#3b5370;--q7:#1d2b3a;--t4:#1d2b3a;--t5:#fff;
+    \\--done:#1d2b3a;--fail:#c62828;--fail-ink:#fff;--cancel:#7f8a96
 ;
 
 // The sheet in dark: a neutral charcoal on which the same hues sit in a
 // darker band, so no color glares against another; frames are a soft slate
 // rather than bright ink.
 const dark_theme =
-    \\color-scheme:dark;--paper:#111418;--sheet:#181c22;--ink:#e2e6eb;--ink2:#a9b2be;--muted:#7c8796;--hair:#2a3038;
-    \\--rule:#566170;--tab:#3a4452;--tab-ink:#e2e6eb;--g1:rgba(214,222,232,.03);--g2:rgba(214,222,232,.06);--wash:rgba(214,222,232,.045);
+    \\color-scheme:dark;--paper:#0c0f13;--sheet:#1a1f26;--ink:#e2e6eb;--ink2:#a9b2be;--muted:#7c8796;--hair:#2a3038;--pend:#6e7a89;
+    \\--rule:#6e7a89;--tab:#3a4452;--tab-ink:#e2e6eb;--g1:rgba(214,222,232,.03);--g2:rgba(214,222,232,.06);--wash:rgba(214,222,232,.045);
     \\--c1:#5a87d6;--c2:#cf7838;--c3:#2fa07c;--c4:#9677d6;--c5:#a98a28;--c6:#3a9cc2;--c7:#cc6b93;--c8:#839744;--c0:#69737f;
-    \\--q1:#262d37;--q2:#323c4a;--q3:#435163;--q4:#5a6b81;--q5:#7b8da5;--q6:#a3b2c5;--q7:#cfd8e3;--t4:#e2e6eb;--t5:#111418;
-    \\--done:#8b98aa;--run:#64b0ff;--fail:#e5605c;--warn:#d9a033;--cancel:#5d6775
+    \\--q1:#262d37;--q2:#323c4a;--q3:#435163;--q4:#5a6b81;--q5:#7b8da5;--q6:#a3b2c5;--q7:#cfd8e3;--t4:#f6f7f9;--t5:#0c0f13;
+    \\--done:#c9d2dd;--fail:#e5605c;--fail-ink:#0c0f13;--cancel:#707c8c
 ;
 
 /// The choices of the theme switch; auto follows the reader's setting.
@@ -132,7 +134,7 @@ const style =
     \\h1{font:600 30px/1.1 var(--label);letter-spacing:.03em;margin:0;overflow-wrap:anywhere}
     \\.big{font:500 22px/1.15 var(--mono);white-space:nowrap}.sub{font-size:12px;color:var(--ink2)}
     \\.stamp{display:inline-block;font:700 15px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;padding:5px 9px;border:2px solid currentColor;transform:rotate(-2deg)}
-    \\.s-ok{color:var(--c3)}.s-fail{color:var(--fail)}.s-run{color:var(--run)}.s-cancel{color:var(--muted)}
+    \\.s-ok{color:var(--done)}.s-fail{color:var(--fail)}.s-run{color:var(--ink)}.s-cancel{color:var(--muted)}
     \\.live{animation:pulse 1.6s ease-in-out infinite}
     \\.error{background:var(--sheet);border:1.5px solid var(--fail);border-top:0;padding:8px 12px;color:var(--fail)}
     \\nav{display:flex;flex-wrap:wrap;align-items:stretch;border:1.5px solid var(--rule);border-top:0;background:var(--sheet)}
@@ -140,10 +142,10 @@ const style =
     \\nav a:hover{color:var(--ink);background:var(--wash)}nav a b{color:var(--muted);margin-right:6px}
     \\.corner{display:flex;justify-content:flex-end;margin:0 0 8px}.theme{display:flex;align-items:center;border:1px solid var(--rule);background:var(--sheet)}
     \\.theme .k{margin:0;padding:0 10px}
-    \\.theme label{font:600 11.5px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:6px 10px;border-left:1px solid var(--hair);cursor:pointer}
+    \\.theme label{font:600 11.5px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--ink2);padding:6px 10px;border-left:1px solid var(--hair);cursor:pointer}
     \\.theme label:hover{color:var(--ink);background:var(--wash)}
     \\#theme-auto:checked~.page label[for=theme-auto],#theme-light:checked~.page label[for=theme-light],#theme-dark:checked~.page label[for=theme-dark]{color:var(--tab-ink);background:var(--tab)}
-    \\#theme-auto:focus-visible~.page label[for=theme-auto],#theme-light:focus-visible~.page label[for=theme-light],#theme-dark:focus-visible~.page label[for=theme-dark]{outline:2px solid var(--run);outline-offset:-2px}
+    \\#theme-auto:focus-visible~.page label[for=theme-auto],#theme-light:focus-visible~.page label[for=theme-light],#theme-dark:focus-visible~.page label[for=theme-dark]{outline:2px solid var(--ink);outline-offset:-2px}
     \\.fig{background:var(--sheet);border:1.5px solid var(--rule);margin:26px 0 0}
     \\.fig-h{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--rule);padding:0 14px 0 0;flex-wrap:wrap}
     \\.no{font:700 12px/1 var(--label);letter-spacing:.14em;background:var(--tab);color:var(--tab-ink);padding:9px 11px}
@@ -157,17 +159,17 @@ const style =
     \\.g1{fill:var(--c1);background:var(--c1)}.g2{fill:var(--c2);background:var(--c2)}.g3{fill:var(--c3);background:var(--c3)}
     \\.g4{fill:var(--c4);background:var(--c4)}.g5{fill:var(--c5);background:var(--c5)}.g6{fill:var(--c6);background:var(--c6)}
     \\.g7{fill:var(--c7);background:var(--c7)}.g8{fill:var(--c8);background:var(--c8)}.g0{fill:var(--c0);background:var(--c0)}
-    \\.box{fill:var(--sheet);stroke:var(--rule);stroke-width:1.25}.box.active{stroke:var(--run);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
+    \\.box{fill:var(--sheet);stroke:var(--rule);stroke-width:1.25}.box.active{stroke:var(--ink);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
     \\.wire{fill:none;stroke:var(--ink2);stroke-width:1}.arrow{fill:var(--ink2)}
     \\svg text.t-name{font:600 12px var(--mono);fill:var(--ink)}svg text.t-sub{font-size:11px;fill:var(--ink2)}svg text.t-count{font:600 11px var(--mono);fill:var(--ink)}
     \\.st-completed{fill:var(--done);background:var(--done)}.st-reused{fill:url(#hatch);background:repeating-linear-gradient(135deg,var(--done) 0 1.5px,transparent 1.5px 4px)}
-    \\.st-running{fill:var(--run);background:var(--run);animation:pulse 1.2s ease-in-out infinite}.st-stopping{fill:var(--warn);background:var(--warn)}
-    \\.st-waiting{fill:var(--sheet);stroke:var(--run);stroke-width:1.25;stroke-dasharray:2.5 1.5;background:var(--sheet);outline:1.25px dashed var(--run);outline-offset:-1.25px}
-    \\.st-pending,.st-not_run{fill:var(--sheet);stroke:var(--hair);stroke-width:1;background:var(--sheet);outline:1px solid var(--hair);outline-offset:-1px}
+    \\.st-running{fill:var(--sheet);stroke:var(--ink);stroke-width:2.5;background:var(--sheet);outline:2.5px solid var(--ink);outline-offset:-2.5px;animation:pulse 1.2s ease-in-out infinite}.st-stopping{fill:var(--cancel);background:var(--cancel);animation:pulse 1.2s ease-in-out infinite}
+    \\.st-waiting{fill:var(--sheet);stroke:var(--ink2);stroke-width:1.25;stroke-dasharray:2.5 1.5;background:var(--sheet);outline:1.25px dashed var(--ink2);outline-offset:-1.25px}
+    \\.st-pending,.st-not_run{fill:var(--sheet);stroke:var(--pend);stroke-width:1;background:var(--sheet);outline:1px solid var(--pend);outline-offset:-1px}
     \\.st-failed{fill:var(--fail);background:var(--fail)}.st-blocked{fill:var(--fail);fill-opacity:.2;stroke:var(--fail);stroke-width:1;background:color-mix(in srgb,var(--fail) 20%,transparent);outline:1px solid var(--fail);outline-offset:-1px}
     \\.st-cancelled{fill:var(--cancel);background:var(--cancel)}
     \\.hatch{stroke:var(--done);stroke-width:1.5}
-    \\@keyframes pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.st-running,.live{animation:none}}
+    \\@keyframes pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.st-running,.st-stopping,.live,.matrix td.running{animation:none}}
     \\.legend{display:flex;flex-wrap:wrap;gap:6px 18px;list-style:none;padding:0;margin:12px 0 0;font-size:12.5px;color:var(--ink2)}
     \\.legend i{display:inline-block;width:11px;height:11px;margin-right:6px;vertical-align:-1px}.legend b{font-weight:600;color:var(--ink)}
     \\.split{display:flex;height:26px;gap:2px;border:1px solid var(--rule);padding:2px;margin:4px 0}.split i{display:block;min-width:3px}
@@ -178,10 +180,10 @@ const style =
     \\td.name{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
     \\td.name i,th.step i{display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:-1px}
     \\td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;color:var(--ink2);white-space:nowrap}td.name small{margin-left:18px}td.n small.sub{white-space:normal;max-width:22ch;margin-left:auto}
-    \\.wide{overflow-x:auto;scrollbar-color:var(--hair) transparent}.scroll{max-height:70vh;overflow:auto;border:1px solid var(--hair)}
+    \\.wide{overflow-x:auto;scrollbar-color:var(--hair) transparent;background:linear-gradient(90deg,var(--sheet) 30%,transparent) left/40px 100% no-repeat local,linear-gradient(270deg,var(--sheet) 30%,transparent) right/40px 100% no-repeat local,linear-gradient(90deg,color-mix(in srgb,var(--ink) 16%,transparent),transparent) left/14px 100% no-repeat scroll,linear-gradient(270deg,color-mix(in srgb,var(--ink) 16%,transparent),transparent) right/14px 100% no-repeat scroll}.scroll{max-height:70vh;overflow:auto;border:1px solid var(--hair)}
     \\.scroll thead th{position:sticky;top:0;z-index:1}
     \\.bar{position:relative;height:9px;min-width:110px;border:1px solid var(--ink2)}
-    \\.bar i{position:absolute;left:0;top:0;bottom:0}.b-use{background:var(--c1)}.b-cache{background:var(--q2)}.b-wait{background:var(--q3)}.b-held{background:repeating-linear-gradient(135deg,var(--q3) 0 1.5px,transparent 1.5px 4px)}
+    \\.bar i{position:absolute;left:0;top:0;bottom:0}.b-use{background:var(--q5)}.b-cache{background:var(--q2)}.b-wait{background:var(--q3)}.b-held{background:repeating-linear-gradient(135deg,var(--q3) 0 1.5px,transparent 1.5px 4px)}
     \\.hbar{display:flex;align-items:center;gap:10px}.hbar .bar{flex:1}.hbar span{min-width:84px;text-align:right;color:var(--ink2);white-space:nowrap;font-family:var(--mono);font-size:12px}
     \\.matrix{border-collapse:separate;border-spacing:2px;width:auto}
     \\.matrix th{border:0;padding:4px;background:none}
@@ -190,28 +192,30 @@ const style =
     \\.matrix td{width:30px;min-width:30px;height:24px;padding:0;border:0;text-align:center;font:700 12px var(--mono)}
     \\.matrix tbody tr:hover td{background:revert-layer}
     \\.matrix td.row{width:auto;text-align:left;padding:0 10px 0 0;font-weight:400;font-size:12.5px;white-space:nowrap}
-    \\.matrix td.sum{width:auto;text-align:right;padding:0 0 0 12px;font-weight:400;color:var(--ink2);white-space:nowrap}
+    \\.matrix td.sum{width:auto;text-align:right;padding:0 0 0 12px;font-weight:400;color:var(--ink2);white-space:nowrap}.matrix th.n{padding:4px 0 4px 12px}
     \\.matrix td.none{background:var(--wash)}.matrix td.cell:hover{outline:2px solid var(--ink);outline-offset:-2px}
     \\.q1{background:var(--q1);color:var(--ink)}.q2{background:var(--q2);color:var(--ink)}.q3{background:var(--q3);color:var(--ink)}
     \\.q4{background:var(--q4);color:var(--t4)}.q5{background:var(--q5);color:var(--t5)}.q6{background:var(--q6);color:var(--t5)}.q7{background:var(--q7);color:var(--t5)}
-    \\.matrix td.failed{background:var(--fail);color:#fff}.matrix td.cancelled{background:var(--cancel);color:var(--ink)}.matrix td.solo{background:var(--q2)}
-    \\.matrix td.slow{box-shadow:inset 0 0 0 2px var(--warn)}
+    \\.matrix td.failed{background:var(--fail);color:var(--fail-ink)}.matrix td.cancelled{background:var(--cancel);color:var(--ink)}.matrix td.solo{background:var(--q2)}
+    \\.matrix td.slow{box-shadow:inset 0 0 0 2px var(--sheet),inset 0 0 0 3.5px var(--ink)}
     \\.matrix td.reused{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.35) 0 1.5px,transparent 1.5px 5px)}
-    \\.matrix td.running{background:var(--run);color:#fff;animation:pulse 1.2s ease-in-out infinite}.matrix td.waiting{outline:1.25px dashed var(--run);outline-offset:-2px}
+    \\.matrix td.running{background:var(--sheet);color:var(--ink);box-shadow:inset 0 0 0 2.5px var(--ink);animation:pulse 1.2s ease-in-out infinite}.matrix td.waiting{outline:1.25px dashed var(--ink2);outline-offset:-2px}
     \\.scale{display:inline-flex;gap:2px;vertical-align:-2px;margin:0 6px 0 2px}.scale i{width:14px;height:10px;margin:0}
-    \\.strip{width:192px;height:26px;display:block}.strip circle{fill:var(--c1);stroke:var(--sheet);stroke-width:2}
-    \\.strip circle.slow{fill:var(--warn)}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
+    \\.strip{width:192px;height:26px;display:block}.strip circle{fill:var(--q5);stroke:var(--sheet);stroke-width:2}
+    \\.strip circle.slow{fill:var(--sheet);stroke:var(--ink);stroke-width:2}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
     \\.failure{border:1px solid var(--hair);border-left:3px solid var(--fail);margin:10px 0}
     \\.failure summary{cursor:pointer;padding:9px 13px}.failure .why{color:var(--ink)}.cell .why{color:var(--fail);white-space:normal;overflow-wrap:anywhere}
     \\.failure.retried{border-left-color:var(--cancel)}
     \\pre{margin:0;padding:11px 13px;background:var(--wash);font:12px/1.5 var(--mono);overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word}
     \\.failure pre{border-top:1px solid var(--hair)}
     \\footer{color:var(--muted);font:600 11px/1.6 var(--label);letter-spacing:.1em;text-transform:uppercase;text-align:right;margin-top:16px}
-    \\@media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}}
+    \\@media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}.r1>.cell:last-child{grid-column:1/-1}}
     \\
 ++ "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}" ++
     \\.page{background:#fff}main{max-width:none;padding:0}nav,.corner{display:none}
-    \\.fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}.st-running,.live{animation:none}}
+    \\.fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}.st-running,.st-stopping,.live,.matrix td.running{animation:none}
+    \\.wide{background:none}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
+    \\@page{size:A4 landscape;margin:12mm}
 ;
 
 /// The page for one launch.
@@ -870,7 +874,7 @@ const Page = struct {
             }
             try w.writeAll("</td></tr>\n");
         }
-        try w.writeAll("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"g1\" style=\"border-radius:50%\"></i>a run</li><li><i style=\"background:var(--warn);border-radius:50%\"></i>1.5 times the median and 2 s longer</li><li><i style=\"background:var(--ink);width:2px\"></i>median</li><li><i class=\"b-use\"></i>memory used</li><li><i class=\"b-cache\"></i>page cache in the cgroup peak</li></ul>\n");
+        try w.writeAll("</tbody></table></div>\n<ul class=\"legend\"><li><i style=\"background:var(--q5);border-radius:50%\"></i>a run</li><li><i style=\"background:var(--sheet);border:2px solid var(--ink);border-radius:50%\"></i>1.5 times the median and 2 s longer</li><li><i style=\"background:var(--ink);width:2px\"></i>median</li><li><i class=\"b-use\"></i>memory used</li><li><i class=\"b-cache\"></i>page cache in the cgroup peak</li></ul>\n");
         try self.endFigure();
     }
 
@@ -932,8 +936,8 @@ const Page = struct {
         var span = @max(l.elapsed_s, 0.001);
         for (bars.items) |b| span = @max(span, b.start + b.wall);
         const n = bars.items.len;
-        const row_h: f64 = if (n <= 60) 18 else if (n <= 150) 12 else if (n <= 400) 6 else 3;
-        const labels = row_h >= 12;
+        const row_h: f64 = if (n <= 60) 18 else if (n <= 250) 10 else if (n <= 400) 6 else 3;
+        const labels = row_h >= 10;
         const width: f64 = 1180;
         const label_w: f64 = if (labels) 210 else 16;
         const x0 = label_w;
@@ -968,7 +972,7 @@ const Page = struct {
             const run_to = x0 + @min(b.start + b.wall, span) / span * plot_w;
             if (labels) {
                 const label = if (b.attempt > 1) try std.fmt.allocPrint(self.a, "{s} #{d}", .{ middle(self.a, b.name, 24), b.attempt }) else middle(self.a, b.name, 28);
-                try w.print("<text x=\"{d:.0}\" y=\"{d:.1}\" text-anchor=\"end\"{s}>", .{ label_w - 10, y + row_h * 0.68, if (b.crit) " style=\"fill:var(--ink);font-weight:600\"" else "" });
+                try w.print("<text x=\"{d:.0}\" y=\"{d:.1}\" text-anchor=\"end\"{s}{s}>", .{ label_w - 10, y + row_h * 0.7, if (row_h < 12) " font-size=\"9\"" else "", if (b.crit) " style=\"fill:var(--ink);font-weight:600\"" else "" });
                 try escape(w, label);
                 try w.writeAll("</text>");
             }
@@ -976,7 +980,7 @@ const Page = struct {
             const pad: f64 = if (row_h >= 12) 3 else if (row_h >= 6) 1 else 0;
             var class_buf: [24]u8 = undefined;
             const class = if (b.open) "st-running" else if (eql(u8, b.status, "completed")) std.fmt.bufPrint(&class_buf, "g{d}", .{b.slot}) catch "g0" else if (eql(u8, b.status, "cancelled")) "st-cancelled" else "st-failed";
-            try w.print("<rect class=\"{s}\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\"{s}><title>", .{ class, run_from, y + pad, @max(run_to - run_from, 1), row_h - 2 * pad, if (b.crit) " style=\"stroke:var(--ink);stroke-width:1.5\"" else "" });
+            try w.print("<rect class=\"{s}\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\"{s}><title>", .{ class, run_from, y + pad, @max(run_to - run_from, 1), row_h - 2 * pad, if (b.crit) " style=\"stroke:var(--ink);stroke-width:2\"" else "" });
             try escape(w, b.name);
             try w.print(", attempt {d}: {s}; started at ", .{ b.attempt, b.status });
             try duration(w, b.start);
@@ -1048,7 +1052,7 @@ const Page = struct {
             const y = top + ph - f * ph;
             try w.print("<line class=\"gridline\" x1=\"{d:.0}\" y1=\"{d:.1}\" x2=\"{d:.0}\" y2=\"{d:.1}\"/><text x=\"{d:.0}\" y=\"{d:.1}\" text-anchor=\"end\">", .{ left, y, width - right, y, left - 8, y + 4 });
             if (f == 0) {
-                try w.writeAll("0");
+                try w.writeAll(if (memory) "0 MiB" else "0 cores");
             } else if (memory) {
                 var fw: std.Io.Writer = .fixed(&buf);
                 try size(&fw, most * f);
@@ -1071,7 +1075,7 @@ const Page = struct {
             try w.print("{d:.1},{d:.1}\"/>\n", .{ left + pw, top + ph });
         }
         // The in-use line on top.
-        try w.writeAll("<polyline style=\"fill:none;stroke:var(--c1);stroke-width:2;stroke-linejoin:round\" points=\"");
+        try w.writeAll("<polyline style=\"fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round\" points=\"");
         for (samples) |s| {
             const v: f64 = if (memory) (if (s.memory_current) |m| @as(f64, @floatFromInt(m)) / 1048576.0 else continue) else s.cpu_cores orelse continue;
             try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph });
@@ -1165,7 +1169,8 @@ const Page = struct {
                 try duration(w, l.path_after_s);
                 try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-cache\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ last / span * 100, l.path_after_s / span * 100 });
             }
-            try w.writeAll("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"b-held\"></i>held for producers off the path</li><li><i class=\"b-wait\"></i>ready, waiting for resources</li><li><i class=\"g0\"></i>running, in the color of its category</li></ul>\n");
+            // The running swatch in the first rule's color, as its bar has.
+            try w.print("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"b-held\"></i>held for producers off the path</li><li><i class=\"b-wait\"></i>ready, waiting for resources</li><li><i class=\"g{d}\"></i>running, in the color of its category</li></ul>\n", .{self.slotOfStep(l.rules[l.path[0].rule].step)});
         }
         try w.writeAll("<div class=\"k\" style=\"margin-top:18px\">waiting for resources</div>");
         var most: f64 = 0;

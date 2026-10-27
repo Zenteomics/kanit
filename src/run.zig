@@ -476,8 +476,7 @@ const Engine = struct {
         tw.print(" {d}/{d}  {d} running  {d} waiting  {d} failed", .{ done, self.selected, active, waiting, failed }) catch {};
         if (blocked > 0) tw.print("  {d} blocked", .{blocked}) catch {};
         tw.writeAll("  ") catch {};
-        // Whole seconds, as the line is drawn once a second.
-        units.duration(&tw, @floor(@as(f64, @floatFromInt(now - self.start_mono)) / 1e9)) catch {};
+        units.duration(&tw, @as(f64, @floatFromInt(now - self.start_mono)) / 1e9) catch {};
         const counts = tw.buffered();
         const shown = counts[0..@min(counts.len, cols -| used)];
         w.print("{s}{s}{s}", .{ s.bold(), shown, s.reset() }) catch {};
