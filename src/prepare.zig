@@ -45,7 +45,7 @@ fn fail(a: Allocator, problem: *Problem, comptime fmt: []const u8, args: anytype
 /// a header line naming its columns, one of them `sample`. Empty lines and
 /// lines starting with `#` are skipped.
 pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error!Sheet {
-    const bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, @errorName(err) });
+    const bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, sys.errorText(err) });
     defer gpa.free(bytes);
     const sep: u8 = if (std.mem.endsWith(u8, path, ".csv")) ',' else '\t';
     var lines = std.mem.splitScalar(u8, bytes, '\n');
@@ -299,7 +299,7 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
 
 /// Compiles the template at `path` into workflow text.
 pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error![]const u8 {
-    const source = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read {s}: {s}", .{ shown, @errorName(err) });
+    const source = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read {s}: {s}", .{ shown, sys.errorText(err) });
     defer gpa.free(source);
     var info: toml.ErrorInfo = .{};
     const doc = toml.parseSlice(gpa, source, &info) catch |err| switch (err) {

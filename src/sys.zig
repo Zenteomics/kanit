@@ -50,6 +50,21 @@ pub fn errnoName() []const u8 {
     return @tagName(last_errno);
 }
 
+/// An error of these calls in words, for messages; others by name.
+pub fn errorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "no such file or directory",
+        error.PathAlreadyExists => "it already exists",
+        error.AccessDenied => "permission denied, or a read-only file system",
+        error.Busy => "busy, or a directory that is not empty",
+        error.NotDir => "a part of the path is not a directory",
+        error.IsDir => "it is a directory",
+        error.NoSpace => "no space left on the device",
+        error.FileTooBig => "the file is too large",
+        else => @errorName(err),
+    };
+}
+
 /// Copies `path` into a null-terminated buffer owned by `gpa`.
 pub fn z(gpa: Allocator, path: []const u8) ![:0]u8 {
     return gpa.dupeZ(u8, path);

@@ -636,8 +636,8 @@ touch logs
 mkdir ro && touch ro/m.txt && chmod 555 ro
 "$workz" run wf.toml "${iso[@]}" -k -q > s.json 2> err.txt
 chmod 755 ro
-check "a log file that cannot be written fails its rule, which keeps its record" '[ "$(jq -r .reason "$(last_launch)/attempts/logged/001/record.json")" = "cannot write its log or benchmark file: NotDir" ]'
-check "an earlier output that cannot be moved aside fails its rule before it starts" 'grep -q "failed moved: cannot move its earlier output ro/m.txt into previous/: AccessDenied" err.txt'
+check "a log file that cannot be written fails its rule, which keeps its record" '[ "$(jq -r .reason "$(last_launch)/attempts/logged/001/record.json")" = "cannot write its log or benchmark file: a part of the path is not a directory" ]'
+check "an earlier output that cannot be moved aside fails its rule before it starts" 'grep -q "failed moved: cannot move its earlier output ro/m.txt into previous/: permission denied, or a read-only file system" err.txt'
 check "a rule that cannot be set up does not stop the launch" '[ "$(status_of s.json failed)" = 2 ] && [ "$(status_of s.json completed)" = 1 ] && jq -e ".error == null" s.json > /dev/null'
 
 new retry
@@ -1006,6 +1006,13 @@ check "commands with nothing recorded to show exit 1" '[ $rc1 = 1 ] && [ $rc2 = 
 "$workz" init --force 2> initopt.txt
 rc=$?
 check "init rejects options instead of using them as file names" '[ $rc = 2 ] && [ ! -e ./--force ] && grep -q "unknown option" initopt.txt'
+"$workz" status -d . -t x 2> status-t.txt
+rc1=$?
+"$workz" run wf.toml --pass-env "" 2> pass-env.txt
+rc2=$?
+"$workz" run wf.toml -r -1 2> negative.txt
+rc3=$?
+check "an option the command does not take, a bad variable name and a negative count are refused" '[ $rc1 = 2 ] && grep -q "unknown option .-t. for status" status-t.txt && [ $rc2 = 2 ] && grep -q "invalid value .. (use a variable name" pass-env.txt && [ $rc3 = 2 ] && grep -q "invalid value .-1. (use 0 to 3)" negative.txt'
 
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml

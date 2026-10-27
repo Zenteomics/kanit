@@ -812,7 +812,7 @@ const Engine = struct {
     fn start(self: *Engine, i: usize) !void {
         self.prepareAndSpawn(i) catch |err| {
             if (err == error.OutOfMemory) return err;
-            self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot prepare the attempt: {s}", .{@errorName(err)}));
+            self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot prepare the attempt: {s}", .{sys.errorText(err)}));
         };
     }
 
@@ -857,7 +857,7 @@ const Engine = struct {
                 try sys.mkdir(self.gpa, prev);
                 const dest = try std.fmt.allocPrint(self.a, "{s}/{d}-{s}", .{ prev, k, std.fs.path.basename(o) });
                 sys.rename(self.gpa, o, dest) catch |err|
-                    return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], @errorName(err) }));
+                    return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], sys.errorText(err) }));
                 self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest, .bytes = id.size });
                 self.previous_bytes += id.size;
             }
@@ -935,7 +935,7 @@ const Engine = struct {
             };
         }
         t.pid = process.spawn(&spec) catch |err| {
-            return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
+            return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
         };
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
@@ -984,7 +984,7 @@ const Engine = struct {
     /// or null. A link replaces an earlier symlink, never another file.
     fn prepareWorkdir(self: *Engine, r: *const workflow.Rule, dir: []const u8) !?[]const u8 {
         sys.mkdirAll(self.gpa, dir) catch |err|
-            return try std.fmt.allocPrint(self.a, "cannot make workdir {s}: {s}", .{ r.workdir.?, @errorName(err) });
+            return try std.fmt.allocPrint(self.a, "cannot make workdir {s}: {s}", .{ r.workdir.?, sys.errorText(err) });
         for (r.links) |l| {
             const path = try std.fs.path.join(self.a, &.{ dir, l.name });
             if (try sys.lstat(self.gpa, path)) |id| {
@@ -992,7 +992,7 @@ const Engine = struct {
                 _ = try sys.check(linux.unlinkat(linux.AT.FDCWD, try self.a.dupeZ(u8, path), 0));
             }
             _ = sys.check(linux.symlinkat(try self.a.dupeZ(u8, l.target_abs), linux.AT.FDCWD, try self.a.dupeZ(u8, path))) catch |err|
-                return try std.fmt.allocPrint(self.a, "cannot make link {s}: {s}", .{ l.name, @errorName(err) });
+                return try std.fmt.allocPrint(self.a, "cannot make link {s}: {s}", .{ l.name, sys.errorText(err) });
         }
         return null;
     }
@@ -1334,7 +1334,7 @@ const Engine = struct {
     fn startHolderOrFail(self: *Engine, hi: usize) !void {
         self.startHolder(hi) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => try self.failHolder(hi, try std.fmt.allocPrint(self.a, "could not start: {s}", .{@errorName(err)}), null),
+            else => try self.failHolder(hi, try std.fmt.allocPrint(self.a, "could not start: {s}", .{sys.errorText(err)}), null),
         };
     }
 
@@ -1428,7 +1428,7 @@ const Engine = struct {
         // that cannot be written fails the attempt, not the launch.
         self.writeSideFiles(r, t, ok, wall_s, reaped, counters) catch |err| {
             ok = false;
-            reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{@errorName(err)});
+            reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{sys.errorText(err)});
         };
         // A failed attempt keeps the tails of the files the rule names for
         // its own failures; one that cannot be kept fails nothing else.
@@ -1705,7 +1705,9 @@ const Engine = struct {
                 const name = words.next() orelse "";
                 const result = try self.control(cmd, name);
                 self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
-                self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
+                if (name.len == 0) {
+                    self.alert("control", "{s}: {s}", .{ cmd, result });
+                } else self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
             }
         }
     }
@@ -1900,7 +1902,7 @@ const Engine = struct {
         const path = self.page_path orelse return;
         const t0 = sys.monoNs();
         writePage(self.gpa, path, self.launch_dir) catch |err| {
-            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, @errorName(err) });
+            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, sys.errorText(err) });
             self.page_path = null;
             return;
         };
@@ -1958,7 +1960,7 @@ const Engine = struct {
             if (v.started) continue;
             v.started = true;
             v.pid = self.spawnVersion(v) catch |err| {
-                const text = std.fmt.allocPrint(self.a, "workz: cannot start the version command: {s}\n", .{@errorName(err)}) catch continue;
+                const text = std.fmt.allocPrint(self.a, "workz: cannot start the version command: {s}\n", .{sys.errorText(err)}) catch continue;
                 sys.writeFile(self.gpa, v.file, text) catch {};
                 continue;
             };
@@ -2400,7 +2402,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             continue;
         }
         const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, @errorName(err) }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) }));
         const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
         holders[i] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
     }
@@ -2498,6 +2500,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (opts.input_manifest) |mpath| {
         const m = try checkManifest(gpa, &st, &ids, mpath);
         events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
+        if (!m.usable) return refusal.refuse(.invalid, "the input manifest cannot be used");
         if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
     }
     // Content digests valid for this launch: cutoff outputs and manifest inputs.
@@ -2510,7 +2513,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (opts.isolation) {
         tree = cgroup.setup(gpa, a) catch |err| return refusal.refuse(.invalid, switch (err) {
             error.NotDelegated => "the run's scope cannot create cgroups for attempts: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation",
-            else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{@errorName(err)}),
+            else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{sys.errorText(err)}),
         });
     }
 
@@ -2552,7 +2555,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var containers_cg: ?[]const u8 = null;
     if (podman != null) if (tree) |t| {
         containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{@errorName(err)}));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{sys.errorText(err)}));
     };
     const sigfd = try process.setupSignals();
     defer sys.close(sigfd);
@@ -2601,11 +2604,11 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     if (tree != null) {
         engine.network = Network.start(gpa, a, &engine.envp, tree.?.root) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
     }
     defer if (engine.network) |n| n.stop();
     if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch |err| guard: {
-        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{@errorName(err)});
+        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{sys.errorText(err)});
         break :guard null;
     };
     defer if (engine.guard) |gd| gd.stop();
@@ -2622,18 +2625,18 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
     control: {
         sys.writeFile(gpa, engine.control_path, "") catch |err| {
-            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, @errorName(err) });
+            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
             break :control;
         };
         const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             break :control;
         };
         const pz = try a.dupeZ(u8, engine.control_path);
         if (sys.check(linux.inotify_add_watch(@intCast(ifd), pz, linux.IN.MODIFY))) |_| {
             engine.control_watch = @intCast(ifd);
         } else |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             sys.close(@intCast(ifd));
         }
     }
@@ -2662,7 +2665,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every 5 s while the launch runs", .{monitor.shownPath(a, p)});
 
     engine.loop() catch |err| {
-        engine.fatal = @errorName(err);
+        engine.fatal = sys.errorText(err);
         engine.beginStop();
         // Wait for running tasks to end before writing the final records.
         while (engine.running() > 0) {
@@ -2675,7 +2678,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     engine.awaitVersions(10);
     engine.awaitHelpers(engine.opts.grace_s + 10);
-    engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{@errorName(err)});
+    engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{sys.errorText(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
     // their outputs would not match the inputs recorded in their key. A
@@ -2771,7 +2774,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     return outcome;
 }
 
-pub const ManifestCheck = struct { ok: bool, files: usize = 0, read: usize = 0, bytes_read: u64 = 0, seconds: f64 = 0 };
+pub const ManifestCheck = struct { ok: bool, usable: bool = true, files: usize = 0, read: usize = 0, bytes_read: u64 = 0, seconds: f64 = 0 };
 
 /// Checks an input manifest: absolute paths to "sha256:<hex>", or to
 /// {"sha256": "sha256:<hex>", "stamp": {dev, ino, size, mtime_ns, ctime_ns}}.
@@ -2782,18 +2785,18 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
     const t0 = sys.monoNs();
     var res: ManifestCheck = .{ .ok = true };
     const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
-        std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, @errorName(err) });
-        return .{ .ok = false };
+        std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, sys.errorText(err) });
+        return .{ .ok = false, .usable = false };
     };
     defer gpa.free(bytes);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch {
         std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
-        return .{ .ok = false };
+        return .{ .ok = false, .usable = false };
     };
     defer parsed.deinit();
     if (parsed.value != .object) {
         std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
-        return .{ .ok = false };
+        return .{ .ok = false, .usable = false };
     }
     const sa = st.allocator();
     var hashed_any = false;

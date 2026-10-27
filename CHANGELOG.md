@@ -25,6 +25,9 @@ Four changes need action:
   - A launch whose rules name `version` writes `versions.json`.
   - Workflow errors come as one line per problem, under their count.
   - `workz graph` prints text on a terminal, and its DOT names nodes by kind, such as `rule:NAME`.
+  - `watch`, `status`, `logs`, `report`, `control` and `clean` refuse `-t`, which they ignored.
+  - An input manifest that cannot be read refuses the launch with exit status 2, not 1.
+  - `plan` gives a changed output as `output changed: PATH (run refuses without --rerun-rule or --rerun)`.
 
 ### Added
 
@@ -94,6 +97,12 @@ Four changes need action:
 - **A rule that reads a directory** waits for every rule writing inside it; it could start first and find the directory empty.
 - **A shared input that fails to start** fails the rule being admitted without miscounting its other shared inputs, which could crash the engine.
 - **A report on a launch whose workflow copy is invalid** names each problem's line once.
+- **Command-line mistakes** get a clear answer.
+  - `--pass-env` refuses a name that is not a variable name; an empty one was recorded and shown as a change.
+  - A negative count, such as `-r -1`, is named as an invalid value, not a missing one.
+  - `report --compare .`, or another relative working directory, compares with its newest launch.
+  - `explain` and `--rerun-rule` suggest the closest rule name.
+- **File errors** read as words, such as `no such file or directory`; `init` and `prepare` report a file they cannot write instead of crashing.
 
 ## [0.4.0] - 2026-10-27
 

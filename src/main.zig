@@ -417,6 +417,8 @@ fn didYouMean(allowed: []const []const u8, word: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_d: usize = @max(word.len / 3, 1) + 1;
     for (allowed) |cand| {
+        // One-letter flags are too short for a typo to point anywhere.
+        if (word.len <= 2 and cand.len <= 2) continue;
         const d = workflow.editDistance(cand, word);
         if (d < best_d) {
             best_d = d;
@@ -493,8 +495,9 @@ fn cmdHelp(c: Ctx, args: []const []const u8) !Exit {
 }
 
 fn unknownCommand(name: []const u8) Exit {
-    var names: [commands.len][]const u8 = undefined;
+    var names: [commands.len + 1][]const u8 = undefined;
     for (commands, 0..) |c, i| names[i] = c.name;
+    names[commands.len] = "dry-run";
     if (didYouMean(&names, name)) |hint| {
         std.debug.print("workz: unknown command '{s}'; did you mean '{s}'?\nRun 'workz help' for the commands.\n", .{ name, hint });
     } else std.debug.print("workz: unknown command '{s}'\nRun 'workz help' for the commands.\n", .{name});
@@ -575,14 +578,14 @@ fn parseArgs(ctx: Ctx, args: []const [:0]const u8, c: *Common, extra: anytype) !
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         // The next word is this option's value unless it is an option
-        // itself: `--launch --format html` lacks the launch. A lone `-` is
-        // a value.
+        // itself: `--launch --format html` lacks the launch. A lone `-` and a
+        // negative number are values.
         const next: ?[]const u8 = if (i + 1 < args.len) args[i + 1] else null;
-        const value: ?[]const u8 = if (next) |n| (if (n.len > 1 and n[0] == '-') null else n) else null;
+        const value: ?[]const u8 = if (next) |n| (if (n.len > 1 and n[0] == '-' and !std.ascii.isDigit(n[1])) null else n) else null;
         if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--workdir")) {
             c.workdir = value orelse return fail("{s} needs a value", .{arg});
             i += 1;
-        } else if (std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--target")) {
+        } else if ((std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--target")) and takesTargets(ctx)) {
             try c.targets.append(ctx.a, value orelse return fail("{s} needs a value", .{arg}));
             i += 1;
         } else if (arg.len > 1 and arg[0] == '-') {
@@ -595,6 +598,12 @@ fn parseArgs(ctx: Ctx, args: []const [:0]const u8, c: *Common, extra: anytype) !
         } else try c.positional.append(ctx.a, arg);
     }
     return null;
+}
+
+/// Whether the command selects rules with `--target`.
+fn takesTargets(ctx: Ctx) bool {
+    const cmd = command(ctx.argv[1]) orelse return true;
+    return cmd.common == .all;
 }
 
 /// An option the command does not take, with the one probably meant.
@@ -612,6 +621,13 @@ fn unknownOption(ctx: Ctx, arg: []const u8) !Exit {
 fn extraArgs(ctx: Ctx, common: *const Common) ?Exit {
     if (common.positional.items.len == 0) return null;
     return fail("unexpected argument '{s}'; run 'workz help {s}' for the usage", .{ common.positional.items[0], ctx.argv[1] });
+}
+
+/// A name `--pass-env` can pass: a letter or `_`, then letters, digits and `_`.
+fn envName(name: []const u8) bool {
+    if (name.len == 0 or std.ascii.isDigit(name[0])) return false;
+    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
+    return true;
 }
 
 /// An option given without the value it takes.
@@ -875,7 +891,9 @@ const PlanExtra = struct {
             return 2;
         };
         if (std.mem.eql(u8, arg, "--pass-env")) {
-            try self.pass.append(self.a, value orelse return missingValue(arg));
+            const v = value orelse return missingValue(arg);
+            if (!envName(v)) return invalidValue(arg, v, "use a variable name such as HOME");
+            try self.pass.append(self.a, v);
             return 2;
         }
         return 0;
@@ -899,7 +917,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var max_threads: ?u32 = null;
     var max_memory: ?u64 = null;
     if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory })) |e| return e;
-    if (!budget and (max_threads != null or max_memory != null)) return fail("--max-threads and --max-memory set the budget --budget checks; give --budget too", .{});
+    if (!budget and (max_threads != null or max_memory != null))
+        return fail("{s} sets the budget --budget checks; give --budget too", .{if (max_threads != null) "--max-threads" else "--max-memory"});
     if (extraArgs(c, &common)) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
@@ -911,7 +930,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var ctx = try planContext(c, &l, &st, &ids, pass.items);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
-    if (!try knownRules(&l.wf, reruns.items)) return .usage;
+    if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     if (summary) try plan.printSummary(&w.interface, &ctx, l.mask) else try plan.printPlan(&w.interface, &ctx, l.mask);
@@ -937,7 +956,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
         try common.positional.append(c.a, name);
         common.workflow = null;
     };
-    if (common.positional.items.len != 1) return fail("explain takes one rule name", .{});
+    if (common.positional.items.len == 0) return fail("explain needs a rule name", .{});
+    if (common.positional.items.len > 1) return fail("explain takes one rule name", .{});
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     if (applyThreads(&l.wf, threads.items)) |e| return e;
@@ -948,12 +968,16 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var ctx = try planContext(c, &l, &st, &ids, pass.items);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
-    if (!try knownRules(&l.wf, reruns.items)) return .usage;
+    if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);
     try w.interface.flush();
-    if (!found) return fail("unknown rule '{s}'", .{common.positional.items[0]});
+    if (!found) {
+        const name = common.positional.items[0];
+        if (try closestRule(c.a, &l.wf, name)) |hint| return fail("unknown rule '{s}'; did you mean '{s}'?", .{ name, hint });
+        return fail("unknown rule '{s}'", .{name});
+    }
     return .ok;
 }
 
@@ -1050,14 +1074,14 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
         const path = file orelse "pipeline.toml";
         const sheet = if (std.fs.path.dirname(path)) |d| try std.fs.path.join(c.a, &.{ d, "samples.tsv" }) else "samples.tsv";
         for ([_][]const u8{ path, sheet }) |p| if (sys.exists(c.gpa, p)) return fail("{s} exists; init does not overwrite", .{p});
-        try sys.writeFile(c.gpa, path, starter_pipeline);
-        try sys.writeFile(c.gpa, sheet, "sample\treads\nS1\tdata/S1.txt\nS2\tdata/S2.txt\n");
+        sys.writeFile(c.gpa, path, starter_pipeline) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
+        sys.writeFile(c.gpa, sheet, "sample\treads\nS1\tdata/S1.txt\nS2\tdata/S2.txt\n") catch |err| return failed("cannot write {s}: {s}", .{ sheet, sys.errorText(err) });
         try out(c.io, "wrote {s} and {s}; its steps read data/S1.txt and data/S2.txt, which it does not create. Edit them, then: workz prepare\n", .{ path, sheet });
         return .ok;
     }
     const path = file orelse default_workflow;
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
-    try sys.writeFile(c.gpa, path, starter_workflow);
+    sys.writeFile(c.gpa, path, starter_workflow) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
     try out(c.io, "wrote {s}; its example rules read data/S1.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
     return .ok;
 }
@@ -1100,7 +1124,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{d}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", std.os.linux.getpid() })
     else
         try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
-    try sys.writeFile(c.gpa, tmp, text);
+    sys.writeFile(c.gpa, tmp, text) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
     var keep_tmp = false;
     defer if (!keep_tmp) sys.unlink(c.gpa, tmp) catch {};
     const root = std.fs.path.dirname(out_path) orelse ".";
@@ -1279,7 +1303,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
         error.OutOfMemory => return err,
-        else => return failed("cannot clean {s}: {s}", .{ root, @errorName(err) }),
+        else => return failed("cannot clean {s}: {s}", .{ root, sys.errorText(err) }),
     };
     const verb = if (opts.dry_run) "would remove" else "removed";
     try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
@@ -1419,9 +1443,11 @@ const ReportExtra = struct {
 /// A launch named by ID (in `rec`), by its directory, or by a working
 /// directory, meaning its newest launch.
 fn resolveLaunch(c: Ctx, rec: []const u8, name: []const u8) !?[]const u8 {
+    // A launch ID names a launch with events; any other word is a path, so
+    // `.` and a relative working directory work too.
     if (std.mem.indexOfScalar(u8, name, '/') == null) {
         const dir = try std.fs.path.join(c.a, &.{ rec, "launches", name });
-        return if (sys.exists(c.gpa, dir)) dir else null;
+        if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "events.jsonl" }))) return dir;
     }
     const path = (try sys.realpath(c.a, name)) orelse return null;
     if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ path, "events.jsonl" }))) return path;
@@ -1458,7 +1484,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     if (methods) {
         if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; workz run starts one", .{rec});
         const m = workz.methods.collect(c.gpa, c.a, root) catch |err| switch (err) {
-            error.CorruptState, error.UnsupportedState => return failed("{s}/state.json cannot be read ({s})", .{ rec, @errorName(err) }),
+            error.CorruptState, error.UnsupportedState => return failed("{s}/state.json cannot be read ({s})", .{ rec, sys.errorText(err) }),
             else => return err,
         };
         if (m.rules == 0) return failed("no rule has completed in {s}; there are no results to describe", .{root});
@@ -1466,7 +1492,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         defer text.deinit();
         if (format != null and format.? == .json) try workz.methods.writeJson(&text.writer, m) else try workz.methods.writeText(&text.writer, m);
         if (output) |path| {
-            sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, @errorName(err) });
+            sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
         } else try sys.writeAll(1, text.written());
         return .ok;
     }
@@ -1495,7 +1521,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         },
     }
     if (output) |path| {
-        sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, @errorName(err) });
+        sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
         return .ok;
     }
     try sys.writeAll(1, text.written());
@@ -1566,6 +1592,7 @@ const RunExtra = struct {
             if (!std.mem.endsWith(u8, v, ".slice") or v.len <= ".slice".len or std.mem.indexOfScalar(u8, v, '/') != null) return invalidValue(arg, v, "use a unit name ending in .slice, without /");
             o.slice = v;
         } else if (eq(u8, arg, "--pass-env")) {
+            if (!envName(v)) return invalidValue(arg, v, "use a variable name such as HOME");
             try self.pass.append(self.a, v);
         } else if (eq(u8, arg, "--threads")) {
             try self.threads.append(self.a, v);
@@ -1592,7 +1619,7 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     if (applyThreads(&l.wf, threads.items)) |e| return e;
-    if (!try knownRules(&l.wf, opts.rerun_rules)) return .usage;
+    if (!try knownRules(c.a, &l.wf, opts.rerun_rules)) return .usage;
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
         .ok => .ok,
@@ -1625,10 +1652,19 @@ fn applyThreads(wf: *workflow.Workflow, overrides: []const []const u8) ?Exit {
     return null;
 }
 
+/// The rule of the workflow whose name is closest to `name`, if any is close.
+fn closestRule(a: std.mem.Allocator, wf: *const workflow.Workflow, name: []const u8) !?[]const u8 {
+    var names: std.ArrayList([]const u8) = .empty;
+    for (wf.rules) |r| try names.append(a, r.name);
+    return workflow.closest(names.items, name);
+}
+
 /// Reports a name given to --rerun-rule that is not a rule of the workflow.
-fn knownRules(wf: *const workflow.Workflow, names: []const []const u8) !bool {
+fn knownRules(a: std.mem.Allocator, wf: *const workflow.Workflow, names: []const []const u8) !bool {
     for (names) |n| if (wf.ruleIndex(n) == null) {
-        std.debug.print("workz: --rerun-rule {s}: no such rule\n", .{n});
+        if (try closestRule(a, wf, n)) |hint| {
+            std.debug.print("workz: --rerun-rule {s}: no such rule; did you mean '{s}'?\n", .{ n, hint });
+        } else std.debug.print("workz: --rerun-rule {s}: no such rule\n", .{n});
         return false;
     };
     return true;

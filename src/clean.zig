@@ -127,7 +127,7 @@ fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, resu
                     error.FileNotFound => continue,
                     error.OutOfMemory => return err,
                     else => {
-                        try w.print("cannot remove {s}/{s}/previous: {s}\n", .{ rule_dir, n, @errorName(err) });
+                        try w.print("cannot remove {s}/{s}/previous: {s}\n", .{ rule_dir, n, sys.errorText(err) });
                         result.failed += 1;
                         continue;
                     },

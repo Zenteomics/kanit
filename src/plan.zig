@@ -118,7 +118,7 @@ pub const Context = struct {
                 break :env try std.fmt.allocPrint(self.a, "environment changed: {s}", .{changed.written()});
             } else try std.fmt.allocPrint(self.a, "{s} changed", .{what}),
             .output_missing => |p| try std.fmt.allocPrint(self.a, "output missing: {s}", .{p}),
-            .output_changed => |p| try std.fmt.allocPrint(self.a, "output changed: {s} (run refuses without --rerun)", .{p}),
+            .output_changed => |p| try std.fmt.allocPrint(self.a, "output changed: {s} (run refuses without --rerun-rule or --rerun)", .{p}),
         };
         return .{ .run = true, .reason = reason, .key = k };
     }
@@ -308,7 +308,7 @@ pub const Budget = struct {
 pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask: []const bool, b: Budget) !usize {
     const units = @import("units.zig");
     const run = @import("run.zig");
-    try w.print("\nbudget: {d} threads, ", .{b.threads});
+    try w.print("\nbudget: {d} {s}, ", .{ b.threads, if (b.threads == 1) "thread" else "threads" });
     try units.size(w, @floatFromInt(b.memory_mib));
     try w.writeAll(if (b.defaults) " (the defaults; give --max-threads and --max-memory as for run)\n" else "\n");
 
