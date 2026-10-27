@@ -4,7 +4,7 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
-## [Unreleased]
+## [0.5.0] - 2026-10-27
 
 0.5.0 is about writing pipelines and seeing them. `workz prepare` writes the explicit workflow from a template that describes each step once over a sample sheet, and `workz graph` shows it in layers: rules, files, and each shared input held once with the rules that write and use it. Results become citable, a failed tool's own log is kept, a moved project keeps its results, and the memory budget counts container clients and shared inputs honestly.
 
@@ -104,7 +104,7 @@ Four changes need action:
   - `explain` and `--rerun-rule` suggest the closest rule name.
 - **File errors** read as words, such as `no such file or directory`; `init` and `prepare` report a file they cannot write instead of crashing.
 
-## [0.4.0] - 2026-10-27
+## [0.4.0] - 2026-10-26
 
 Rules can now say what they are, by step, sample, category and tool, and the reports and a rebuilt HTML page group by those labels; every launch keeps that page up to date while it runs. The terminal output is rebuilt too: `run` keeps a status line and ends with a summary, `watch` draws gauges, and every command explains itself with `--help`. Reports say what limited a launch from lower bounds its records support, and a launch that failed or was refused says what went wrong and the command that resolves it. A rule that cannot be set up, or a killed engine, no longer takes the rest of the launch with it, and reuse survives a reboot on btrfs.
 

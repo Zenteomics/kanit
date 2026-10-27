@@ -43,7 +43,7 @@ The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, cont
 
 ## Status
 
-The latest release is workz 0.4.0; the main branch adds the changes listed under Unreleased in the changelog. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog says at the top of each version what such a change needs from you.
+The latest release is workz 0.5.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the changelog says at the top of each version what such a change needs from you.
 
 ## License
 
