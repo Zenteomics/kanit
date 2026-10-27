@@ -76,6 +76,13 @@ check "a report of a refused launch says why it has no attempts and which launch
 check "explain reports the changed input" 'grep -q "input changed: .*a.txt" explain.txt'
 "$workz" run wf.toml "${iso[@]}" -q --rerun -t a > s6.json
 check "--rerun keeps the earlier bytes in previous/" 'grep -rq tampered "$(last_launch)/attempts/a/001/previous/"'
+check "the summary counts the bytes moved into previous/" 'jq -e ".previous_bytes == $(cat "$(last_launch)"/attempts/a/001/previous/* | wc -c)" s6.json > /dev/null'
+"$workz" clean wf.toml --previous --dry-run > prev-dry.txt
+kept_prev=$(find .workz -type d -name previous | wc -l)
+# An output directory moved aside whole may keep read-only directories.
+mkdir -p "$(last_launch)/attempts/a/001/previous/ro/sub" && touch "$(last_launch)/attempts/a/001/previous/ro/sub/f" && chmod 555 "$(last_launch)/attempts/a/001/previous/ro/sub" "$(last_launch)/attempts/a/001/previous/ro"
+"$workz" clean wf.toml --previous > prev.txt
+check "clean --previous lists, then removes, every previous/ and nothing else" 'grep -q "^would remove previous/ of 1 attempt(s) in launch " prev-dry.txt && [ "$kept_prev" -ge 1 ] && [ -z "$(find .workz -type d -name previous)" ] && grep -q "previous/ of $kept_prev attempt(s)" prev.txt && [ -f "$(last_launch)/attempts/a/001/record.json" ] && [ -f a.txt ]'
 "$workz" verify wf.toml > verify.txt
 check "verify accepts recorded outputs" 'grep -q "all match" verify.txt'
 "$workz" verify wf.toml --content > verify2.txt

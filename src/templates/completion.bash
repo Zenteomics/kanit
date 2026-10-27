@@ -51,7 +51,7 @@ _workz() {
         status) opts="$opts --history --json --launch --no-color" ;;
         report) opts="$opts --launch --format --json --bottlenecks --suggest --compare -o --output" ;;
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
-        clean) opts="$opts --keep --dry-run" ;;
+        clean) opts="$opts --keep --previous --dry-run" ;;
         control) ;;
         init) opts="-h --help" ;;
         completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;

@@ -125,7 +125,7 @@ Both work with `plan` and `explain` too, so you can see the effect first. Combin
 
 ## Previous outputs
 
-Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. A rule therefore never sees its own old outputs, and the bytes a rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed ([Records](Records.md#cleaning-up)).
+Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. A rule therefore never sees its own old outputs, and the bytes a rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
 
 ## Verify outputs
 

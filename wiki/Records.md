@@ -64,7 +64,8 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
   "engine_cost": { "cpu_s": 0.106239, "max_rss_mib": 6.30078125 },
   "launch_dir": ".../.workz/launches/20261027T025023.762-56876086",
   "failures": [],
-  "changed_outputs": []
+  "changed_outputs": [],
+  "previous_bytes": 0
 }
 ```
 
@@ -75,6 +76,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal; then `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
 - `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started, and `diagnostics`, the paths of the copies its last attempt kept ([Writing workflows](Writing-Workflows.md#diagnostics)).
 - `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
+- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/`, which stay until `workz clean --previous` removes them.
 
 ## Attempt files
 
@@ -135,7 +137,7 @@ Rule events:
 - `task_failed`: `rule`, `attempt` (null when the rule failed before an attempt started) and `reason`.
 - `task_blocked`, `task_reused`, `task_cancelling`: `rule`.
 - `task_timeout`: `rule`, `attempt`.
-- `output_preserved`: `rule`, `path`, `moved_to`.
+- `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
 - `output_changed`, `output_identity_refreshed`: `rule`, `path`.
 
 Shared input events:
@@ -166,6 +168,7 @@ would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) t
 
 - Without options, `workz clean` removes only the containers earlier launches left behind.
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to.
+- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--dry-run` lists what would go.
 - It takes the run lock, so it never removes anything while a launch runs.

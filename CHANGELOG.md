@@ -9,6 +9,7 @@ All notable changes to workz will be documented in this file. The format follows
 ### Added
 
 - **Failures you can read.** A rule may name `diagnostics`, files such as STAR's `Log.out` where a tool writes why it failed. A failed attempt keeps the last 64 KiB of each in its `diagnostics/` directory; the terminal, `status`, `workz logs` and the HTML page show them, and the failure reason quotes the first one when standard error is empty. `record.json` and the summary's `failures` list them.
+- **Disk you can reclaim.** `workz clean --previous` removes the earlier outputs that reruns moved into attempts' `previous/` directories, often the largest files in `.workz/`, and keeps the rest of each launch. `run` and `status` say how much a launch kept, the summary counts it in `previous_bytes`, and the `output_preserved` event adds `bytes`.
 
 ### Removed
 

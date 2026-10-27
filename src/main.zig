@@ -286,19 +286,25 @@ const commands = [_]Command{
     .{
         .name = "clean",
         .args = "[WORKFLOW] [options]",
-        .summary = "remove leftover containers and old launches",
+        .summary = "remove leftover containers, old launches and replaced outputs",
         .group = .maintain,
         .common = .workdir,
         .about =
         \\Removes the containers that earlier launches of the working directory left
         \\behind. With --keep N it also removes all but the newest N launch
         \\directories, keeping every launch that holds a rule's recorded attempt.
+        \\With --previous it removes the earlier outputs that reruns moved into
+        \\previous/, the only copy of those bytes.
         ,
         .options = &.{
             .{ .flag = "--keep N", .desc = "keep the newest N launches and the recorded ones" },
+            .{ .flag = "--previous", .desc = "remove the replaced outputs kept in previous/" },
             .{ .flag = "--dry-run", .desc = "show what would be removed" },
         },
-        .examples = "workz clean --keep 5 --dry-run",
+        .examples =
+        \\workz clean --keep 5 --dry-run
+        \\workz clean --previous --dry-run
+        ,
     },
     .{
         .name = "completion",
@@ -924,6 +930,10 @@ const CleanExtra = struct {
             self.opts.dry_run = true;
             return 1;
         }
+        if (std.mem.eql(u8, arg, "--previous")) {
+            self.opts.previous = true;
+            return 1;
+        }
         if (std.mem.eql(u8, arg, "--keep")) {
             const v = value orelse return missingValue(arg);
             self.opts.keep = std.fmt.parseInt(usize, v, 10) catch return invalidValue(arg, v, "use a whole number");
@@ -943,14 +953,17 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
-        else => return err,
+        error.OutOfMemory => return err,
+        else => return failed("cannot clean {s}: {s}", .{ root, @errorName(err) }),
     };
     const verb = if (opts.dry_run) "would remove" else "removed";
     try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
     if (r.kept_for_records > 0) try w.interface.print("; kept {d} older launch(es) that hold recorded attempts", .{r.kept_for_records});
+    if (opts.previous) try w.interface.print("; previous/ of {d} attempt(s), {d:.1} MiB", .{ r.previous, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0 });
+    if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");
     try w.interface.flush();
-    return .ok;
+    return if (r.failed > 0) .failed else .ok;
 }
 
 /// Options of `watch` (once, interval) or of `status` (history, json); both

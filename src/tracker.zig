@@ -150,6 +150,8 @@ pub const Tracker = struct {
     /// The engine that ran the launch, with its digest, from `launch.json`.
     engine: []const u8 = "",
     engine_key: ?i64 = null,
+    /// Bytes of earlier outputs moved into `previous/` so far.
+    previous_bytes: u64 = 0,
     /// The open group wait of each rule, by rule index.
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
@@ -252,6 +254,8 @@ pub const Tracker = struct {
             self.finished_ns = at;
             self.final_status = try a.dupe(u8, str(v, "status") orelse "");
             self.final_error = try a.dupe(u8, str(v, "error") orelse "");
+        } else if (eql(u8, ev, "output_preserved")) {
+            self.previous_bytes += whole(u64, v, "bytes") orelse 0;
         } else if (eql(u8, ev, "sample")) {
             self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
             self.cpu_cores = float(v, "cpu_cores_used");

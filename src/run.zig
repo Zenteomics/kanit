@@ -334,6 +334,8 @@ const Engine = struct {
     helpers: std.ArrayList(linux.pid_t) = .empty,
     finished: usize = 0,
     selected: usize = 0,
+    /// Bytes of earlier outputs moved into attempts' `previous/`.
+    previous_bytes: u64 = 0,
     console: Console = .{},
     /// Monotonic time the launch opened, for the elapsed time on the console.
     start_mono: i128 = 0,
@@ -809,13 +811,14 @@ const Engine = struct {
 
         // Keep earlier bytes of every output: move them into previous/.
         for (r.output_abs, 0..) |o, k| {
-            if (try sys.lstat(self.gpa, o)) |_| {
+            if (try sys.lstat(self.gpa, o)) |id| {
                 const prev = try std.fmt.allocPrint(self.a, "{s}/previous", .{t.dir});
                 try sys.mkdir(self.gpa, prev);
                 const dest = try std.fmt.allocPrint(self.a, "{s}/{d}-{s}", .{ prev, k, std.fs.path.basename(o) });
                 sys.rename(self.gpa, o, dest) catch |err|
                     return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], @errorName(err) }));
-                self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest });
+                self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest, .bytes = id.size });
+                self.previous_bytes += id.size;
             }
             self.ids.forget(o);
             if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(self.gpa, d);
@@ -2040,6 +2043,9 @@ const Summary = struct {
     /// For a launch refused because recorded outputs changed: each such
     /// output and the rule that wrote it.
     changed_outputs: []const ChangedOutput = &.{},
+    /// Bytes of earlier outputs the launch moved into `previous/`, kept
+    /// until `workz clean --previous` removes them.
+    previous_bytes: u64 = 0,
 };
 
 const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8, diagnostics: []const []const u8 };
@@ -2513,6 +2519,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .elapsed_s = elapsed,
         .finished = try records.timeText(a, sys.realNs()),
         .@"error" = engine.fatal,
+        .previous_bytes = engine.previous_bytes,
         .engine_cost = engineCost(),
         .launch_dir = launch.dir,
         .failures = failures.items,
