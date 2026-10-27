@@ -436,6 +436,7 @@ check "records name the shared input each attempt held and the attempts each hol
 "$workz" graph wf.toml --users ix --format text > users.txt
 "$workz" graph wf.toml --layer all --format json > graph.json
 check "graph shows a shared input with what writes it and what uses it" 'grep -q "^shared ix  service, 64 MiB held once, idx$" users.txt && grep -q "^  loaded from build$" users.txt && grep -q "^  used by use$" users.txt && [ "$(jq -c "[.elements.edges[].data.kind] | unique" graph.json)" = "[\"consumes\",\"joins\",\"loads\",\"produces\",\"within\"]" ]'
+check "the launch page draws each shared input under the pipeline, with its memory and users" 'grep -q "id=\"layer-shared\" checked" "$(last_launch)/report.html" && grep -q "service &middot; 64 MiB once &middot; 1 user" "$(last_launch)/report.html" && grep -q "class=\"wire wire-loads\"" "$(last_launch)/report.html"'
 
 new service-retry
 { header service-retry

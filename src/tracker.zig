@@ -104,6 +104,8 @@ pub const Sample = struct {
     ns: i128,
     threads_reserved: f64,
     memory_reserved_mib: f64,
+    /// The part of it shared inputs hold, once.
+    shared_reserved_mib: f64 = 0,
     /// The run cgroup's memory in use and CPU cores used, when isolated.
     memory_current: ?u64,
     cpu_cores: ?f64,
@@ -267,6 +269,7 @@ pub const Tracker = struct {
                 .ns = at,
                 .threads_reserved = float(v, "threads_reserved") orelse 0,
                 .memory_reserved_mib = float(v, "memory_reserved_mib") orelse 0,
+                .shared_reserved_mib = float(v, "shared_reserved_mib") orelse 0,
                 .memory_current = self.memory_current,
                 .cpu_cores = self.cpu_cores,
             });

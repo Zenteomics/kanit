@@ -11,6 +11,7 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 const model = @import("model.zig");
+const workflow = @import("workflow.zig");
 const report = @import("report.zig");
 const units = @import("units.zig");
 const Allocator = std.mem.Allocator;
@@ -425,19 +426,40 @@ const Page = struct {
         const box_h: f64 = 66;
         const vgap: f64 = 18;
         const margin: f64 = 6;
-        const width = margin * 2 + n_cols * box_w + (n_cols - 1) * gap;
-        const height = margin * 2 + @as(f64, @floatFromInt(most_rows)) * (box_h + vgap) - vgap;
+        // Shared inputs sit in a row under the pipeline; a pad on the left
+        // gives wires into the first column a gap to run in.
+        const boxes = try self.sharedBoxes();
+        const lpad: f64 = if (boxes.len > 0) 22 else 0;
+        var width = lpad + margin * 2 + n_cols * box_w + (n_cols - 1) * gap;
+        const bottom = margin + @as(f64, @floatFromInt(most_rows)) * (box_h + vgap) - vgap;
+        var height = bottom + margin;
+        const rw: f64 = @min(box_w, 220);
+        const rh: f64 = 44;
+        const res_top = bottom + 46 + @as(f64, @floatFromInt(boxes.len)) * 5;
         // Rows line up across columns, so the gaps between them form
         // channels that wires can follow past other boxes.
         const xs = try self.a.alloc(f64, l.steps.len);
         const ys = try self.a.alloc(f64, l.steps.len);
         const cs = try self.a.alloc(usize, l.steps.len);
         for (cols.items, 0..) |col, c| for (col.items, 0..) |si, k| {
-            xs[si] = margin + @as(f64, @floatFromInt(c)) * (box_w + gap);
+            xs[si] = lpad + margin + @as(f64, @floatFromInt(c)) * (box_w + gap);
             ys[si] = margin + @as(f64, @floatFromInt(k)) * (box_h + vgap);
             cs[si] = c;
         };
+        // Each shared box under its first user, left to right, apart.
+        if (boxes.len > 0) {
+            var next_x: f64 = margin;
+            for (boxes) |*b| {
+                var want = xs[b.users[0]];
+                for (b.users) |si| want = @min(want, xs[si]);
+                b.x = @max(want, next_x);
+                next_x = b.x + rw + 16;
+                width = @max(width, b.x + rw + margin);
+            }
+            height = res_top + rh + margin;
+        }
 
+        if (boxes.len > 0) try w.writeAll("<p class=\"layers\"><input type=\"checkbox\" id=\"layer-shared\" checked><label for=\"layer-shared\">shared inputs: each held once, the steps using it, the step writing what a service loads</label></p>\n");
         try w.writeAll("<div class=\"wide\">");
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" style=\"min-width:{d:.0}px\" role=\"img\" aria-label=\"The pipeline: {d} steps\">\n", .{ width, height, @min(width, 900), l.steps.len });
         try w.writeAll("<defs><pattern id=\"hatch\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><line class=\"hatch\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"4\"/></pattern>");
@@ -461,15 +483,103 @@ const Page = struct {
         };
         try w.writeAll("\n");
         for (l.steps, 0..) |s, si| try self.stepBox(s, si, xs[si], ys[si], box_w, box_h);
+        if (boxes.len > 0) try self.sharedLayer(boxes, xs, ys, box_w, box_h, gap, bottom, res_top, rw, rh);
         try w.writeAll("</svg></div>\n");
         try w.writeAll("<ul class=\"legend\"><li><i class=\"st-completed\"></i>done in this launch</li><li><i class=\"st-reused\"></i>reused from an earlier launch</li>");
         try w.writeAll("<li><i class=\"st-running\"></i>running</li><li><i class=\"st-waiting\"></i>ready, waiting for resources</li><li><i class=\"st-pending\"></i>not ready, or not run</li>");
         try w.writeAll("<li><i class=\"st-failed\"></i>failed</li><li><i class=\"st-blocked\"></i>blocked by a failure</li><li><i class=\"st-cancelled\"></i>cancelled</li>");
+        if (boxes.len > 0) try w.writeAll("<li class=\"res\"><i class=\"key-shared\"></i>uses a shared input</li><li class=\"res\"><i class=\"key-loads\"></i>writes what a service loads</li>");
         try w.print("<li>left edge: the {s}, as in every figure</li></ul>\n", .{self.groupLabel()});
         if (l.reused_unrecorded > 0) try w.print("<p class=\"lead\" style=\"margin-top:10px\">{d} reused {s} no run left in the records: the launch that made {s} outputs was cleaned up.</p>\n", .{ l.reused_unrecorded, if (l.reused_unrecorded == 1) "rule has" else "rules have", if (l.reused_unrecorded == 1) "its" else "their" });
         try self.endFigure();
     }
 
+    /// A shared input under FIG. 1: the steps that use it and the steps
+    /// writing what a service loads, as indices into the launch's steps.
+    const SharedBox = struct {
+        name: []const u8,
+        service: bool,
+        mib: ?u64,
+        users: []const usize,
+        loaders: []const usize,
+        x: f64 = 0,
+    };
+
+    fn sharedBoxes(self: Page) ![]SharedBox {
+        const l = self.l;
+        const wf = l.wf orelse return &.{};
+        var out: std.ArrayList(SharedBox) = .empty;
+        for (wf.shared) |s| {
+            var users: std.ArrayList(usize) = .empty;
+            var loaders: std.ArrayList(usize) = .empty;
+            for (wf.rules, 0..) |r, i| {
+                if (i >= l.rules.len or !l.rules[i].selected) continue;
+                const si = l.rules[i].step;
+                for (r.shared) |n| if (eql(u8, n, s.name) and std.mem.indexOfScalar(usize, users.items, si) == null) try users.append(self.a, si);
+                if (s.isService()) if (s.path_abs) |sp| for (r.output_abs) |o| {
+                    if (workflow.within(sp, o) and !eql(u8, sp, o) and std.mem.indexOfScalar(usize, loaders.items, si) == null) try loaders.append(self.a, si);
+                };
+            }
+            if (users.items.len == 0) continue;
+            try out.append(self.a, .{ .name = s.name, .service = s.isService(), .mib = s.memory_mib, .users = users.items, .loaders = loaders.items });
+        }
+        return out.items;
+    }
+
+    /// The resource layer of FIG. 1: each shared input as a box below the
+    /// pipeline, a dashed wire into each step that maps or joins it, and a
+    /// dotted wire from each step writing what a service loads. Wires run
+    /// along the channel under the pipeline and up the gap left of a
+    /// column, past no box.
+    fn sharedLayer(self: Page, boxes: []const SharedBox, xs: []const f64, ys: []const f64, box_w: f64, box_h: f64, gap: f64, bottom: f64, top: f64, rw: f64, rh: f64) !void {
+        const w = self.w;
+        const l = self.l;
+        try w.writeAll("<g class=\"res\">");
+        for (boxes, 0..) |b, ri| {
+            const off: f64 = @floatFromInt(ri);
+            for (b.users, 0..) |si, k| {
+                const kf: f64 = @floatFromInt(k);
+                const n: f64 = @floatFromInt(b.users.len);
+                const sx = b.x + rw / 2 + (kf - (n - 1) / 2) * @min(8, (rw - 24) / @max(n, 1));
+                const chan = bottom + 10 + off * 5;
+                // In the right part of the gap left of the column, apart from
+                // the step wires in its middle and the loads in its left part.
+                const gx = xs[si] - gap / 2 + 7 + off * 3;
+                try w.print("<path class=\"wire wire-shared\" marker-end=\"url(#arrow)\" d=\"M{d:.1},{d:.1} V{d:.1} H{d:.1} V{d:.1} H{d:.1}\"/>", .{ sx, top, chan, gx, ys[si] + box_h * 0.72, xs[si] - 1 });
+            }
+            for (b.loaders) |pi| {
+                const chan = bottom + 26 + off * 5;
+                const gx = xs[pi] + box_w + gap / 2 - 9 - off * 3;
+                try w.print("<path class=\"wire wire-loads\" marker-end=\"url(#arrow)\" d=\"M{d:.1},{d:.1} H{d:.1} V{d:.1} H{d:.1} V{d:.1}\"/>", .{ xs[pi] + box_w, ys[pi] + box_h * 0.88, gx, chan, b.x + rw - 14, top - 1 });
+            }
+        }
+        for (boxes) |b| {
+            var users: usize = 0;
+            var peak: ?u64 = null;
+            for (l.shared()) |v| if (eql(u8, v.name, b.name)) {
+                users = v.users.items.len;
+                peak = v.memory_peak;
+            };
+            try w.writeAll("<g><title>");
+            try escape(w, b.name);
+            try w.print(": a {s}, held once; used by {d} {s} of this launch", .{ if (b.service) "service" else "mapped file input", users, if (users == 1) "rule" else "rules" });
+            try w.writeAll("</title>");
+            try w.print("<rect class=\"box res-box\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\" rx=\"6\"/>", .{ b.x, top, rw, rh });
+            try w.print("<text class=\"t-name\" x=\"{d:.1}\" y=\"{d:.1}\">", .{ b.x + 10, top + 17 });
+            try escape(w, b.name);
+            try w.print("</text><text class=\"t-sub\" x=\"{d:.1}\" y=\"{d:.1}\">{s}", .{ b.x + 10, top + 34, if (b.service) "service" else "mapped" });
+            var buf: [32]u8 = undefined;
+            const held: ?f64 = if (b.mib) |m| @floatFromInt(m) else if (peak) |p| @as(f64, @floatFromInt(p)) / 1048576.0 else null;
+            if (held) |m| {
+                var fw: std.Io.Writer = .fixed(&buf);
+                try size(&fw, m);
+                try w.print(" &middot; {s} once", .{fw.buffered()});
+            }
+            if (users > 0) try w.print(" &middot; {d} {s}", .{ users, if (users == 1) "user" else "users" });
+            try w.writeAll("</text></g>");
+        }
+        try w.writeAll("</g>\n");
+    }
     fn stepBox(self: Page, s: model.Step, si: usize, x: f64, y: f64, bw: f64, bh: f64) !void {
         const w = self.w;
         const l = self.l;
@@ -925,7 +1035,7 @@ const Page = struct {
         try w.writeAll("<div style=\"display:grid;grid-template-columns:repeat(auto-fit,minmax(380px,1fr));gap:26px\">\n");
         try self.area(false);
         try self.area(true);
-        try w.writeAll("</div>\n<ul class=\"legend\"><li><i style=\"background:var(--q2)\"></i>reserved by running rules</li><li><i class=\"g1\"></i>in use: CPU cores; memory with page cache</li><li><i style=\"border-top:1.5px dashed var(--ink2);height:0;margin-top:5px\"></i>the budget</li></ul>\n");
+        try w.writeAll("</div>\n<ul class=\"legend\"><li><i style=\"background:var(--q2)\"></i>reserved by running rules</li><li><i class=\"shared-band\"></i>held once by shared inputs</li><li><i class=\"g1\"></i>in use: CPU cores; memory with page cache</li><li><i style=\"border-top:1.5px dashed var(--ink2);height:0;margin-top:5px\"></i>the budget</li></ul>\n");
         try self.endFigure();
     }
 
@@ -973,6 +1083,17 @@ const Page = struct {
                 try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph });
             }
             try w.print("{d:.1},{d:.1}\"/>\n", .{ left + pw, top + ph });
+            // Under the in-use area, the part of the reserved memory that
+            // shared inputs hold once.
+            if (memory and !used) {
+                var any = false;
+                for (samples) |s| any = any or s.shared_reserved_mib > 0;
+                if (any) {
+                    try w.print("<polygon class=\"shared-band\" points=\"{d:.1},{d:.1} ", .{ left, top + ph });
+                    for (samples) |s| try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(s.shared_reserved_mib / most, 1) * ph });
+                    try w.print("{d:.1},{d:.1}\"/>\n", .{ left + pw, top + ph });
+                }
+            }
         }
         // The in-use line on top.
         try w.writeAll("<polyline style=\"fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round\" points=\"");

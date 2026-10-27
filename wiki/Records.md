@@ -134,7 +134,7 @@ Launch events:
 - `inputs_checked`: `manifest`, `files`, `files_read`, `bytes_read`, `seconds`, `ok`.
 - `containers_checked`: `images`, `leftovers_removed`, `seconds`.
 - `memory_protected`: `memory_low_mib`, `ok`.
-- `sample`: `running`, `ready`, `threads_reserved`, `memory_reserved_mib`, `memory_current`, `cpu_cores_used`.
+- `sample`: `running`, `ready`, `threads_reserved`, `memory_reserved_mib` (with `shared_reserved_mib`, the part shared inputs hold), `memory_current`, `cpu_cores_used`.
 - `control`: `command`, `rule`, `result`.
 - `cancel_requested`: `signal`.
 

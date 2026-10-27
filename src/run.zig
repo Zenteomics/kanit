@@ -1874,11 +1874,17 @@ const Engine = struct {
                 cpu_cores = @as(f64, @floatFromInt(cpu.? -| self.last_cpu_us.?)) / (@as(f64, @floatFromInt(now - self.last_sample_ns)) / 1e3);
             self.last_cpu_us = cpu;
         }
+        // The part of the reserved memory that shared inputs hold once.
+        var shared_mib: u64 = 0;
+        for (self.holders) |h| if (h.held) {
+            shared_mib += h.reserve_mib;
+        };
         self.events.emit("sample", .{
             .running = running_n,
             .ready = ready_n,
             .threads_reserved = self.threads_used,
             .memory_reserved_mib = self.memory_used,
+            .shared_reserved_mib = shared_mib,
             .memory_current = memory_current,
             .cpu_cores_used = cpu_cores,
         });
