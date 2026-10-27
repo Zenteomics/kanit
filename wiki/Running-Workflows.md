@@ -10,7 +10,10 @@ workz run workflow.toml --max-threads 16 --max-memory 60G
 - `--target RULE` (repeatable) runs only that rule and the rules it depends on.
 - `--keep-going` keeps running independent rules after a failure ([Failures](#failures)).
 - `--retry N` and `--timeout DURATION` apply to rules that set no `retries` or `timeout` of their own.
+- `--threads STEP=N` gives a step's rules another thread count for this launch only ([Trying another thread count](Resources-and-Scheduling.md#trying-another-thread-count)).
 - `--quiet` drops the progress lines; failures still print.
+
+Before a long launch, `workz plan --budget` checks that every rule fits the budget ([Check before running](Writing-Workflows.md#check-before-running)).
 
 On a terminal, `run` prints a line for each rule that completes, retries, fails or is blocked, and keeps one status line below them: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the names of the running rules. A failure's line is followed by the last lines of the attempt's standard error. When the launch ends, a short summary follows on standard output:
 
@@ -18,7 +21,7 @@ On a terminal, `run` prints a line for each rule that completes, retries, fails 
 
 Off a terminal, such as in a script or a log file, each start, completion and failure is one plain line on standard error, prefixed with the count of finished rules, and the summary is one line of JSON on standard output, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)). `--json` prints the JSON summary on a terminal too, and `--no-color` or `NO_COLOR=1` turns colors off.
 
-Every launch keeps a page of its own, `report.html` in its launch directory ([The HTML report](Reports.md#the-html-report)). `run` prints its path when the launch starts, unless `--quiet` is given, and draws the page again every 5 s, so a browser that has it open follows the launch: the pipeline fills in rule by rule and the timeline grows. On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time. When the launch ends, the page is drawn once more and stops reloading.
+Every launch keeps a page of its own, `report.html` in its launch directory, which a browser can keep open to follow the launch ([The HTML report](Reports.md#the-html-report)). `run` prints its path when the launch starts, unless `--quiet` is given.
 
 Only one launch runs in a working directory at a time; a second one stops at once with `another launch is running in DIR; watch it with workz watch, or run again after it ends`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
 
@@ -66,7 +69,7 @@ An attempt fails when its command exits with a non-zero status, is killed, runs 
 
 ```text
     0/5  budget     4 threads, 1.0 GiB, 4 jobs
-    0/5  page       .workz/launches/20261027T024235.758-b7874916/report.html, drawn again every 5 s while the launch runs
+    0/5  page       .workz/launches/20261027T230806.269-2c254ac6/report.html, drawn again every 5 s while the launch runs
     1/5  failed     no_output: exited 0 without output d.txt
     2/5  failed     exits: exited with status 2
                     | sort: cannot read: samples.tsv: No such file or directory
@@ -74,17 +77,17 @@ An attempt fails when its command exits with a non-zero status, is killed, runs 
     4/5  failed     too_big: out of memory: could not stay within its 64 MiB request
     5/5  failed     slow: timed out after 2 s
 
- failed    after 2.0 s: 0 completed, 0 reused, 4 failed, 1 blocked
+  failed   after 2.0 s: 0 completed, 0 reused, 4 failed, 1 blocked
  failures  exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
            no_output  exited 0 without output d.txt
            slow       timed out after 2 s
            too_big    out of memory: could not stay within its 64 MiB request
- page      .workz/launches/20261027T024235.758-b7874916/report.html
+ page      .workz/launches/20261027T230806.269-2c254ac6/report.html
  next      workz logs exits   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```
 
-The fifth rule, `after`, depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. Off a terminal, each failure line ends with the path of the attempt's standard error instead, such as `(see .../attempts/exits/001/stderr.log)`.
+The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. Off a terminal, each failure line ends with the path of the attempt's standard error instead, such as `(see .../attempts/exits/001/stderr.log)`, and of its kept [diagnostics](Writing-Workflows.md#diagnostics) when it has some.
 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.

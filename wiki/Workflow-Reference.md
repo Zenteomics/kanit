@@ -34,7 +34,8 @@ name = "align_s1"
 step = "align"
 sample = "s1"
 category = "alignment"
-tool = "bowtie2 2.5.4"
+tool = "bowtie2"
+version = "bowtie2 --version | head -1"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
 shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
@@ -53,8 +54,9 @@ shared = ["index"]
 
 [[rules]]
 name = "star_s1"
-input = ["ref/star", "reads/s1_1.fq.gz", "reads/s1_2.fq.gz"]
+input = ["reads/s1_1.fq.gz", "reads/s1_2.fq.gz"]
 output = ["star/s1/Aligned.out.bam"]
+diagnostics = ["star/s1/Log.out"]
 container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
 workdir = "star/s1"
 links = { "r1.fq.gz" = "reads/s1_1.fq.gz", "r2.fq.gz" = "reads/s1_2.fq.gz" }
@@ -73,7 +75,7 @@ shared = ["genome"]
 - **Unknown keys are errors**, in every table. The message names the line and, when one is close, the key you probably meant.
 - **Names** of rules and shared inputs have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - **Paths** name files or directories explicitly. They cannot be empty, contain control characters, `*`, `?`, `[`, `]`, `{` or `}`, contain `://`, or start with `gh:`. Relative paths resolve against the working directory.
-- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. `K` values below `1024K` are too small, and the size must be above 0.
+- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. A size below 1 MiB, such as `"512K"`, is refused.
 - **Durations** are strings: a whole number of seconds, or numbers with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.
 
 ## [workflow]
@@ -121,7 +123,9 @@ An entry with `container` is a service:
 | `retries`   | integer  | 0        | restarts before ready, 0 to 3    |
 | `mounts`    | table    | none     | host path = path in the image    |
 
-- `path` is also an input of every rule that uses the shared input. A file input's path may not hold the output of a rule, since its pages are measured at launch; a service's may, and the rules writing there run before the service's users, which may not write there themselves.
+- `path` is also an input of every rule that uses the shared input.
+- A file input's `path` may not hold the output of a rule, since its pages are measured when a launch starts.
+- A service's `path` may: the rules writing there run before the service's users, which may not write there themselves.
 - `command`, `memory`, `timeout`, `retries` and `mounts` belong to services only.
 - See [Shared inputs](Resources-and-Scheduling.md#shared-inputs) and [Shared services](Containers-and-Services.md#shared-services).
 
@@ -134,7 +138,7 @@ An entry with `container` is a service:
 | `output`      | paths    | required               | files it writes, at least one        |
 | `shell`       | string   | required               | the command line                     |
 | `threads`     | integer  | `[defaults]`, else 1   | 1 to 4096                            |
-| `memory`      | size     | `[defaults]`           | required from one of the two         |
+| `memory`      | size     | `[defaults]`           | the memory request                   |
 | `priority`    | integer  | 0                      | higher starts first                  |
 | `retries`     | integer  | `--retry`, else 0      | extra attempts, 0 to 3               |
 | `timeout`     | duration | `--timeout`, else none | limit per attempt                    |
@@ -153,6 +157,7 @@ An entry with `container` is a service:
 | `tool`        | string   | from `container`       | program it runs                      |
 | `resources`   | table    | none                   | the request, below                   |
 
+- Every rule needs a memory request: `memory`, in `resources`, or in `[defaults]`.
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
 - An input that is a directory depends on every rule that writes inside it, so it is read once they have completed.
@@ -179,7 +184,7 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 
 ## Pipeline templates
 
-The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; shared inputs may use `[params]`.
+The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; their values may name `[params]` values as `{name}`.
 
 | Table          | Key        | Type   | Meaning                                    |
 | -------------- | ---------- | ------ | ------------------------------------------ |
@@ -190,7 +195,7 @@ The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare
 | `[[steps]]`    | `for_each` | string | `"sample"`: one rule per sample            |
 | `[[steps]]`    | rule keys  |        | as in `[[rules]]`                          |
 
-- The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow rule names.
+- The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow the [rules for names](#conventions).
 - A step takes every `[[rules]]` key except `step` and `sample`, which `prepare` sets, and `name`, which names the step. A template has no `[[rules]]`: a step without `for_each` is one rule.
 - `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. A param may not share a column's name.
 - In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.

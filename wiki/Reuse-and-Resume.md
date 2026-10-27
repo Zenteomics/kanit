@@ -10,7 +10,7 @@ workz runs a rule again only when something that can change its outputs changed.
 - `environment changed: NAME, ...`: the keyed environment variables whose values differ.
 - `input missing: PATH`: an external input does not exist. `run` refuses to start until it does.
 - `output missing: PATH`: a recorded output was deleted.
-- `output changed: PATH (run refuses without --rerun)`: a recorded output was changed outside workz ([Changed outputs](#changed-outputs)).
+- `output changed: PATH (run refuses without --rerun-rule or --rerun)`: a recorded output was changed outside workz ([Changed outputs](#changed-outputs)).
 - `rerun requested`: `--rerun` or `--rerun-rule` names the rule.
 
 ## The rule key
@@ -46,7 +46,7 @@ For a colon-separated list such as `PATH` it names the entries added or removed,
 
 No other variable is part of the key. Host rules also receive `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM`, but a change to one of them reruns nothing; name a variable with `--pass-env` to pass it and key it. Everything else stays out of rules ([Running workflows](Running-Workflows.md#what-a-command-sees)).
 
-The engine key is 3. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; 0.4.0 runs every rule once after 0.3.0, because file identities no longer include the device number.
+The engine key is 3. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action.
 
 ## File identity
 
@@ -66,7 +66,7 @@ workz plan ~/projects/rnaseq-2026/workflow.toml    # 0 to run
 - An absolute path inside the project changes with it: a rule's `shell` that names one, a `PATH` entry under it, or an input written through a symlinked spelling of the project's directory. Write paths inside the project relative to it.
 - A copy is not a move: `cp`, `rsync` or a move to another file system give every file a new identity, so the rules run again.
 - A shared service's `command` names absolute paths, since it runs in `/tmp`; after a move it must be rewritten, and the rules that join it run again.
- Containers that a killed launch left behind carry the old path, so `clean` in the new place does not find them; remove them with `podman rm`.
+- Containers that a killed launch left behind carry the old path, so `workz clean` in the new place does not find them; remove them with `podman rm`.
 
 ## Content digests
 

@@ -47,34 +47,38 @@ On a narrow terminal the memory bar goes first, then the CPU column, then the me
 
 ![The timeline of the same launch after it ended: qc rules wait while align rules with a higher priority run, and each count rule follows its alignment.](images/watch-timeline.png)
 
-Here the align rules, with `priority = 10`, start as soon as their trim is done, while the qc rules wait for threads until the alignments finish. The critical path ran through `trim_S4`, `align_S4` and `count_S4` to `report`.
+Here the align rules, with `priority = 10`, start as soon as their trim is done, while the qc rules wait for threads until the alignments finish. The critical path ran through `trim_S5`, `align_S5` and `count_S5` to `report`.
 
 ### Off a terminal
 
-When its output is not a terminal, or with `--once`, `watch` prints a plain view of the running rules instead, again at every refresh until the launch ends:
+When its output is not a terminal, `watch` prints a plain view of the running rules instead, again at every refresh until the launch ends; `--once` prints it once:
 
 ```text
-launch 20261026T221057.818-be24883d  running for 19.0 s
+launch 20261027T225229.160-ba6a63f2  running for 19.0 s
 25 selected: 7 pending, 6 waiting, 4 running, 8 completed, 8 done
 shared genome: ready
 
 RUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT
-align_S2                                       1    15.9 s   203 MiB   402 MiB  Mapping reads: 3 threads
-align_S4                                       1     5.9 s   204 MiB   403 MiB  Mapping reads: 3 threads
-align_S5                                       1    14.0 s   203 MiB   402 MiB  Mapping reads: 3 threads
-qc_S6                                          1     1.9 s   1.1 MiB   1.6 MiB  Started analysis of S6.fq
+align_S1                                       1    14.0 s   203 MiB   403 MiB  Mapping reads: 3 threads
+align_S2                                       1    15.8 s   203 MiB   402 MiB  Mapping reads: 3 threads
+qc_S3                                          1     1.9 s   0.9 MiB   1.4 MiB  Started analysis of S3.fq
+align_S3                                       1     5.9 s   203 MiB   403 MiB  Mapping reads: 3 threads
 ```
 
-The second line counts the selected rules in each state; `done` adds the completed and reused ones. Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table. `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest. A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch, and `status --history` marks it `unfinished`. Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
+- The second line counts the selected rules in each state; `done` adds the completed and reused ones.
+- Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table.
+- `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest.
+- A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch.
+- Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
 
 ## status
 
 `workz status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason, which quotes the last line of its error output, the launch's page, and the commands to look further:
 
 ```text
- failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked
+  failed   after 3.0 s: 2 completed, 0 reused, 1 failed, 1 blocked
  failures  align_S1  exited with status 3: align: reference index is truncated
- page      .workz/launches/20261026T051434.360-95f2e7d0/report.html
+ page      .workz/launches/20261027T225300.744-8ac4d839/report.html
  next      workz logs align_S1   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```
@@ -84,16 +88,16 @@ A launch that completed lists its three slowest rules instead of failures. Off a
 While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state:
 
 ```json
-{"engine":"workz 0.4.0 sha256:...","engine_key":2,"launch":"20261026T221057.818-be24883d","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.979420178,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261026T221057.818-be24883d","failures":[],"changed_outputs":[]}
+{"engine":"workz 0.5.0 sha256:...","engine_key":3,"launch":"20261027T225229.160-ba6a63f2","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.978690066,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261027T225229.160-ba6a63f2","failures":[],"changed_outputs":[],"previous_bytes":0}
 ```
 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 
 ```text
 LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
-20261026T221057.818-be24883d    completed       48.5 s    25       0          0
-20261026T214107.045-dbca1c53    completed       48.2 s    25       0          0
-20261026T212349.502-401d88e4    completed       45.1 s    25       0          0
+20261027T225424.351-a2f4b4e8    completed       48.2 s    25       0          0
+20261027T225335.359-36b6dba2    completed       49.0 s    25       0          0
+20261027T225229.160-ba6a63f2    completed       48.4 s    25       0          0
 ```
 
 `DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `CANCELLED` the rules it stopped or never started. A launch that ended with an error shows it at the end of its line. The newest launch shows `running` while a run holds the working directory's lock; a launch whose engine ended without recording its end, as when killed, shows `unfinished`.

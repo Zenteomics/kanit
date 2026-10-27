@@ -15,7 +15,7 @@ flowchart LR
 
 A **workflow** is a TOML file that lists rules. Its directory is the **working directory**, unless a command is given `-d DIR`. Relative paths in the workflow resolve against the working directory, a rule's command starts there unless the rule sets a `workdir`, and workz keeps its records in `.workz/` inside it.
 
-workz reads the graph as written. Samples, parameters and file names are expanded by whatever prepares the file, usually a short script ([Writing workflows](Writing-Workflows.md#generate-the-file)).
+workz reads the graph as written. Samples, parameters and file names are expanded before workz reads the file: by `workz prepare` from a pipeline template, or by a program of your own ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)).
 
 ## Rules and the graph
 
@@ -30,18 +30,18 @@ A workflow runs a few commands on many pieces of data, one rule for each pair. F
 - A **step** is what the rule does in the pipeline, such as `STAR_ALIGN` or `trim`. Rules that run one command on different data are instances of one step, and the step is what reports size and compare: six alignments make one row.
 - A **sample** is the data the rule works on, such as `ctrl1`. A rule that combines every sample, such as a count matrix or a MultiQC report, has none.
 - A **category** groups steps by purpose, such as `qc`, `alignment` or `quantification`.
-- A **tool** is the program the step runs, such as `STAR 2.7.11b`.
+- A **tool** is the program the step runs, such as `STAR`; a rule's `version` command records which version ran ([Writing workflows](Writing-Workflows.md#tool-versions)).
 
 Part of an RNA-seq workflow, labelled:
 
-| Rule          | Step            | Sample   | Category       | Tool          |
-| ------------- | --------------- | -------- | -------------- | ------------- |
-| `fastp_ctrl1` | `FASTP`         | `ctrl1`  | trimming       | fastp 1.4.0   |
-| `star_ctrl1`  | `STAR_ALIGN`    | `ctrl1`  | alignment      | STAR 2.7.11b  |
-| `star_treat1` | `STAR_ALIGN`    | `treat1` | alignment      | STAR 2.7.11b  |
-| `sort_ctrl1`  | `SAMTOOLS_SORT` | `ctrl1`  | alignment      | samtools 1.24 |
-| `counts`      | `COUNT_MATRIX`  |          | quantification | gawk          |
-| `multiqc`     | `MULTIQC`       |          | report         | MultiQC 1.35  |
+| Rule          | Step            | Sample   | Category       | Tool     |
+| ------------- | --------------- | -------- | -------------- | -------- |
+| `fastp_ctrl1` | `FASTP`         | `ctrl1`  | trimming       | fastp    |
+| `star_ctrl1`  | `STAR_ALIGN`    | `ctrl1`  | alignment      | STAR     |
+| `star_treat1` | `STAR_ALIGN`    | `treat1` | alignment      | STAR     |
+| `sort_ctrl1`  | `SAMTOOLS_SORT` | `ctrl1`  | alignment      | samtools |
+| `counts`      | `COUNT_MATRIX`  |          | quantification | gawk     |
+| `multiqc`     | `MULTIQC`       |          | report         | MultiQC  |
 
 A rule declares its labels with the keys `step`, `sample`, `category` and `tool` ([Workflow reference](Workflow-Reference.md#rules)). A label it does not declare is taken from its name and image:
 
@@ -61,7 +61,7 @@ Labels are not part of the [rule key](#rule-keys-and-reuse): adding or changing 
 
 ## Launches and attempts
 
-A **launch** is one execution of `workz run`; this guide also calls it a run where that reads better, as in the run lock. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.workz/launches/`.
+A **launch** is one execution of `workz run`. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.workz/launches/`.
 
 Within a launch, each rule that runs has one or more **attempts**, numbered from 1. A failed attempt is retried while the rule has retries left. Each attempt keeps its command, request, standard output and error, and a record of what it used, in `.workz/launches/<ID>/attempts/<rule>/<NNN>/`.
 
@@ -85,7 +85,7 @@ stateDiagram-v2
     waiting --> not_started: the launch ended first
 ```
 
-A **waiting** rule is ready to run but does not fit yet; workz records what it waited for, such as `threads`, `memory` or a resource group. A **stopping** rule has been sent `SIGTERM` and is given its grace period to end. A launch that stops after a failure, or is cancelled, leaves the rules it never started `not_started`. [Running workflows](Running-Workflows.md#failures) describes failures, retries and cancellation.
+A **waiting** rule is ready to run but does not fit yet; workz records what it waited for, such as `threads`, `memory` or a resource group. A **stopping** rule has been sent `SIGTERM` and is given its grace period to end. A launch that stops after a failure leaves the rules it never started `not_started`; one that is interrupted or cancelled marks them `cancelled`. [Running workflows](Running-Workflows.md#failures) describes failures, retries and cancellation.
 
 ## Budget and requests
 
@@ -101,7 +101,7 @@ A **shared input** is a large read-only file, such as a genome index, that many 
 
 ## Rule keys and reuse
 
-Each time a rule completes, workz records its **rule key**: a digest of its command, its keyed environment (`PATH`, `LANG`, `LC_ALL`, `TZ` and the names passed with `--pass-env`), its request, its declared outputs, the identities of its input files (or their content digests, where one is stored) and the keys of the rules that produce them (or, for producers with `cutoff = true`, the digests of their outputs), and the engine key ([the rule key](Reuse-and-Resume.md#the-rule-key) lists each part). A rule is **reused** in a later launch when its key is the same and its outputs are still the files it wrote. Anything else makes it run again, and its consumers follow.
+Each time a rule completes, workz records its **rule key**: a digest of everything that decides its result, from its command, keyed environment and request to the identities of its inputs, the keys of the rules that produce them and the engine key ([the rule key](Reuse-and-Resume.md#the-rule-key) lists each part). A rule is **reused** in a later launch when its key is the same and its outputs are still the files it wrote. Anything else makes it run again, and its consumers follow.
 
 A file's **identity** is its inode, size, and modification and change times, so workz notices an edited file without reading it. Some files are keyed on their content instead ([Reuse and resume](Reuse-and-Resume.md#content-digests)).
 

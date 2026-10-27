@@ -1,4 +1,4 @@
-A workz workflow is a flat list of concrete rules. This page covers how to structure one, how to generate it from a sample sheet, and how to choose the requests and options that make it run well. The [workflow reference](Workflow-Reference.md) lists every key.
+A workz workflow is a flat list of concrete rules. This page covers how to structure one, how to write it from a pipeline template or a program, how to check it, and how to choose the requests and options that make it run well. The [workflow reference](Workflow-Reference.md) lists every key.
 
 ## Anatomy of a rule
 
@@ -38,17 +38,11 @@ workz creates the directory of every output before an attempt starts, and moves 
 
 ## Label every rule
 
-Give each rule its `step`, its `sample` when it works on one, and a `category` and `tool` where they help ([Concepts](Concepts.md#steps-samples-categories-and-tools)). The labels are what the reports group by:
-
-- `workz report --suggest` turns six `align` rules into one row with their request, the most memory any of them used, and a suggested request.
-- The HTML report draws the pipeline step by step, a table of samples by steps that points at the sample a step was slow on, and colors every attempt by its category.
-- The scheduler estimates a rule that has never run from the other rules of its step.
-
-Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing. Rules that declare none are labelled from their names, as [Concepts](Concepts.md#steps-samples-categories-and-tools) describes: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
+Give each rule its `step`, its `sample` when it works on one, and a `category` and `tool` where they help: the reports, the launch page and the graph group by them, and the scheduler estimates a new rule from its step ([Concepts](Concepts.md#steps-samples-categories-and-tools)). A template labels its rules itself. Labels are not part of the rule key, so adding them to a workflow that already ran reruns nothing; rules that declare none are labelled from their names: `align_s1` is the step `align`, and `s1__ALIGN` is the step `ALIGN` of the sample `s1`.
 
 ## Prepare from a template
 
-Real workflows have one rule per sample and step. Write each step once in a pipeline template, list the samples in a sheet, and `workz prepare` writes the explicit workflow: the file the engine runs, reviews and diffs as before, with every rule spelled out.
+Real workflows have one rule per sample and step. Write each step once in a pipeline template, list the samples in a sheet, and `workz prepare` writes the explicit workflow, with every rule spelled out: the file the engine runs and you review and diff.
 
 `samples.tsv`, a header line and one row per sample:
 
@@ -196,8 +190,64 @@ Some choices in this script are worth copying:
 - The bowtie2 index is a [shared input](Resources-and-Scheduling.md#shared-inputs): workz loads it once for all alignments, and counts it as an input of each, so rebuilding the index reruns them.
 - `bowtie2 --mm` maps the index instead of reading it, so the alignments share one copy of it in memory, which is what makes a shared input pay off.
 - The `disk` group lets at most two trims read from disk at once, while alignments with `priority = 10` start before trims that become ready at the same time.
-- Every rule says what it is: its step, sample, category and tool. The script knows them, so the reports can group by them, and `count_genes` stays the step `count_genes` instead of being read as `count`.
+- Every rule says what it is: its step, sample, category and tool. The script knows them, so the reports can group by them.
 - Regenerating the file is safe. Rules whose command, request and inputs did not change are reused.
+
+## Check before running
+
+Four commands read the workflow and run nothing:
+
+- `workz validate` checks every key, value and path, and the graph, and lists every problem at once with its line. It also notes what is valid but likely a mistake: a shared input or resource group no selected rule uses, or a rule without `sample` among rules of its step that have one.
+- `workz validate --inputs` also lists the inputs that no rule writes and that do not exist, and exits 1 if there are any.
+- `workz graph` shows what the file declares, in layers.
+- `workz plan --budget` says what would run and whether every rule fits the budget with its shared inputs; `run` refuses a launch in which one does not.
+
+On a small pipeline with two samples, an index built by a rule and loaded once by a service, and a disk group, here is the resources layer by step:
+
+```text
+$ workz graph --layer resources --by step
+index (1 rule)  8 threads, 32.0 GiB
+  before align
+trim (2 rules)  1 thread, 1.0 GiB
+  before align
+  takes 1 of group disk
+align (2 rules)  1 thread, 2.0 GiB
+  after index, trim
+  before report
+  joins shared genome
+report (1 rule)  1 thread, 1.0 GiB
+  after align
+shared genome  service, 30.0 GiB held once, ref/star
+  loaded from index
+  used by align
+group disk  max 2
+  taken by trim
+```
+
+Questions you can ask it:
+
+- Who writes and who uses a shared input: `workz graph --users genome`.
+- Why one rule waits for another: `workz graph --why s1__trim:report` prints the path and the file each rule reads.
+- What a rule needs, or what needs it: `--focus +report`, `--focus index+`, or `--focus 1+report` for one level.
+- Every file between the rules: `--layer files`; everything at once: `--layer all`.
+
+Off a terminal it prints Graphviz DOT, so `workz graph --layer resources --by step > graph.dot` draws with `dot -Tsvg graph.dot > graph.svg`: rules and steps as boxes, files as notes, shared inputs as cylinders with their memory, groups as hexagons. `--format json` gives the same graph to other tools ([Command reference](Command-Reference.md#graph)).
+
+The same workflow on a 32 GiB budget, where each alignment needs its 2 GiB, the 30 GiB service and the Podman client:
+
+```text
+$ workz plan --budget --summary --max-threads 16 --max-memory 32G
+     3 run   input missing
+     3 run   a producer runs
+6 to run, 0 to reuse
+
+budget: 16 threads, 32.0 GiB
+shared genome: 30.0 GiB held once, with its Podman client
+does not fit: s1__align needs 1 thread and 32.1 GiB
+does not fit: s2__align needs 1 thread and 32.1 GiB
+largest: s1__align needs 1 thread and 32.1 GiB with its shared inputs
+2 rules do not fit: run would refuse the launch
+```
 
 ## Choose requests
 
@@ -206,9 +256,9 @@ A request is both a reservation and a limit, so it pays to size it from measurem
 1. Start generous: enough memory that nothing is killed, and the threads you want each tool to use.
 2. Run the workflow, or a few samples of it.
 3. Ask workz what each step used: `workz report --suggest` prints the largest peak and a suggested request for each step, and `workz report --bottlenecks` says which requests are far above their peaks ([Reports](Reports.md#request-sizing)).
-4. Apply the suggestions in the generator, and run again.
+4. Apply the suggestions in the template or generator, and run again.
 
-Memory requests cover what the kernel charges to the attempt's cgroup, which includes page cache for the files it writes. An attempt that writes a large file under a small request is slowed by reclaim, not killed; one whose own memory exceeds the request is killed as out of memory, with every process of the attempt. Threads become a CPU quota of that many CPUs: a tool that starts more threads than requested is throttled to the quota.
+The memory request is a hard limit that counts page cache, and the thread request a CPU quota ([Limits on each attempt](Resources-and-Scheduling.md#limits-on-each-attempt)): size memory for the largest input you expect, and pass `$WORKZ_THREADS` to every multithreaded tool.
 
 `resources.threads` and `resources.memory` may also be written directly on the rule, and `[defaults]` gives both for rules that set neither. Every rule needs a memory request, from one of these places.
 
@@ -299,39 +349,7 @@ include = ["**/workflow.toml"]
 path = "./workz.schema.json"
 ```
 
-and write the schema next to it with `workz schema > workz.schema.json`. `workz validate --inputs` then catches paths that exist nowhere before a launch does.
-
-
-`workz graph` shows what the file declares, in layers, so you can check a generated workflow before running it. On a small pipeline with two samples, an index built by a rule and loaded once by a service, and a disk group, the resources layer by step:
-
-```text
-$ workz graph --layer resources --by step
-index (1 rule)  8 threads, 32.0 GiB
-  before align
-trim (2 rules)  1 thread, 1.0 GiB
-  before align
-  takes 1 of group disk
-align (2 rules)  1 thread, 2.0 GiB
-  after index, trim
-  before report
-  joins shared genome
-report (1 rule)  1 thread, 1.0 GiB
-  after align
-shared genome  service, 30.0 GiB held once, ref/star
-  loaded from index
-  used by align
-group disk  max 2
-  taken by trim
-```
-
-Questions you can ask it:
-
-- Who writes and who uses a shared input: `workz graph --users genome`.
-- Why one rule waits for another: `workz graph --why S1__trim:report` prints the path and the file each step reads.
-- What a rule needs, or what needs it: `--focus +report`, `--focus index+`, or `--focus 1+report` for one level.
-- Every file between the rules: `--layer files`; everything at once: `--layer all`.
-
-Off a terminal it prints Graphviz DOT, so `workz graph --layer resources --by step > graph.dot` draws with `dot -Tsvg graph.dot > graph.svg`: rules and steps as boxes, files as notes, shared inputs as cylinders with their memory, groups as hexagons. `--format json` gives the same graph to other tools ([Command reference](Command-Reference.md#graph)).
+and write the schema next to it with `workz schema > workz.schema.json`.
 
 ## Checklist
 
@@ -339,5 +357,5 @@ Off a terminal it prints Graphviz DOT, so `workz graph --layer resources --by st
 - Rule names follow `step_sample` or `sample__STEP`.
 - Multithreaded tools take `$WORKZ_THREADS`.
 - Requests come from a measured run, via `workz report --suggest`.
-- Large read-only indexes are shared inputs, and inputs too.
-- `workz validate` and `workz plan` pass, and `workz graph` shows the links you meant, before the first `workz run`.
+- Large read-only indexes are shared inputs, which count as inputs of the rules using them.
+- `workz validate --inputs` and `workz plan --budget` pass, and `workz graph` shows the links you meant, before the first `workz run`.

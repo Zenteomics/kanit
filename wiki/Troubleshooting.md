@@ -1,4 +1,4 @@
-The errors you are most likely to meet, what each means, and what to do about it. Messages are quoted as workz prints them; `NAME`, `PATH` and `N` stand for the values in yours.
+The errors you are most likely to meet, what each means, and what to do about it. Messages are quoted as workz prints them; `NAME`, `PATH`, `DIR` and `N` stand for the values in yours.
 
 ## Starting a run
 
@@ -8,7 +8,7 @@ The errors you are most likely to meet, what each means, and what to do about it
 
 - `cannot create the run's network namespace: ...`: Unprivileged user namespaces are disabled or restricted on this system. Check `sysctl user.max_user_namespaces`, ask your administrator, or use `--no-isolation`.
 
-- `another launch is running in PATH; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse while it runs with `a launch is running in PATH; verify after it ends`, or `clean after it ends`.
+- `another launch is running in DIR; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse while it runs with `a launch is running in DIR; verify after it ends`, or `clean after it ends`.
 
 - `the workflow has container rules but podman is not on PATH`: Install rootless Podman, or put it on the `PATH` of the shell that runs workz.
 
@@ -58,13 +58,15 @@ workz: workflow.toml: 3 problems
 
 A refused launch stops before any rule runs. It still leaves a launch directory and a summary with status `refused` and the reason, which `workz status` shows.
 
-- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB; the run allows M MiB`, which says `with its shared inputs` or `with its Podman client` where they count: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request. A rule's memory need includes the shared inputs it uses and, for a container rule, 32 MiB for its Podman client.
+- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB; the run allows M MiB`, which says `with its shared inputs` or `with its Podman client` where they count: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request; `workz plan --budget` finds every such rule before a launch.
 
 - `missing input of rule NAME: PATH`: An input that no rule produces does not exist. Create it, fix the path, or add the rule that makes it.
 
 - `output of completed rule NAME changed since it was recorded: PATH`: A recorded output was changed outside workz, and workz will not overwrite it silently. Run the rule again with `--rerun-rule NAME`, which keeps the changed bytes in `previous/`, or restore the file ([Changed outputs](Reuse-and-Resume.md#changed-outputs)). The launch exits with status 1.
 
 - `input does not match its manifest digest: PATH` and `input manifest file is missing: PATH`: An input differs from the input manifest. Fix the input or the manifest. The launch exits with status 1.
+
+- `cannot read input manifest PATH: ...` or `input manifest PATH must be a JSON object of absolute paths`, then `the input manifest cannot be used`: The file given with `--input-manifest` is missing or not a manifest. The launch exits with status 2.
 
 - `.../.workz/state.json has an unsupported format version` or `.../.workz/state.json cannot be read`: The state was written by another version of workz, usually a newer one. Use that version, or delete `.workz/state.json` to run every rule again.
 
