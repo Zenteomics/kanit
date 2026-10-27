@@ -51,17 +51,17 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 
 ```json
 {
-  "engine": "workz 0.3.0 sha256:85d277095e9e014cb55b3a60c6cc8767e10bf763c3b78e9b78b8a68b2809fac8",
+  "engine": "workz 0.3.0 sha256:ef60a4197a46f99979fafbe8e00a286d4ab431e06e9751aff7ccd686b9065bfd",
   "engine_key": 2,
-  "launch": "20261026T033653.780-bb9b10ee",
+  "launch": "20261027T025023.762-56876086",
   "status": "completed",
   "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },
   "selected": 25,
-  "elapsed_s": 48.578034531,
-  "finished": "2026-10-26T03:37:42.358Z",
+  "elapsed_s": 48.127714058,
+  "finished": "2026-10-27T02:51:11.890Z",
   "error": null,
-  "engine_cost": { "cpu_s": 0.085095, "max_rss_mib": 6.28515625 },
-  "launch_dir": ".../.workz/launches/20261026T033653.780-bb9b10ee",
+  "engine_cost": { "cpu_s": 0.106239, "max_rss_mib": 6.30078125 },
+  "launch_dir": ".../.workz/launches/20261027T025023.762-56876086",
   "failures": [],
   "changed_outputs": []
 }

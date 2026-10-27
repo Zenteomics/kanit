@@ -65,20 +65,21 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-    0/5  page       .workz/launches/20261026T052452.447-796d3243/report.html, drawn again every 5 s while the launch runs
-    1/5  failed     exits: exited with status 1
+    0/5  budget     4 threads, 1.0 GiB, 4 jobs
+    0/5  page       .workz/launches/20261027T024235.758-b7874916/report.html, drawn again every 5 s while the launch runs
+    1/5  failed     no_output: exited 0 without output d.txt
+    2/5  failed     exits: exited with status 2
                     | sort: cannot read: samples.tsv: No such file or directory
-    2/5  failed     no_output: exited 0 without output d.txt
     3/5  blocked    after: it needs a rule that did not complete
     4/5  failed     too_big: out of memory: could not stay within its 64 MiB request
     5/5  failed     slow: timed out after 2 s
 
  failed    after 2.0 s: 0 completed, 0 reused, 4 failed, 1 blocked
- failures  exits      exited with status 1: sort: cannot read: samples.tsv: No such file or directory
+ failures  exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
            no_output  exited 0 without output d.txt
            slow       timed out after 2 s
            too_big    out of memory: could not stay within its 64 MiB request
- page      .workz/launches/20261026T052452.447-796d3243/report.html
+ page      .workz/launches/20261027T024235.758-b7874916/report.html
  next      workz logs exits   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```

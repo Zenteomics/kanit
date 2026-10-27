@@ -113,7 +113,7 @@ waiting for resources (ready rules that waited, on average over the launch, and 
   loading shared inputs              <0.1 rules      0.2 s
 
 resource groups (while their rules waited)
-  disk                              58.2 s waited; in 100% of the samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier
+  disk                              58.2 s waited; 1 run sample while they waited, too few to judge
 ```
 
-Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. And in every sample taken while a rule waited for the `disk` group, that rule would have fitted the free threads and memory, so a larger `max` for `disk` would help too, if the disk can take it. When that share is under 25%, the report says instead that the budget was full and a higher `max` would not help much.
+Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. The waits for the `disk` group held only one run sample, taken every 5 s, so the report does not judge them. From three samples on, it gives the share in which a waiting rule would have fitted the free threads and memory: from 25%, a larger `max` for the group would help, if the disk can take it; below that, the budget was full and a higher `max` would not help much.
