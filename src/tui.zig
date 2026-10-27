@@ -13,6 +13,8 @@ const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const monitor = @import("monitor.zig");
 const tracker = @import("tracker.zig");
+const workflow = @import("workflow.zig");
+const graph = @import("graph.zig");
 const term = @import("term.zig");
 const Allocator = std.mem.Allocator;
 const Tracker = tracker.Tracker;
@@ -107,6 +109,8 @@ pub const Action = struct { cmd: []const u8, rule: ?usize };
 const confirm_ns = 3 * std.time.ns_per_s;
 
 pub const Ui = struct {
+    /// Producers and consumers of each rule, for its details.
+    links: Links = .{},
     mode: Mode = .table,
     /// The view `?` was pressed in, shown again when the keys close.
     before_help: Mode = .table,
@@ -767,6 +771,7 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
         l.sgr(reset);
         const amount: ?u64 = if (held) s.live_memory orelse s.memory_peak else s.memory_peak;
         if (amount) |m| l.print("  {s} {s}", .{ compact(&mb[0], m), if (held) "held" else "peak" });
+        if (s.users.items.len > 0) l.print(", used by {d} {s}", .{ s.users.items.len, if (s.users.items.len == 1) "rule" else "rules" });
         try f.put(&l);
     }
     if (t.final_error.len > 0) {
@@ -1059,6 +1064,19 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
         l = f.begin();
         Row.label(&l, "request");
         l.print("{d} threads, {s}", .{ r.threads, compact(&b[0], r.memory_mib << 20) });
+        try f.put(&l);
+    }
+    // What it reads from, what reads from it, and the shared inputs it holds.
+    for ([_]struct { []const u8, ?[]const []const u8 }{
+        .{ "after", ui.links.after.get(r.name) },
+        .{ "before", ui.links.before.get(r.name) },
+        .{ "shared", if (r.shared.len > 0) r.shared else null },
+    }) |row| {
+        const names = row[1] orelse continue;
+        if (names.len == 0) continue;
+        l = f.begin();
+        Row.label(&l, row[0]);
+        for (names, 0..) |n, k| l.print("{s}{s}", .{ if (k == 0) "" else ", ", n });
         try f.put(&l);
     }
     if (r.ready_ns > 0) {
@@ -1393,6 +1411,9 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
     const terminal = try Terminal.enter();
     defer terminal.leave();
     var ui: Ui = .{ .color = color };
+    var links_arena = std.heap.ArenaAllocator.init(gpa);
+    defer links_arena.deinit();
+    ui.links = try loadLinks(gpa, links_arena.allocator(), std.fs.path.dirname(t.events_path) orelse ".");
     var sampler: Sampler = .{};
     var frame: std.Io.Writer.Allocating = .init(gpa);
     defer frame.deinit();
@@ -1453,4 +1474,34 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
         }
     }
     return true;
+}
+
+/// Each rule's producers and consumers, by name, from the launch's copy of
+/// its workflow; empty when that cannot be read.
+pub const Links = struct {
+    after: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+    before: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+};
+
+pub fn loadLinks(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Links {
+    var links: Links = .{};
+    const info = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return links;
+    defer gpa.free(info);
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, info, .{}) catch return links;
+    const workdir = if (v == .object) (if (v.object.get("workdir")) |w| (if (w == .string) w.string else return links) else return links) else return links;
+    var problem: workflow.Problem = .{};
+    defer if (problem.message.len > 0) gpa.free(problem.message);
+    var wf = workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), workdir, &problem) catch return links;
+    defer wf.deinit();
+    var g = graph.build(gpa, &wf, &problem) catch return links;
+    defer g.deinit();
+    for (wf.rules, 0..) |r, i| {
+        const name = try a.dupe(u8, r.name);
+        for ([_]struct { []const usize, *std.StringHashMapUnmanaged([]const []const u8) }{ .{ g.parents[i], &links.after }, .{ g.children[i], &links.before } }) |pair| {
+            const names = try a.alloc([]const u8, pair[0].len);
+            for (pair[0], names) |j, *n| n.* = try a.dupe(u8, wf.rules[j].name);
+            try pair[1].put(a, name, names);
+        }
+    }
+    return links;
 }

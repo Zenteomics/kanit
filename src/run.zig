@@ -2175,7 +2175,7 @@ pub const container_client_mib: u64 = 32;
 
 /// What admission reserves for rule `r`: its request, and for a container
 /// rule its Podman client's memory.
-fn reservedMib(r: *const workflow.Rule) u64 {
+pub fn reservedMib(r: *const workflow.Rule) u64 {
     return r.memory_mib + if (r.container != null) container_client_mib else 0;
 }
 

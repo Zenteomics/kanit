@@ -24,18 +24,23 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 ## plan
 
 ```text
-workz plan [WORKFLOW] [--summary] [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
+workz plan [WORKFLOW] [--summary] [--budget] [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
 ```
 
 Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. `dry-run` is another name for `plan`.
 
-| Option         | Argument | Meaning                                         |
-| -------------- | -------- | ----------------------------------------------- |
-| `--summary`    |          | count the decisions by reason instead           |
-| `--rerun`      |          | as `run --rerun` would                          |
-| `--rerun-rule` | RULE     | as `run --rerun-rule` would; repeatable         |
-| `--pass-env`   | NAME     | as `run --pass-env` would; repeatable           |
-| `--threads`    | STEP=N   | as `run --threads` would; repeatable            |
+| Option          | Argument | Meaning                                         |
+| --------------- | -------- | ----------------------------------------------- |
+| `--summary`     |          | count the decisions by reason instead           |
+| `--budget`      |          | check every request against the budget          |
+| `--max-threads` | N        | the thread budget `--budget` checks             |
+| `--max-memory`  | SIZE     | the memory budget `--budget` checks             |
+| `--rerun`       |          | as `run --rerun` would                          |
+| `--rerun-rule`  | RULE     | as `run --rerun-rule` would; repeatable         |
+| `--pass-env`    | NAME     | as `run --pass-env` would; repeatable           |
+| `--threads`     | STEP=N   | as `run --threads` would; repeatable            |
+
+`--budget` then checks each selected rule's threads, and its memory with its shared inputs, each counted once, and a container rule's Podman client, against the budget a launch with the same `--max-threads` and `--max-memory` would have: it names each rule that does not fit and the largest need, and exits 1 when `run` would refuse the launch.
 
 ## explain
 

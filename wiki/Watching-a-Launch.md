@@ -11,7 +11,7 @@ The header holds four gauges:
 - **progress**: a bar of the selected rules, split into done, running, waiting and failed, with the count of each.
 - **threads**: the threads reserved against the budget, and the CPU cores the run keeps busy.
 - **memory**: the memory reserved against the budget, and the memory the run uses.
-- **shared**: one line for each shared input, with its state and the memory it holds.
+- **shared**: one line for each shared input, with its state, the memory it holds, and how many rules have used it.
 
 Below it is a table of every selected rule, running rules first, then waiting, failed, done and pending ones:
 
@@ -33,7 +33,7 @@ On a narrow terminal the memory bar goes first, then the CPU column, then the me
 
 - <kbd>j</kbd> and <kbd>k</kbd>, or the up and down arrows, move the selection; <kbd>Space</kbd> and <kbd>b</kbd>, or <kbd>PgDn</kbd> and <kbd>PgUp</kbd>, move it a page; <kbd>g</kbd> and <kbd>G</kbd>, or <kbd>Home</kbd> and <kbd>End</kbd>, jump to the first and last rule.
 - <kbd>Enter</kbd>, <kbd>l</kbd> or the right arrow follows the selected attempt's standard error as it grows, with lines that mention an error in red and a warning in yellow; <kbd>o</kbd> switches to standard output.
-- <kbd>i</kbd> shows the selected rule in detail: its request, when it became ready and started, gauges of its CPU and memory against the request, how often it reached its memory limit, its stall times, and its last lines of output.
+- <kbd>i</kbd> shows the selected rule in detail: its request, the rules it reads from (`after`) and that read from it (`before`), the shared inputs it holds, when it became ready and started, gauges of its CPU and memory against the request, how often it reached its memory limit, its stall times, and its last lines of output.
 - <kbd>t</kbd> draws a timeline of the launch.
 - <kbd>a</kbd> shows all rules, <kbd>r</kbd> running and retrying ones, <kbd>w</kbd> waiting and pending ones, <kbd>f</kbd> failed, blocked and cancelled ones, and <kbd>d</kbd> done ones.
 - <kbd>/</kbd> searches rule names; <kbd>Enter</kbd> keeps the search and <kbd>Esc</kbd> clears it.

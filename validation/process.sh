@@ -163,6 +163,9 @@ new dir-input
 check "a rule reading a directory waits for the rules writing inside it" '[ "$(status_of s.json completed)" = 2 ] && [ "$(cat n.txt)" = 1 ]'
 "$workz" graph wf.toml --why write:read --format text > why.txt
 check "graph --why follows one path, naming the file each rule reads" '[ "$(cat why.txt)" = "$(printf "write\n  -> read  (reads d)")" ]'
+"$workz" plan wf.toml --budget --max-threads 2 --max-memory 32M > budget.txt
+brc=$?
+check "plan --budget names the rules that cannot fit the budget, as run would refuse them" '[ $brc = 1 ] && grep -q "^does not fit: write needs 1 thread and 64 MiB$" budget.txt && grep -q "^2 rules do not fit: run would refuse the launch$" budget.txt'
 
 new workdir
 mkdir data && echo hello > data/in.txt

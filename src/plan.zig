@@ -292,3 +292,76 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
 pub fn loadState(gpa: Allocator, root: []const u8, a: Allocator) !state.State {
     return state.loadRecorded(gpa, a, try records.recordsDir(a, root));
 }
+
+/// What `plan --budget` checks: the budget a launch would have.
+pub const Budget = struct {
+    threads: u32,
+    memory_mib: u64,
+    /// Neither was given: every CPU and three quarters of the memory.
+    defaults: bool,
+};
+
+/// Checks every selected rule against the budget as `run` does before a
+/// launch: its threads, and its memory with its shared inputs, each held
+/// once, and a container rule's Podman client. Returns how many rules
+/// cannot fit, so the launch would be refused.
+pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask: []const bool, b: Budget) !usize {
+    const units = @import("units.zig");
+    const run = @import("run.zig");
+    try w.print("\nbudget: {d} threads, ", .{b.threads});
+    try units.size(w, @floatFromInt(b.memory_mib));
+    try w.writeAll(if (b.defaults) " (the defaults; give --max-threads and --max-memory as for run)\n" else "\n");
+
+    // Each shared input's memory, counted once.
+    const shared = try a.alloc(?u64, wf.shared.len);
+    for (wf.shared, shared) |s, *mib| {
+        mib.* = null;
+        var used = false;
+        for (wf.rules, 0..) |r, i| if (mask[i]) for (r.shared) |n| {
+            if (std.mem.eql(u8, n, s.name)) used = true;
+        };
+        if (!used) continue;
+        if (s.memory_mib) |m| {
+            mib.* = m + run.container_client_mib;
+        } else if (s.path_abs) |p| {
+            // Mapped files take their pages; a file not there yet counts 0.
+            const bytes = state.pageBytes(gpa, p) catch 0;
+            mib.* = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
+        }
+        try w.print("shared {s}: ", .{s.name});
+        try units.size(w, @floatFromInt(mib.*.?));
+        try w.print(" held once{s}\n", .{if (s.memory_mib != null) ", with its Podman client" else ""});
+    }
+
+    var largest: ?usize = null;
+    var largest_need: u64 = 0;
+    var refused: usize = 0;
+    for (wf.rules, 0..) |r, i| {
+        if (!mask[i]) continue;
+        var need = run.reservedMib(&r);
+        for (r.shared) |n| if (wf.sharedIndex(n)) |si| {
+            need += shared[si] orelse 0;
+        };
+        if (need > largest_need) {
+            largest_need = need;
+            largest = i;
+        }
+        if (r.threads <= b.threads and need <= b.memory_mib) continue;
+        refused += 1;
+        if (refused > 10) continue;
+        try w.print("does not fit: {s} needs {d} {s} and ", .{ r.name, r.threads, if (r.threads == 1) "thread" else "threads" });
+        try units.size(w, @floatFromInt(need));
+        try w.writeAll("\n");
+    }
+    if (refused > 10) try w.print("and {d} more rules that do not fit\n", .{refused - 10});
+    if (largest) |i| {
+        try w.print("largest: {s} needs {d} {s} and ", .{ wf.rules[i].name, wf.rules[i].threads, if (wf.rules[i].threads == 1) "thread" else "threads" });
+        try units.size(w, @floatFromInt(largest_need));
+        try w.writeAll(" with its shared inputs\n");
+    }
+    if (refused > 0) {
+        try units.count(w, refused, "rule does", "rules do");
+        try w.writeAll(" not fit: run would refuse the launch\n");
+    } else try w.writeAll("every rule fits\n");
+    return refused;
+}

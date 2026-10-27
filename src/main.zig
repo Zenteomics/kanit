@@ -82,7 +82,7 @@ const commands = [_]Command{
         \\Prints, for every selected rule, whether a run would run it or reuse it and
         \\why, then how many of each. Nothing runs. 'dry-run' is another name for it.
         ,
-        .options = &([_]Opt{.{ .flag = "--summary", .desc = "count the decisions by reason instead" }} ++ rerun_opts),
+        .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
         \\workz plan workflow.toml
         \\workz plan workflow.toml --summary
@@ -771,6 +771,10 @@ fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
 const PlanExtra = struct {
     rerun: *bool,
     summary: ?*bool = null,
+    /// `--budget` and the budget it checks, for `plan` only.
+    budget: ?*bool = null,
+    max_threads: ?*?u32 = null,
+    max_memory: ?*?u64 = null,
     pass: *std.ArrayList([]const u8),
     threads: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
@@ -792,6 +796,21 @@ const PlanExtra = struct {
             try self.threads.append(self.a, value orelse return missingValue(arg));
             return 2;
         }
+        if (self.budget) |b| if (std.mem.eql(u8, arg, "--budget")) {
+            b.* = true;
+            return 1;
+        };
+        if (self.max_threads) |t| if (std.mem.eql(u8, arg, "--max-threads")) {
+            const v = value orelse return missingValue(arg);
+            t.* = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
+            if (t.*.? == 0) return invalidValue(arg, v, "use a whole number above 0");
+            return 2;
+        };
+        if (self.max_memory) |m| if (std.mem.eql(u8, arg, "--max-memory")) {
+            const v = value orelse return missingValue(arg);
+            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G");
+            return 2;
+        };
         if (std.mem.eql(u8, arg, "--pass-env")) {
             try self.pass.append(self.a, value orelse return missingValue(arg));
             return 2;
@@ -813,7 +832,11 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var reruns: std.ArrayList([]const u8) = .empty;
     var summary = false;
     var threads: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
+    var budget = false;
+    var max_threads: ?u32 = null;
+    var max_memory: ?u64 = null;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory })) |e| return e;
+    if (!budget and (max_threads != null or max_memory != null)) return fail("--max-threads and --max-memory set the budget --budget checks; give --budget too", .{});
     if (extraArgs(c, &common)) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
@@ -829,8 +852,14 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     if (summary) try plan.printSummary(&w.interface, &ctx, l.mask) else try plan.printPlan(&w.interface, &ctx, l.mask);
+    var refused: usize = 0;
+    if (budget) refused = try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, l.mask, .{
+        .threads = max_threads orelse run.defaultThreads(),
+        .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
+        .defaults = max_threads == null and max_memory == null,
+    });
     try w.interface.flush();
-    return .ok;
+    return if (refused > 0) .failed else .ok;
 }
 
 fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
