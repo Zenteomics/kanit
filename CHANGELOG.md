@@ -6,6 +6,15 @@ All notable changes to workz will be documented in this file. The format follows
 
 ## [Unreleased]
 
+workz stands on its own, and adds what a scientist running real pipelines on one workstation needs next. `report --methods` names the workflow, engine, tool versions, images and commands behind a working directory's results; a failed rule keeps the log its tool wrote; a moved project keeps every rule reused; `validate` lists every problem at once; container rules count their Podman client in the memory budget; `clean --previous` reclaims the outputs reruns replaced; and `run --threads` tries another thread count for one launch.
+
+Four changes need action:
+
+- **Expect every rule to run once.** Rule keys name paths inside the working directory relative to it, so the engine key moves to 3. `state.json` moves to format 4, which 0.4.0 and earlier refuse; to go back, delete `.workz/state.json`, which reruns every rule. Workflows that use the new `diagnostics` or `version` keys need 0.5.0.
+- **Delete `wait` from resource groups**, and `--resume-failed` and `--provenance` from `run` command lines: workz no longer accepts them.
+- **Budget 32 MiB more per container rule.** A container rule or service reserves 32 MiB beside its request for its Podman client, so a container rule within 32 MiB of `--max-memory` is refused, and fewer may run at once on a tight budget.
+- **Update scripts that read records.** `record.json` adds `diagnostics`, `image` and `version`; `summary.json` and `status --json` add `previous_bytes`, and each failure adds `diagnostics`; `launch.json` adds `workflow_name`, `workflow_version` and `thread_overrides`; the `output_preserved` event adds `bytes`; a launch whose rules name `version` writes `versions.json`. Workflow errors arrive as several lines, one per problem, under their count, and problems found between rules name their line.
+
 ### Added
 
 - **Failures you can read.** A rule may name `diagnostics`, files such as STAR's `Log.out` where a tool writes why it failed. A failed attempt keeps the last 64 KiB of each in its `diagnostics/` directory; the terminal, `status`, `workz logs` and the HTML page show them, and the failure reason quotes the first one when standard error is empty. `record.json` and the summary's `failures` list them.
