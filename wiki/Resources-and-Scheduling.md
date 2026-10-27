@@ -18,16 +18,18 @@ A rule whose request alone exceeds the budget can never start, so the launch ref
 workz: rule assemble requests 32 threads; the run allows 8: raise --max-threads, or lower the rule's threads
 ```
 
+`workz plan --budget` makes the same check, and the one for memory with shared inputs, before a launch ([Command reference](Command-Reference.md#plan)).
+
 ## When a rule starts
 
 A rule is ready when every rule that produces one of its inputs has completed. A ready rule starts when all of these fit, checked in this order:
 
 1. Its threads fit in the threads not reserved by running rules.
-2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory. A container rule also reserves 32 MiB for its Podman client ([Containers](Containers-and-Services.md#container-rules)).
 3. One more job fits under `--jobs`.
 4. For each resource group it uses, its units fit in the group's free capacity.
 
-The first check that fails is the reason it waits: `threads`, `memory`, `jobs` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared inputs`. Once the budget has room, the time until the engine starts the rule counts as `starting`: the engine was recording the attempts that ended and starting the rules before it, which shows when rules take only milliseconds. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
+The first check that fails is the reason it waits: `threads`, `memory`, `jobs` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared:NAME`, naming the first that is not ready. Once the budget has room, the time until the engine starts the rule counts as `starting`, while the engine records attempts that ended and starts other rules; it shows when rules take only milliseconds. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
 
 Every ready rule that fits starts at once, so a large rule waiting for room never holds back a small rule behind it, and the machine stays busy. The other side of that choice: nothing is reserved for a waiting rule, so a large rule can keep waiting while smaller ones take the room as it frees. Its waiting time shows in the reports, and a smaller request or a resource group around the small rules lets it in sooner.
 
@@ -73,8 +75,6 @@ groups = { disk = 1 }
 
 At most `max` units are taken at once across all running rules; a rule whose units do not fit waits with reason `group:disk`. Use groups for limits the CPU and memory budget cannot express: rules that read from the same disk, a tool with a licence for two users, or a web service that allows a few connections. A rule may take several units, and several groups.
 
-`workz report --bottlenecks` says, for each group that held rules back, whether the budget had room for them while they waited, which means a larger `max` would have started them earlier ([Reports](Reports.md#what-limited-the-launch)).
-
 ## Shared inputs
 
 A shared input is a large read-only file or directory, usually an index, that many rules read at the same time:
@@ -97,7 +97,7 @@ Before the first rule that uses it starts, workz starts a holder process that ma
 
 - The holder stays while a rule that has yet to run needs it, and stops after its last user. When a waiting rule needs memory that only an idle holder occupies, the holder gives way.
 - With isolation, workz sets the run scope's `MemoryLow` at the start of the launch to the total size of its shared inputs and services, so other work on the machine does not push an index out of memory.
-- A shared file input is also an input of every rule that uses it, so rebuilding the index reruns them; there is no need to list it in `input` as well.
+- A shared input's path, a mapped file or a service's index, is also an input of every rule that uses it, so rebuilding the index reruns them; there is no need to list it in `input` as well.
 - A shared input may not contain the output of a rule.
 
 For an index a tool loads into System V shared memory, such as a STAR genome, use a [shared service](Containers-and-Services.md#shared-services) instead.
@@ -108,12 +108,28 @@ On the demo workflow from [Reports](Reports.md), with six samples through qc, tr
 
 ```text
 waiting for resources (ready rules that waited, on average over the launch, and their rule-seconds)
-  threads                             3.0 rules     2m 24s
-  group:disk                          1.2 rules     58.2 s
-  loading shared inputs              <0.1 rules      0.2 s
+  threads                             3.0 rules     2m 23s
+  group:disk                          1.2 rules     58.7 s
+  loading shared:genome              <0.1 rules      0.2 s
+  starting                           <0.1 rules      54 ms
+  starting: the budget had room; the engine was recording ended attempts and starting other rules
 
 resource groups (while their rules waited)
-  disk                              58.2 s waited; 1 run sample while they waited, too few to judge
+  disk                              58.7 s waited; 1 run sample while they waited, too few to judge
 ```
 
-Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. The waits for the `disk` group held only one run sample, taken every 5 s, so the report does not judge them. From three samples on, it gives the share in which a waiting rule would have fitted the free threads and memory: from 25%, a larger `max` for the group would help, if the disk can take it; below that, the budget was full and a higher `max` would not help much.
+Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. For each group, the report says whether the budget had room while the group's rules waited, which tells whether a larger `max` would start them earlier ([Reports](Reports.md#what-limited-the-launch)).
+
+## Trying another thread count
+
+`workz report --suggest` notes a step whose runs kept all their threads busy: it may run faster with more. To try that without editing a generated workflow, give the step a thread count for one launch, and compare:
+
+```sh
+workz plan --threads align=16          # which rules would run with it
+workz run --threads align=16 --max-threads 32 --max-memory 120G
+workz report --compare PREVIOUS_LAUNCH_ID
+```
+
+- `--threads STEP=N` sets the request of every rule of the step; repeat it for several steps. A misspelled step is refused with the nearest step name.
+- The request is part of the rule key, so the step's rules run again with it, and so do the rules that read their outputs, unless the step sets `cutoff = true` and its outputs come out byte for byte the same; their records keep the request they ran with. A later launch without `--threads` runs them again with the workflow's request.
+- `launch.json` records the overrides, and `report --compare` notes a step whose thread request differs, `threads 8 against 16`, beside its wall and CPU time. When it helped, change the request where the workflow is written.

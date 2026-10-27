@@ -41,6 +41,8 @@ pub const Options = struct {
     input_manifest: ?[]const u8 = null,
     isolation: bool = true,
     pass_env: []const []const u8 = &.{},
+    /// `--threads STEP=N` as given, applied to the workflow before the run.
+    thread_overrides: []const []const u8 = &.{},
     grace_s: u64 = 10,
     quiet: bool = false,
     /// The summary as JSON even when standard output is a terminal.
@@ -92,6 +94,8 @@ const Task = struct {
     timed_out: bool = false,
     cancelled: bool = false,
     reason: []const u8 = "",
+    /// The diagnostics kept from the last attempt, as the rule wrote them.
+    diagnostics: []const []const u8 = &.{},
     /// When the current attempt became ready (monotonic).
     ready_ns: i128 = 0,
     /// What keeps the ready attempt from starting, and since when.
@@ -106,6 +110,23 @@ const Task = struct {
 
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
+
+/// A tool's version command, run once per launch beside the rules: in the
+/// rule's image for a container rule, else on the host.
+const Version = struct {
+    command: []const u8,
+    /// Image reference and ID, or null for a host rule.
+    container: ?[]const u8,
+    image: ?[]const u8,
+    /// Its standard output and error.
+    file: []const u8,
+    pid: linux.pid_t = 0,
+    started: bool = false,
+    /// Exit status, 128 + N for signal N; null until it ends.
+    exit_code: ?u32 = null,
+    /// Killed when the launch ended before it did.
+    stopped: bool = false,
+};
 
 /// The keys this launch gives its rules, for `state.ruleKey`.
 const TaskKeys = struct {
@@ -206,7 +227,11 @@ const HolderState = enum { idle, loading, ready, stopping, failed };
 
 const Holder = struct {
     bytes: u64,
+    /// What it holds: a service's declared memory, its limit, or the pages
+    /// of mapped files.
     mib: u64,
+    /// What it takes from the budget: `mib`, and a service's Podman client.
+    reserve_mib: u64,
     users: u32 = 0,
     st: HolderState = .idle,
     pid: linux.pid_t = 0,
@@ -218,6 +243,10 @@ const Holder = struct {
     stop_fd: sys.Fd = -1,
     /// Starts of this holder in the launch, which name its containers.
     starts: u32 = 0,
+    /// Attempts that started using it since it last started, and when
+    /// that was (monotonic).
+    served: u32 = 0,
+    started_ns: i128 = 0,
     /// When a stopping holder is killed.
     kill_at: ?i128 = null,
     /// Why the holder failed; rules that need it fail with this reason.
@@ -332,6 +361,11 @@ const Engine = struct {
     helpers: std.ArrayList(linux.pid_t) = .empty,
     finished: usize = 0,
     selected: usize = 0,
+    /// Bytes of earlier outputs moved into attempts' `previous/`.
+    previous_bytes: u64 = 0,
+    /// The version commands of this launch, and the one running.
+    versions: std.ArrayList(Version) = .empty,
+    version_running: ?usize = null,
     console: Console = .{},
     /// Monotonic time the launch opened, for the elapsed time on the console.
     start_mono: i128 = 0,
@@ -376,8 +410,14 @@ const Engine = struct {
     /// On a terminal, the last `n` lines of an attempt's standard error under
     /// its event line, aligned with the event's text.
     fn showTail(self: *Engine, dir: []const u8, n: usize) void {
-        if (!self.console.on) return;
         const path = std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}) catch return;
+        self.showLines(path, n, null);
+    }
+
+    /// On a terminal, the last `n` lines of file `path`, indented under the
+    /// rule's line, after `title` when given.
+    fn showLines(self: *Engine, path: []const u8, n: usize, title: ?[]const u8) void {
+        if (!self.console.on) return;
         var digits: usize = 1;
         var v = self.selected;
         while (v >= 10) : (v /= 10) digits += 1;
@@ -386,6 +426,10 @@ const Engine = struct {
         if (lines.len == 0) return;
         const s: term.Style = .{ .on = self.console.color };
         self.clearStatus();
+        if (title) |t| {
+            for (0..indent) |_| std.debug.print(" ", .{});
+            std.debug.print("{s}{s}:{s}\n", .{ s.dim(), t, s.reset() });
+        }
         for (lines) |line| {
             for (0..indent) |_| std.debug.print(" ", .{});
             std.debug.print("{s}| {s}{s}\n", .{ s.dim(), line, s.reset() });
@@ -585,10 +629,10 @@ const Engine = struct {
         // together, as with one-thread rules and the default --jobs, the
         // reason names the resource.
         if (self.threads_used + r.threads > self.max_threads) return "threads";
-        var mem = r.memory_mib;
+        var mem = reservedMib(r);
         for (r.shared_index) |hi| {
             const h = &self.holders[hi];
-            if (!h.held) mem += h.mib;
+            if (!h.held) mem += h.reserve_mib;
         }
         if (self.memory_used - freed_mib + mem > self.max_memory) return "memory";
         if (self.jobs_used + 1 > self.max_jobs) return "jobs";
@@ -643,11 +687,11 @@ const Engine = struct {
         if (take) {
             self.jobs_used += 1;
             self.threads_used += r.threads;
-            self.memory_used += r.memory_mib;
+            self.memory_used += reservedMib(r);
         } else {
             self.jobs_used -= 1;
             self.threads_used -= r.threads;
-            self.memory_used -= r.memory_mib;
+            self.memory_used -= reservedMib(r);
             self.freed_ns = sys.monoNs();
         }
         for (r.groups) |gu| {
@@ -681,21 +725,32 @@ const Engine = struct {
             const r = self.rule(i);
             var waiting = false;
             var failure: ?[]const u8 = null;
+            // Every holder is taken before any starts: a holder that fails to
+            // start fails this rule, which releases all of them.
             for (r.shared_index) |hi| {
                 const h = &self.holders[hi];
-                if (!h.held) self.memory_used += h.mib;
+                if (!h.held) self.memory_used += h.reserve_mib;
                 h.held = true;
                 h.users += 1;
+            }
+            for (r.shared_index) |hi| {
+                const h = &self.holders[hi];
                 if (h.st == .failed and h.failure != null) failure = h.failure;
                 if (h.st == .idle) try self.startHolderOrFail(hi);
+                if (self.tasks[i].status != .staging) break;
                 if (h.st != .ready) waiting = true;
             }
+            if (self.tasks[i].status != .staging) continue;
             if (failure) |why| {
                 // A shared input that failed in this launch is not retried.
                 try self.setWait(i, null);
                 self.failStaged(i, why);
             } else if (waiting) {
-                try self.setWait(i, "loading shared inputs");
+                // Named by the first input not ready, as a group names itself.
+                const name = for (r.shared_index) |hi| {
+                    if (self.holders[hi].st != .ready) break self.wf.shared[hi].name;
+                } else unreachable;
+                try self.setWait(i, try std.fmt.allocPrint(self.a, "loading shared:{s}", .{name}));
             } else try self.start(i);
         }
     }
@@ -757,7 +812,7 @@ const Engine = struct {
     fn start(self: *Engine, i: usize) !void {
         self.prepareAndSpawn(i) catch |err| {
             if (err == error.OutOfMemory) return err;
-            self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot prepare the attempt: {s}", .{@errorName(err)}));
+            self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot prepare the attempt: {s}", .{sys.errorText(err)}));
         };
     }
 
@@ -797,13 +852,14 @@ const Engine = struct {
 
         // Keep earlier bytes of every output: move them into previous/.
         for (r.output_abs, 0..) |o, k| {
-            if (try sys.lstat(self.gpa, o)) |_| {
+            if (try sys.lstat(self.gpa, o)) |id| {
                 const prev = try std.fmt.allocPrint(self.a, "{s}/previous", .{t.dir});
                 try sys.mkdir(self.gpa, prev);
                 const dest = try std.fmt.allocPrint(self.a, "{s}/{d}-{s}", .{ prev, k, std.fs.path.basename(o) });
                 sys.rename(self.gpa, o, dest) catch |err|
-                    return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], @errorName(err) }));
-                self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest });
+                    return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], sys.errorText(err) }));
+                self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest, .bytes = id.size });
+                self.previous_bytes += id.size;
             }
             self.ids.forget(o);
             if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(self.gpa, d);
@@ -879,14 +935,16 @@ const Engine = struct {
             };
         }
         t.pid = process.spawn(&spec) catch |err| {
-            return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
+            return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
         };
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
+        self.queueVersion(r) catch {};
+        for (r.shared_index) |hi| self.holders[hi].served += 1;
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
-        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s });
+        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
         self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
     }
 
@@ -926,7 +984,7 @@ const Engine = struct {
     /// or null. A link replaces an earlier symlink, never another file.
     fn prepareWorkdir(self: *Engine, r: *const workflow.Rule, dir: []const u8) !?[]const u8 {
         sys.mkdirAll(self.gpa, dir) catch |err|
-            return try std.fmt.allocPrint(self.a, "cannot make workdir {s}: {s}", .{ r.workdir.?, @errorName(err) });
+            return try std.fmt.allocPrint(self.a, "cannot make workdir {s}: {s}", .{ r.workdir.?, sys.errorText(err) });
         for (r.links) |l| {
             const path = try std.fs.path.join(self.a, &.{ dir, l.name });
             if (try sys.lstat(self.gpa, path)) |id| {
@@ -934,7 +992,7 @@ const Engine = struct {
                 _ = try sys.check(linux.unlinkat(linux.AT.FDCWD, try self.a.dupeZ(u8, path), 0));
             }
             _ = sys.check(linux.symlinkat(try self.a.dupeZ(u8, l.target_abs), linux.AT.FDCWD, try self.a.dupeZ(u8, path))) catch |err|
-                return try std.fmt.allocPrint(self.a, "cannot make link {s}: {s}", .{ l.name, @errorName(err) });
+                return try std.fmt.allocPrint(self.a, "cannot make link {s}: {s}", .{ l.name, sys.errorText(err) });
         }
         return null;
     }
@@ -981,6 +1039,7 @@ const Engine = struct {
 
     fn startHolder(self: *Engine, hi: usize) !void {
         self.holders[hi].starts += 1;
+        self.holders[hi].started_ns = sys.monoNs();
         if (self.wf.shared[hi].isService()) return self.startService(hi);
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
@@ -1174,7 +1233,7 @@ const Engine = struct {
         if (h.pid > 0 and (h.st == .loading or h.st == .ready)) {
             self.stopHolder(h);
         } else if (h.pid == 0 and h.held) {
-            self.memory_used -= h.mib;
+            self.memory_used -= h.reserve_mib;
             self.freed_ns = sys.monoNs();
             h.held = false;
         }
@@ -1186,7 +1245,7 @@ const Engine = struct {
         for (self.holders, 0..) |h, hi| {
             if (h.users > 0 or !h.held or h.st == .stopping) continue;
             const uses = std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null;
-            if (!uses) mib += h.mib;
+            if (!uses) mib += h.reserve_mib;
         }
         return mib;
     }
@@ -1232,13 +1291,14 @@ const Engine = struct {
         }
         const peak = if (counters) |c| c.memory_peak else null;
         if (h.held and h.users == 0) {
-            self.memory_used -= h.mib;
+            self.memory_used -= h.reserve_mib;
             self.freed_ns = sys.monoNs();
             h.held = false;
         }
         if (was == .stopping) {
             h.st = .idle;
-            self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped) });
+            self.events.emit("shared_released", .{ .name = s.name, .memory_peak = peak, .cpu_s = taskCpu(counters, reaped), .users = h.served, .held_s = @as(f64, @floatFromInt(sys.monoNs() - h.started_ns)) / 1e9 });
+            h.served = 0;
             // A rule admitted while the holder stopped needs it again.
             if (h.users > 0) try self.startHolderOrFail(hi);
             return;
@@ -1274,7 +1334,7 @@ const Engine = struct {
     fn startHolderOrFail(self: *Engine, hi: usize) !void {
         self.startHolder(hi) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => try self.failHolder(hi, try std.fmt.allocPrint(self.a, "could not start: {s}", .{@errorName(err)}), null),
+            else => try self.failHolder(hi, try std.fmt.allocPrint(self.a, "could not start: {s}", .{sys.errorText(err)}), null),
         };
     }
 
@@ -1329,6 +1389,9 @@ const Engine = struct {
         var reason: []const u8 = "";
         // The last line of standard error, for a command that failed.
         var said: []const u8 = "";
+        // Quote stderr's last line, else a diagnostic's, for a command that
+        // exited with a status of its own.
+        var quote = false;
         const code = reaped.exitCode();
         const sig = reaped.signal();
         if (t.cancelled) {
@@ -1356,6 +1419,7 @@ const Engine = struct {
             } else {
                 reason = try std.fmt.allocPrint(self.a, "exited with status {d}", .{c});
                 said = try self.errorLine(t.dir);
+                quote = true;
             }
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
@@ -1364,7 +1428,14 @@ const Engine = struct {
         // that cannot be written fails the attempt, not the launch.
         self.writeSideFiles(r, t, ok, wall_s, reaped, counters) catch |err| {
             ok = false;
-            reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{@errorName(err)});
+            reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{sys.errorText(err)});
+        };
+        // A failed attempt keeps the tails of the files the rule names for
+        // its own failures; one that cannot be kept fails nothing else.
+        t.diagnostics = if (!ok and !t.cancelled) self.keepDiagnostics(r, t.dir) catch &.{} else &.{};
+        if (quote and said.len == 0) for (t.diagnostics) |d| {
+            said = try self.errorLineOf(try std.fs.path.join(self.a, &.{ t.dir, "diagnostics", d }));
+            if (said.len > 0) break;
         };
         // The recorded reason quotes that line; a terminal shows the error
         // lines themselves under the brief reason.
@@ -1407,8 +1478,11 @@ const Engine = struct {
             },
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
+            .image = if (r.container) |img| self.images.get(img) else null,
+            .version = r.version,
             .labels = r.labels,
             .outputs = outputs.items,
+            .diagnostics = t.diagnostics,
             .queue = .{ .waited_s = t.queued_s, .reasons = t.waits.items },
             .key = if (t.key) |k| k.key else null,
         });
@@ -1476,10 +1550,17 @@ const Engine = struct {
             if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, brief }) else {
                 self.alert("failed", "{s}: {s}", .{ r.name, brief });
                 self.showTail(t.dir, 3);
+                for (t.diagnostics) |d|
+                    self.showLines(try std.fs.path.join(self.a, &.{ t.dir, "diagnostics", d }), 3, d);
             }
         } else {
             const log = monitor.shownPath(self.a, t.dir);
-            if (t.cancelled) self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log }) else self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
+            if (t.cancelled)
+                self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log })
+            else if (t.diagnostics.len > 0)
+                self.alert("failed", "{s}: {s} (see {s}/stderr.log and {s}/diagnostics)", .{ r.name, reason, log, log })
+            else
+                self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
         }
         if (!t.cancelled and !self.opts.keep_going) self.beginStop();
     }
@@ -1526,7 +1607,12 @@ const Engine = struct {
     /// The last line of an attempt's standard error for its recorded
     /// reason: control characters blanked, cut to 200 bytes.
     fn errorLine(self: *Engine, dir: []const u8) ![]const u8 {
-        const line = try self.lastLine(dir);
+        return self.errorLineOf(try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}));
+    }
+
+    /// The last line of file `path`, made fit for a recorded reason.
+    fn errorLineOf(self: *Engine, path: []const u8) ![]const u8 {
+        const line = try self.lastLineOf(path);
         var end = @min(line.len, 200);
         // Cut before a UTF-8 continuation byte, never inside a character.
         while (end < line.len and end > 0 and line[end] & 0xc0 == 0x80) end -= 1;
@@ -1543,6 +1629,30 @@ const Engine = struct {
         const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
         const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
         return self.a.dupe(u8, trimmed[begin..]);
+    }
+
+    /// Keeps the last `diagnostics_max` bytes of each of the rule's
+    /// diagnostics files that exists, in the attempt's `diagnostics/` under
+    /// the path as written, and returns the paths kept. Only regular files
+    /// that resolve inside the working directory and outside `.workz/` are
+    /// read, so a symlink cannot copy a file from elsewhere into the records.
+    fn keepDiagnostics(self: *Engine, r: *const workflow.Rule, dir: []const u8) ![]const []const u8 {
+        if (r.diagnostics.len == 0) return &.{};
+        const root = (try sys.realpath(self.a, self.wf.root)) orelse return &.{};
+        var kept: std.ArrayList([]const u8) = .empty;
+        for (r.diagnostics, r.diagnostics_abs) |written, abs| {
+            const real = (sys.realpath(self.a, abs) catch null) orelse continue;
+            if (!workflow.within(root, real) or workflow.inRecords(root, real)) continue;
+            const id = (sys.stat(self.gpa, real) catch null) orelse continue;
+            if (!id.isReg()) continue;
+            const tail = sys.readTail(self.gpa, real, diagnostics_max) catch continue;
+            defer self.gpa.free(tail);
+            const copy = try std.fs.path.join(self.a, &.{ dir, "diagnostics", written });
+            try sys.mkdirAll(self.gpa, std.fs.path.dirname(copy).?);
+            try sys.writeFile(self.gpa, copy, tail);
+            try kept.append(self.a, written);
+        }
+        return kept.items;
     }
 
     fn recordFiles(self: *Engine, r: *const workflow.Rule) !void {
@@ -1595,7 +1705,9 @@ const Engine = struct {
                 const name = words.next() orelse "";
                 const result = try self.control(cmd, name);
                 self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
-                self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
+                if (name.len == 0) {
+                    self.alert("control", "{s}: {s}", .{ cmd, result });
+                } else self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
             }
         }
     }
@@ -1764,11 +1876,17 @@ const Engine = struct {
                 cpu_cores = @as(f64, @floatFromInt(cpu.? -| self.last_cpu_us.?)) / (@as(f64, @floatFromInt(now - self.last_sample_ns)) / 1e3);
             self.last_cpu_us = cpu;
         }
+        // The part of the reserved memory that shared inputs hold once.
+        var shared_mib: u64 = 0;
+        for (self.holders) |h| if (h.held) {
+            shared_mib += h.reserve_mib;
+        };
         self.events.emit("sample", .{
             .running = running_n,
             .ready = ready_n,
             .threads_reserved = self.threads_used,
             .memory_reserved_mib = self.memory_used,
+            .shared_reserved_mib = shared_mib,
             .memory_current = memory_current,
             .cpu_cores_used = cpu_cores,
         });
@@ -1784,7 +1902,7 @@ const Engine = struct {
         const path = self.page_path orelse return;
         const t0 = sys.monoNs();
         writePage(self.gpa, path, self.launch_dir) catch |err| {
-            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, @errorName(err) });
+            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, sys.errorText(err) });
             self.page_path = null;
             return;
         };
@@ -1810,12 +1928,146 @@ const Engine = struct {
         return n;
     }
 
+    // ---- tool versions ----
+
+    /// Queues the version command of rule `r`, once per launch for each
+    /// image and command, and starts it when no other one runs. They are
+    /// not counted in the budget: one at a time keeps the memory they take
+    /// beside it to one short command and, for an image, its Podman client.
+    fn queueVersion(self: *Engine, r: *const workflow.Rule) !void {
+        const command = r.version orelse return;
+        const image: ?[]const u8 = if (r.container) |img| self.images.get(img) else null;
+        for (self.versions.items) |v| {
+            const same_image = if (v.image) |x| (image != null and std.mem.eql(u8, x, image.?)) else image == null;
+            if (same_image and std.mem.eql(u8, v.command, command)) return;
+        }
+        const dir = try std.fs.path.join(self.a, &.{ self.launch_dir, "versions" });
+        try sys.mkdirAll(self.gpa, dir);
+        try self.versions.append(self.a, .{
+            .command = command,
+            .container = r.container,
+            .image = image,
+            .file = try std.fmt.allocPrint(self.a, "{s}/{d}.log", .{ dir, self.versions.items.len + 1 }),
+        });
+        self.startVersion();
+    }
+
+    /// Starts the next queued version command unless one runs or the
+    /// launch was interrupted.
+    fn startVersion(self: *Engine) void {
+        if (self.version_running != null or self.interrupted) return;
+        for (self.versions.items, 0..) |*v, vi| {
+            if (v.started) continue;
+            v.started = true;
+            v.pid = self.spawnVersion(v) catch |err| {
+                const text = std.fmt.allocPrint(self.a, "workz: cannot start the version command: {s}\n", .{sys.errorText(err)}) catch continue;
+                sys.writeFile(self.gpa, v.file, text) catch {};
+                continue;
+            };
+            self.version_running = vi;
+            return;
+        }
+    }
+
+    fn spawnVersion(self: *Engine, v: *const Version) !linux.pid_t {
+        const fd = try sys.openWrite(self.gpa, v.file, .truncate);
+        defer sys.close(fd);
+        var spec: process.Spec = undefined;
+        if (v.image) |id| {
+            // The isolation of a container rule, without its mounts: a
+            // version command reads nothing of the working directory.
+            const argv = try process.Vec.init(self.a, &.{
+                self.podman.?,                      "run",
+                "--rm",                             "--pull=never",
+                "--label",                          try std.fmt.allocPrint(self.a, "workz.workdir={s}", .{self.wf.root}),
+                "--label",                          try std.fmt.allocPrint(self.a, "workz.launch={s}", .{self.launch_id}),
+                "--network=none",                   "--cap-drop=ALL",
+                "--security-opt=no-new-privileges", "--security-opt=label=disable",
+                "--read-only",                      "--log-driver=none",
+                "--entrypoint",                     "/bin/sh",
+                id,                                 "-c",
+                v.command,
+            });
+            spec = .{ .path = (try self.a.dupeZ(u8, self.podman.?)).ptr, .argv = argv.items.ptr, .envp = self.envp.items.ptr, .cwd = "/", .stdin = self.devnull, .stdout = fd, .stderr = fd };
+        } else {
+            const argv = try process.Vec.init(self.a, &.{ "bash", "-c", v.command });
+            spec = .{
+                .path = self.bash.ptr,
+                .argv = argv.items.ptr,
+                .envp = self.envp.items.ptr,
+                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .stdin = self.devnull,
+                .stdout = fd,
+                .stderr = fd,
+                .userns = if (self.network) |n| n.userns else -1,
+                .netns = if (self.network) |n| n.netns else -1,
+            };
+        }
+        const pid = try process.spawn(&spec);
+        if (self.guard) |gd| gd.note('+', pid);
+        return pid;
+    }
+
+    /// The process of the running version command, or 0.
+    fn versionPid(self: *const Engine) linux.pid_t {
+        const vi = self.version_running orelse return 0;
+        return self.versions.items[vi].pid;
+    }
+
+    fn versionExited(self: *Engine, rp: process.Reaped) void {
+        const v = &self.versions.items[self.version_running.?];
+        if (self.guard) |gd| gd.note('-', v.pid);
+        v.exit_code = rp.exitCode() orelse if (rp.signal()) |s| 128 + @as(u32, @intCast(s)) else null;
+        self.version_running = null;
+        self.startVersion();
+    }
+
+    /// Writes `versions.json`: each version command with the start of its
+    /// output. A command still running is killed first.
+    fn writeVersions(self: *Engine) !void {
+        if (self.versions.items.len == 0) return;
+        if (self.version_running) |vi| {
+            // Its whole process group, as for an attempt.
+            process.signalGroup(self.versions.items[vi].pid, .KILL);
+            self.versions.items[vi].stopped = true;
+        }
+        const Entry = struct { command: []const u8, container: ?[]const u8, image: ?[]const u8, status: []const u8, exit_code: ?u32, output: []const u8 };
+        var entries: std.ArrayList(Entry) = .empty;
+        for (self.versions.items) |v| {
+            const head = try sys.readHead(self.gpa, v.file, version_output_max);
+            defer self.gpa.free(head);
+            try entries.append(self.a, .{
+                .command = v.command,
+                .container = v.container,
+                .image = v.image,
+                .status = if (!v.started) "not run" else if (v.stopped) "stopped" else if (v.exit_code == 0) "completed" else "failed",
+                .exit_code = v.exit_code,
+                .output = try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n")),
+            });
+        }
+        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), entries.items);
+    }
+
     fn helper(self: *Engine, pid: ?linux.pid_t) void {
         if (pid) |p| self.helpers.append(self.gpa, p) catch {};
     }
 
     /// Waits up to `limit_s` for the Podman commands still running, so a
     /// launch ends with the containers it removed gone.
+    /// Lets the version commands still queued or running finish, for at most
+    /// `limit_s` seconds in all. An interrupted launch, or a signal while
+    /// waiting, ends the wait: they must not hold the launch open.
+    fn awaitVersions(self: *Engine, limit_s: u64) void {
+        const until = sys.monoNs() + @as(i128, limit_s) * std.time.ns_per_s;
+        while (self.version_running != null and !self.interrupted and sys.monoNs() < until) {
+            var fds = [_]linux.pollfd{.{ .fd = self.sigfd, .events = linux.POLL.IN, .revents = 0 }};
+            process.wait(&fds, until);
+            const seen = process.readSignals(self.sigfd);
+            if (process.has(seen, .INT) or process.has(seen, .TERM) or process.has(seen, .HUP)) break;
+            self.reapAll() catch {};
+        }
+    }
+
     fn awaitHelpers(self: *Engine, limit_s: u64) void {
         const until = sys.monoNs() + @as(i128, limit_s) * std.time.ns_per_s;
         while (self.helpers.items.len > 0 and sys.monoNs() < until) {
@@ -1838,6 +2090,8 @@ const Engine = struct {
                     try self.holderExited(hi, rp);
                     break;
                 }
+            } else if (rp.pid == self.versionPid()) {
+                self.versionExited(rp);
             } else for (self.helpers.items, 0..) |pid, k| {
                 if (pid == rp.pid) {
                     _ = self.helpers.swapRemove(k);
@@ -1913,11 +2167,37 @@ const Engine = struct {
     }
 };
 
+/// Whether `--threads` set the request of step `step`.
+fn overridden(overrides: []const []const u8, step: []const u8) bool {
+    for (overrides) |o| {
+        const eq = std.mem.lastIndexOfScalar(u8, o, '=') orelse continue;
+        if (std.mem.eql(u8, o[0..eq], step)) return true;
+    }
+    return false;
+}
+
+/// Memory a container rule or service needs beside its request: its
+/// `podman run` client and conmon, which run in the launch's shared
+/// containers cgroup and take about 20 MiB together.
+pub const container_client_mib: u64 = 32;
+
+/// What admission reserves for rule `r`: its request, and for a container
+/// rule its Podman client's memory.
+pub fn reservedMib(r: *const workflow.Rule) u64 {
+    return r.memory_mib + if (r.container != null) container_client_mib else 0;
+}
+
 /// A wait for a part of the budget, which ends when the budget gets it back.
 fn budgetReason(reason: []const u8) bool {
     for ([_][]const u8{ "jobs", "threads", "memory" }) |r| if (std.mem.eql(u8, reason, r)) return true;
     return std.mem.startsWith(u8, reason, "group:");
 }
+
+/// How much of the start of a version command's output `versions.json` keeps.
+const version_output_max = 4096;
+
+/// How much of the end of each diagnostics file a failed attempt keeps.
+const diagnostics_max = 64 * 1024;
 
 /// Interval between run samples.
 const sample_interval_ns: i128 = 5 * std.time.ns_per_s;
@@ -1978,9 +2258,12 @@ const Summary = struct {
     /// For a launch refused because recorded outputs changed: each such
     /// output and the rule that wrote it.
     changed_outputs: []const ChangedOutput = &.{},
+    /// Bytes of earlier outputs the launch moved into `previous/`, kept
+    /// until `workz clean --previous` removes them.
+    previous_bytes: u64 = 0,
 };
 
-const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8, diagnostics: []const []const u8 };
 const ChangedOutput = struct { rule: []const u8, path: []const u8 };
 
 /// Writes a launch's page, replacing the file in one step so a browser
@@ -2089,6 +2372,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .launch = launch.id,
         .workflow = wf.path,
         .workflow_sha256 = &sys.sha256Bytes(wf.source),
+        .workflow_name = wf.name,
+        .workflow_version = wf.version,
         .workdir = wf.root,
         .started = try records.timeText(a, sys.realNs()),
         .max_threads = max_threads,
@@ -2101,6 +2386,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .timeout_s = opts.timeout_s,
         .input_manifest = opts.input_manifest,
         .pass_env = opts.pass_env,
+        .thread_overrides = opts.thread_overrides,
         .slice = opts.slice,
         .selected = selected,
     });
@@ -2109,32 +2395,41 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // Budget and input checks.
     var holders = try a.alloc(Holder, wf.shared.len);
     for (wf.shared, 0..) |s, i| {
-        // A service holds its declared memory; mapped files hold their pages.
+        // A service holds its declared memory, and its Podman client takes
+        // more of the budget; mapped files hold their pages.
         if (s.memory_mib) |mib| {
-            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib };
+            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
             continue;
         }
         const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, @errorName(err) }));
-        holders[i] = .{ .bytes = bytes, .mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable };
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) }));
+        const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
+        holders[i] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
     }
-    var produced: std.StringHashMapUnmanaged(void) = .empty;
-    defer produced.deinit(gpa);
-    for (wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try produced.put(gpa, o, {});
     // One identity memo for the launch: the input check below fills it for
     // the key computation.
     var ids = state.Identities.init(gpa);
     defer ids.deinit();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
-        var need = r.memory_mib;
-        for (r.shared_index) |hi| need += holders[hi].mib;
+        var need = reservedMib(&r);
+        for (r.shared_index) |hi| need += holders[hi].reserve_mib;
         if (r.threads > max_threads)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower the rule's threads", .{ r.name, r.threads, max_threads }));
-        if (need > max_memory)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, max_memory }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower {s}", .{ r.name, r.threads, max_threads, if (overridden(opts.thread_overrides, r.labels.step)) try std.fmt.allocPrint(a, "--threads {s}", .{r.labels.step}) else "the rule's threads" }));
+        if (need > max_memory) {
+            const with: []const u8 = if (r.shared_index.len > 0 and r.container != null)
+                " with its shared inputs and its Podman client"
+            else if (r.shared_index.len > 0)
+                " with its shared inputs"
+            else if (r.container != null)
+                " with its Podman client"
+            else
+                "";
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB{s}; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, with, max_memory }));
+        }
         for (r.input_abs, r.input) |in, written| {
-            if (produced.contains(in)) continue;
+            // A selected rule's producers are selected too.
+            if (g.produces(in)) continue;
             if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));
         }
     }
@@ -2205,6 +2500,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (opts.input_manifest) |mpath| {
         const m = try checkManifest(gpa, &st, &ids, mpath);
         events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
+        if (!m.usable) return refusal.refuse(.invalid, "the input manifest cannot be used");
         if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
     }
     // Content digests valid for this launch: cutoff outputs and manifest inputs.
@@ -2217,7 +2513,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (opts.isolation) {
         tree = cgroup.setup(gpa, a) catch |err| return refusal.refuse(.invalid, switch (err) {
             error.NotDelegated => "the run's scope cannot create cgroups for attempts: delegate the cpu, memory and pids controllers to the systemd user manager (see Installation), or use --no-isolation",
-            else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{@errorName(err)}),
+            else => try std.fmt.allocPrint(a, "cannot set up the run's cgroup: {s}", .{sys.errorText(err)}),
         });
     }
 
@@ -2259,7 +2555,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var containers_cg: ?[]const u8 = null;
     if (podman != null) if (tree) |t| {
         containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{@errorName(err)}));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{sys.errorText(err)}));
     };
     const sigfd = try process.setupSignals();
     defer sys.close(sigfd);
@@ -2308,11 +2604,11 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     if (tree != null) {
         engine.network = Network.start(gpa, a, &engine.envp, tree.?.root) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ @errorName(err), sys.errnoName() }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
     }
     defer if (engine.network) |n| n.stop();
     if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch |err| guard: {
-        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{@errorName(err)});
+        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{sys.errorText(err)});
         break :guard null;
     };
     defer if (engine.guard) |gd| gd.stop();
@@ -2329,18 +2625,18 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
     control: {
         sys.writeFile(gpa, engine.control_path, "") catch |err| {
-            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, @errorName(err) });
+            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
             break :control;
         };
         const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             break :control;
         };
         const pz = try a.dupeZ(u8, engine.control_path);
         if (sys.check(linux.inotify_add_watch(@intCast(ifd), pz, linux.IN.MODIFY))) |_| {
             engine.control_watch = @intCast(ifd);
         } else |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{@errorName(err)});
+            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             sys.close(@intCast(ifd));
         }
     }
@@ -2369,7 +2665,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every 5 s while the launch runs", .{monitor.shownPath(a, p)});
 
     engine.loop() catch |err| {
-        engine.fatal = @errorName(err);
+        engine.fatal = sys.errorText(err);
         engine.beginStop();
         // Wait for running tasks to end before writing the final records.
         while (engine.running() > 0) {
@@ -2380,7 +2676,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             engine.checkTimers();
         }
     };
+    engine.awaitVersions(10);
     engine.awaitHelpers(engine.opts.grace_s + 10);
+    engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{sys.errorText(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
     // their outputs would not match the inputs recorded in their key. A
@@ -2426,6 +2724,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             .status = @tagName(t.status),
             .reason = t.reason,
             .stderr = if (t.dir.len > 0) try std.fmt.allocPrint(a, "{s}/stderr.log", .{t.dir}) else null,
+            .diagnostics = try records.diagnosticPaths(a, t.dir, t.diagnostics),
         }),
         else => {},
     };
@@ -2450,6 +2749,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .elapsed_s = elapsed,
         .finished = try records.timeText(a, sys.realNs()),
         .@"error" = engine.fatal,
+        .previous_bytes = engine.previous_bytes,
         .engine_cost = engineCost(),
         .launch_dir = launch.dir,
         .failures = failures.items,
@@ -2474,7 +2774,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     return outcome;
 }
 
-pub const ManifestCheck = struct { ok: bool, files: usize = 0, read: usize = 0, bytes_read: u64 = 0, seconds: f64 = 0 };
+pub const ManifestCheck = struct { ok: bool, usable: bool = true, files: usize = 0, read: usize = 0, bytes_read: u64 = 0, seconds: f64 = 0 };
 
 /// Checks an input manifest: absolute paths to "sha256:<hex>", or to
 /// {"sha256": "sha256:<hex>", "stamp": {dev, ino, size, mtime_ns, ctime_ns}}.
@@ -2485,18 +2785,18 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
     const t0 = sys.monoNs();
     var res: ManifestCheck = .{ .ok = true };
     const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
-        std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, @errorName(err) });
-        return .{ .ok = false };
+        std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, sys.errorText(err) });
+        return .{ .ok = false, .usable = false };
     };
     defer gpa.free(bytes);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch {
         std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
-        return .{ .ok = false };
+        return .{ .ok = false, .usable = false };
     };
     defer parsed.deinit();
     if (parsed.value != .object) {
         std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
-        return .{ .ok = false };
+        return .{ .ok = false, .usable = false };
     }
     const sa = st.allocator();
     var hashed_any = false;

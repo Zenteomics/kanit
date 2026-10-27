@@ -27,6 +27,13 @@ pub const Rule = struct {
     log_abs: ?[]const u8,
     benchmark: ?[]const u8,
     benchmark_abs: ?[]const u8,
+    /// Files the command writes about its own failure, such as a tool's own
+    /// log; their tails are kept with a failed attempt. Not part of the key.
+    diagnostics: []const []const u8 = &.{},
+    diagnostics_abs: []const []const u8 = &.{},
+    /// A command that prints the version of the rule's tool, run once per
+    /// launch in the rule's image or on the host; not part of the key.
+    version: ?[]const u8 = null,
     retries: ?u32,
     timeout_s: ?u64,
     /// Hash outputs after success so consumers are reused when they repeat.
@@ -146,6 +153,18 @@ pub const Workflow = struct {
         self.arena.deinit();
     }
 
+    /// Sets the thread request of every rule of step `step` to `threads`, as
+    /// `run --threads` does for one launch; returns how many rules it set.
+    /// The request stays part of each rule's key.
+    pub fn overrideThreads(self: *Workflow, step: []const u8, threads: u32) usize {
+        var n: usize = 0;
+        for (@constCast(self.rules)) |*r| if (std.mem.eql(u8, r.labels.step, step)) {
+            r.threads = threads;
+            n += 1;
+        };
+        return n;
+    }
+
     pub fn ruleIndex(self: *const Workflow, name: []const u8) ?usize {
         for (self.rules, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
         return null;
@@ -164,24 +183,60 @@ pub const Workflow = struct {
 
 /// A rejected workflow: the message names the line when the source shows it.
 pub const Problem = struct {
+    /// Every problem found, one per line, each after its source line when
+    /// known; at most `max_listed` of them.
     message: []u8 = &.{},
-    /// Where in the source, when known: 1-based line, and column or 0.
+    /// Where the first problem is in the source, when known: 1-based line,
+    /// and column or 0.
     line: u32 = 0,
     col: u32 = 0,
+    /// How many problems were found.
+    count: u32 = 0,
+    /// The source line of what is being checked, which `add` names.
+    current_line: u32 = 0,
 
+    pub const max_listed = 50;
+
+    /// Records a problem and fails.
     pub fn set(self: *Problem, gpa: Allocator, comptime fmt: []const u8, args: anytype) error{ Invalid, OutOfMemory } {
-        self.message = try std.fmt.allocPrint(gpa, fmt, args);
+        try self.add(gpa, fmt, args);
         return error.Invalid;
+    }
+
+    /// Records a problem; checking goes on to find the next one.
+    pub fn add(self: *Problem, gpa: Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
+        self.count += 1;
+        if (self.count == 1 and self.current_line > 0) {
+            self.line = self.current_line;
+            self.col = 0;
+        }
+        if (self.count > max_listed) return;
+        const msg = try std.fmt.allocPrint(gpa, fmt, args);
+        defer gpa.free(msg);
+        // One problem is one line: names quoted from the file may hold
+        // control characters.
+        for (msg) |*ch| if (ch.* < 0x20 or ch.* == 0x7f) {
+            ch.* = ' ';
+        };
+        const entry = if (self.current_line > 0) try std.fmt.allocPrint(gpa, "line {d}: {s}", .{ self.current_line, msg }) else try gpa.dupe(u8, msg);
+        if (self.message.len == 0) {
+            self.message = entry;
+            return;
+        }
+        defer gpa.free(entry);
+        const joined = try std.mem.concat(gpa, u8, &.{ self.message, "\n", entry });
+        gpa.free(self.message);
+        self.message = joined;
     }
 };
 
-const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_groups", "shared" };
-const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
-const default_keys = [_][]const u8{ "threads", "memory" };
-const group_keys = [_][]const u8{ "max", "wait" };
-const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample" };
-const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
+pub const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_groups", "shared" };
+pub const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
+pub const default_keys = [_][]const u8{ "threads", "memory" };
+pub const group_keys = [_][]const u8{"max"};
+pub const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
+pub const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version" };
+pub const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
     gpa: Allocator,
@@ -217,14 +272,23 @@ const Parser = struct {
     fn fail(self: *Parser, at: []const toml.PathSegment, comptime fmt: []const u8, args: anytype) error{ Invalid, OutOfMemory } {
         const msg = try std.fmt.allocPrint(self.gpa, fmt, args);
         defer self.gpa.free(msg);
-        const l = self.line(at);
-        self.problem.line = l;
-        if (l > 0) return self.problem.set(self.gpa, "line {d}: {s}", .{ l, msg });
+        self.problem.current_line = self.line(at);
+        defer self.problem.current_line = 0;
         return self.problem.set(self.gpa, "{s}", .{msg});
+    }
+
+    /// `checkKeys`, recording an unknown key without failing, so the rest of
+    /// the table is still checked.
+    fn keysNoted(self: *Parser, table: *const toml.Table, allowed: []const []const u8, at: []const toml.PathSegment, where: []const u8) !void {
+        self.checkKeys(table, allowed, at, where) catch |err| switch (err) {
+            error.Invalid => {},
+            else => return err,
+        };
     }
 
     fn checkKeys(self: *Parser, table: *const toml.Table, allowed: []const []const u8, at: []const toml.PathSegment, where: []const u8) !void {
         var it = table.iterator();
+        var unknown = false;
         while (it.next()) |entry| {
             const key = entry.key_ptr.*;
             if (contains(allowed, key)) continue;
@@ -232,10 +296,13 @@ const Parser = struct {
             defer path.deinit(self.gpa);
             try path.appendSlice(self.gpa, at);
             try path.append(self.gpa, .{ .key = key });
-            if (closest(allowed, key)) |hint|
-                return self.fail(path.items, "unknown key '{s}' in {s}; did you mean '{s}'?", .{ key, where, hint });
-            return self.fail(path.items, "unknown key '{s}' in {s}", .{ key, where });
+            try noted(if (closest(allowed, key)) |hint|
+                self.fail(path.items, "unknown key '{s}' in {s}; did you mean '{s}'?", .{ key, where, hint })
+            else
+                self.fail(path.items, "unknown key '{s}' in {s}", .{ key, where }));
+            unknown = true;
         }
+        if (unknown) return error.Invalid;
     }
 
     fn str(self: *Parser, table: *const toml.Table, key: []const u8, at: []const toml.PathSegment, where: []const u8) !?[]const u8 {
@@ -309,6 +376,20 @@ const Parser = struct {
         return self.fail(path.items, fmt, args);
     }
 };
+
+/// Passes on running out of memory; a recorded problem lets checking go on.
+fn noted(err: error{ Invalid, OutOfMemory }) error{OutOfMemory}!void {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+}
+
+/// The value of `x`, or `default` when reading it recorded a problem, so
+/// checking goes on.
+fn keep(comptime T: type, x: anyerror!T, default: T) !T {
+    return x catch |err| switch (err) {
+        error.Invalid => default,
+        else => |e| e,
+    };
+}
 
 fn contains(list: []const []const u8, key: []const u8) bool {
     for (list) |k| if (std.mem.eql(u8, k, key)) return true;
@@ -415,7 +496,7 @@ pub fn parseDuration(text: []const u8) ?u64 {
     return if (total > 0) total else null;
 }
 
-fn validName(name: []const u8) bool {
+pub fn validName(name: []const u8) bool {
     if (name.len == 0 or name.len > 161) return false;
     if (!std.ascii.isAlphanumeric(name[0])) return false;
     for (name) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '.' or c == '-')) return false;
@@ -430,8 +511,8 @@ fn relativeLocal(p: []const u8) bool {
 
 /// Whether `abs`, a path at or below `root`, is the engine's record
 /// directory or inside it.
-fn inRecords(root: []const u8, abs: []const u8) bool {
-    const rel = abs[root.len..];
+pub fn inRecords(root: []const u8, abs: []const u8) bool {
+    const rel = if (std.mem.eql(u8, root, "/")) abs else abs[root.len..];
     return std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz");
 }
 
@@ -449,6 +530,9 @@ fn localPath(p: []const u8) bool {
 /// Parses and checks a workflow file. `root` is the working directory that
 /// relative paths resolve against. On error.Invalid, `problem` holds the reason.
 pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
+    // Problems found before this load, by a caller that reuses `problem`.
+    const prior = problem.count;
+    problem.current_line = 0;
     var wf: Workflow = undefined;
     wf.arena = std.heap.ArenaAllocator.init(gpa);
     errdefer wf.arena.deinit();
@@ -478,7 +562,8 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
     defer toml.deinit(doc, gpa);
 
     var p: Parser = .{ .gpa = gpa, .arena = arena, .source = source, .spans = &entries, .headers = &headers, .problem = problem };
-    try p.checkKeys(doc, &top_keys, &.{}, "the workflow document");
+    // An unknown key is reported, and the rest is still checked.
+    try p.keysNoted(doc, &top_keys, &.{}, "the workflow document");
 
     // [workflow]
     const meta = switch (doc.get("workflow") orelse return problem.set(gpa, "missing [workflow] table", .{})) {
@@ -486,9 +571,12 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         else => return problem.set(gpa, "workflow must be a table", .{}),
     };
     const at_wf = [_]toml.PathSegment{.{ .key = "workflow" }};
-    try p.checkKeys(meta, &workflow_keys, &at_wf, "[workflow]");
-    wf.name = (try p.str(meta, "name", &at_wf, "workflow")) orelse return p.fail(&at_wf, "workflow.name is required", .{});
-    wf.version = (try p.str(meta, "version", &at_wf, "workflow")) orelse "";
+    try p.keysNoted(meta, &workflow_keys, &at_wf, "[workflow]");
+    wf.name = (try keep(?[]const u8, p.str(meta, "name", &at_wf, "workflow"), "")) orelse name: {
+        try noted(p.fail(&at_wf, "workflow.name is required", .{}));
+        break :name "";
+    };
+    wf.version = (try keep(?[]const u8, p.str(meta, "version", &at_wf, "workflow"), null)) orelse "";
     if (try p.int(meta, "format_version", &at_wf, "workflow")) |v| {
         if (v != format_version) return p.failKey(&at_wf, "format_version", "workflow format_version {d} is not supported; this engine reads format {d}", .{ v, format_version });
     }
@@ -502,9 +590,9 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             else => return problem.set(gpa, "defaults must be a table", .{}),
         };
         const at = [_]toml.PathSegment{.{ .key = "defaults" }};
-        try p.checkKeys(d, &default_keys, &at, "[defaults]");
-        default_threads = try p.int(d, "threads", &at, "defaults");
-        default_memory = try p.str(d, "memory", &at, "defaults");
+        try p.keysNoted(d, &default_keys, &at, "[defaults]");
+        default_threads = try keep(?i64, p.int(d, "threads", &at, "defaults"), null);
+        default_memory = try keep(?[]const u8, p.str(d, "memory", &at, "defaults"), null);
     }
 
     // [resource_groups.*]
@@ -516,18 +604,11 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         };
         var it = gt.iterator();
         while (it.next()) |e| {
-            const at = [_]toml.PathSegment{ .{ .key = "resource_groups" }, .{ .key = e.key_ptr.* } };
-            const g = switch (e.value_ptr.*) {
-                .table => |t| t,
-                else => return p.fail(&at, "resource_groups.{s} must be a table", .{e.key_ptr.*}),
+            const g = parseGroup(&p, e.key_ptr.*, e.value_ptr.*) catch |err| switch (err) {
+                error.Invalid => continue,
+                else => return err,
             };
-            try p.checkKeys(g, &group_keys, &at, "a resource group");
-            const max = (try p.int(g, "max", &at, "resource group")) orelse return p.fail(&at, "resource_groups.{s}.max is required", .{e.key_ptr.*});
-            if (max < 1 or max > 1_000_000) return p.failKey(&at, "max", "resource_groups.{s}.max must be between 1 and 1000000", .{e.key_ptr.*});
-            if (try p.str(g, "wait", &at, "resource group")) |w| {
-                if (!std.mem.eql(u8, w, "queue")) return p.failKey(&at, "wait", "resource_groups.{s}.wait must be \"queue\"", .{e.key_ptr.*});
-            }
-            try groups.append(arena, .{ .name = try arena.dupe(u8, e.key_ptr.*), .max = @intCast(max) });
+            try groups.append(arena, g);
         }
     }
     wf.groups = groups.items;
@@ -541,48 +622,11 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         };
         var it = st.iterator();
         while (it.next()) |e| {
-            const at = [_]toml.PathSegment{ .{ .key = "shared" }, .{ .key = e.key_ptr.* } };
-            const s = switch (e.value_ptr.*) {
-                .table => |t| t,
-                else => return p.fail(&at, "shared.{s} must be a table", .{e.key_ptr.*}),
+            const s = parseShared(&p, root, e.key_ptr.*, e.value_ptr.*) catch |err| switch (err) {
+                error.Invalid => continue,
+                else => return err,
             };
-            if (!validName(e.key_ptr.*)) return p.fail(&at, "invalid shared name '{s}'", .{e.key_ptr.*});
-            try p.checkKeys(s, &shared_keys, &at, "a shared input");
-            const sp = try p.str(s, "path", &at, "shared");
-            if (sp) |shared_path| if (!localPath(shared_path)) return p.failKey(&at, "path", "shared.{s}.path must be an explicit local path", .{e.key_ptr.*});
-            const image = try p.str(s, "container", &at, "shared");
-            const command = try p.str(s, "command", &at, "shared");
-            const memory = try p.str(s, "memory", &at, "shared");
-            if (image == null) {
-                if (sp == null) return p.fail(&at, "shared.{s} needs a path, or a container, command and memory for a service", .{e.key_ptr.*});
-                if (command != null or memory != null) return p.fail(&at, "shared.{s}: command and memory belong to a service, which needs a container", .{e.key_ptr.*});
-            } else {
-                if (command == null) return p.failKey(&at, "container", "shared.{s}: a service needs a command", .{e.key_ptr.*});
-                if (memory == null) return p.failKey(&at, "container", "shared.{s}: a service needs the memory it holds", .{e.key_ptr.*});
-            }
-            const mib: ?u64 = if (memory) |m| parseMemoryMib(m) orelse return p.failKey(&at, "memory", "shared.{s}: invalid memory '{s}'", .{ e.key_ptr.*, m }) else null;
-            const timeout_s: ?u64 = if (try p.str(s, "timeout", &at, "shared")) |text| blk: {
-                if (image == null) return p.failKey(&at, "timeout", "shared.{s}: timeout limits a service's loading, which needs a container", .{e.key_ptr.*});
-                break :blk parseDuration(text) orelse return p.failKey(&at, "timeout", "shared.{s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ e.key_ptr.*, text });
-            } else null;
-            const retries: u32 = if (try p.int(s, "retries", &at, "shared")) |n| blk: {
-                if (image == null) return p.failKey(&at, "retries", "shared.{s}: retries start a service again, which needs a container", .{e.key_ptr.*});
-                if (n < 0 or n > 3) return p.failKey(&at, "retries", "shared.{s}: retries must be between 0 and 3", .{e.key_ptr.*});
-                break :blk @intCast(n);
-            } else 0;
-            const svc_mounts = try p.imageMounts(s, &at, "shared", e.key_ptr.*, root);
-            if (svc_mounts.len > 0 and image == null) return p.failKey(&at, "mounts", "shared.{s}: mounts place host files inside a service's image, which needs a container", .{e.key_ptr.*});
-            try shared.append(arena, .{
-                .name = try arena.dupe(u8, e.key_ptr.*),
-                .path = sp,
-                .path_abs = if (sp) |shared_path| try sys.absolute(arena, root, shared_path) else null,
-                .container = image,
-                .command = command,
-                .memory_mib = mib,
-                .timeout_s = timeout_s,
-                .retries = retries,
-                .mounts = svc_mounts,
-            });
+            try shared.append(arena, s);
         }
     }
     wf.shared = shared.items;
@@ -593,175 +637,20 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         .array => |a| a,
         else => return problem.set(gpa, "rules must be an array of tables", .{}),
     };
-    const rules = try arena.alloc(Rule, rules_a.items.len);
+    var rules: std.ArrayList(Rule) = .empty;
     for (rules_a.items, 0..) |rv, i| {
-        const at = [_]toml.PathSegment{ .{ .key = "rules" }, .{ .index = i } };
-        const r = switch (rv) {
-            .table => |t| t,
-            else => return p.fail(&at, "rules[{d}] must be a table", .{i}),
+        const r = parseRule(&p, &wf, root, default_threads, default_memory, i, rv) catch |err| switch (err) {
+            error.Invalid => continue,
+            else => return err,
         };
-        try p.checkKeys(r, &rule_keys, &at, "a rule");
-        const name = (try p.str(r, "name", &at, "rule")) orelse return p.fail(&at, "rule {d} has no name", .{i + 1});
-        if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
-        const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
-        var input = try p.strings(r, "input", &at, name);
-        const output = try p.strings(r, "output", &at, name);
-        const mounts = try p.imageMounts(r, &at, "rule", name, root);
-        if (mounts.len > 0) {
-            // Each mount source is also an input of the rule.
-            var extra: std.ArrayList([]const u8) = .empty;
-            try extra.appendSlice(arena, input);
-            for (mounts) |m| {
-                const listed = for (extra.items) |in| {
-                    if (std.mem.eql(u8, in, m.source)) break true;
-                } else false;
-                if (!listed) try extra.append(arena, m.source);
-            }
-            input = extra.items;
-        }
-        if (output.len == 0) return p.fail(&at, "rule {s} must declare output files", .{name});
-
-        var threads: ?i64 = try p.int(r, "threads", &at, name);
-        var memory: ?[]const u8 = try p.str(r, "memory", &at, name);
-        var group_uses: std.ArrayList(GroupUse) = .empty;
-        var shared_uses: []const []const u8 = &.{};
-        if (r.get("resources")) |resv| {
-            const res_at = [_]toml.PathSegment{ .{ .key = "rules" }, .{ .index = i }, .{ .key = "resources" } };
-            const res = switch (resv) {
-                .table => |t| t,
-                else => return p.fail(&res_at, "rule {s}: resources must be a table", .{name}),
-            };
-            try p.checkKeys(res, &resource_keys, &res_at, "rule resources");
-            if (try p.int(res, "threads", &res_at, name)) |t| threads = t;
-            if (try p.str(res, "memory", &res_at, name)) |m| memory = m;
-            shared_uses = try p.strings(res, "shared", &res_at, name);
-            if (res.get("groups")) |gv| {
-                const gt = switch (gv) {
-                    .table => |t| t,
-                    else => return p.failKey(&res_at, "groups", "rule {s}: groups must be a table of counts", .{name}),
-                };
-                var git = gt.iterator();
-                while (git.next()) |ge| {
-                    const count = switch (ge.value_ptr.*) {
-                        .integer => |n| n.value,
-                        else => return p.failKey(&res_at, "groups", "rule {s}: group counts must be integers", .{name}),
-                    };
-                    const units = std.math.cast(u32, count) orelse
-                        return p.failKey(&res_at, "groups", "rule {s}: group '{s}' count {d} must be from 1 to the group's max", .{ name, ge.key_ptr.*, count });
-                    try group_uses.append(arena, .{ .name = try arena.dupe(u8, ge.key_ptr.*), .count = units });
-                }
-            }
-        }
-        // A rule reads the files of the mapped shared inputs it uses, so each
-        // is also its input and a rebuilt index reruns it. A service's path
-        // is not: rules of the workflow may produce it during the launch.
-        for (shared_uses) |used| {
-            const sh = for (wf.shared) |s| {
-                if (std.mem.eql(u8, s.name, used)) break s;
-            } else continue;
-            if (sh.isService()) continue;
-            const sp = sh.path orelse continue;
-            const sp_abs = sh.path_abs orelse continue;
-            const listed = for (input) |in| {
-                if (std.mem.eql(u8, try sys.absolute(arena, root, in), sp_abs)) break true;
-            } else false;
-            if (listed) continue;
-            const more = try arena.alloc([]const u8, input.len + 1);
-            @memcpy(more[0..input.len], input);
-            more[input.len] = sp;
-            input = more;
-        }
-        if (threads == null) threads = default_threads;
-        if (memory == null) memory = default_memory;
-        const t = threads orelse 1;
-        if (t < 1 or t > 4096) return p.fail(&at, "rule {s}: threads must be between 1 and 4096", .{name});
-        const mtext = memory orelse return p.fail(&at, "rule {s} must declare memory", .{name});
-        const mib = parseMemoryMib(mtext) orelse return p.fail(&at, "rule {s}: invalid memory '{s}'", .{ name, mtext });
-        const priority = (try p.int(r, "priority", &at, name)) orelse 0;
-        if (priority < -1_000_000 or priority > 1_000_000) return p.failKey(&at, "priority", "rule {s}: priority must be between -1000000 and 1000000", .{name});
-        const retries: ?u32 = if (try p.int(r, "retries", &at, name)) |n| blk: {
-            if (n < 0 or n > 3) return p.failKey(&at, "retries", "rule {s}: retries must be between 0 and 3", .{name});
-            break :blk @intCast(n);
-        } else null;
-        const timeout_s: ?u64 = if (try p.str(r, "timeout", &at, name)) |text|
-            parseDuration(text) orelse return p.failKey(&at, "timeout", "rule {s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ name, text })
-        else
-            null;
-        const log = try p.str(r, "log", &at, name);
-        const bench = try p.str(r, "benchmark", &at, name);
-        const workdir = try p.str(r, "workdir", &at, name);
-        var links: std.ArrayList(Link) = .empty;
-        if (r.get("links")) |lv| {
-            const lt = switch (lv) {
-                .table => |tb| tb,
-                else => return p.failKey(&at, "links", "rule {s}: links must be a table of name = input path", .{name}),
-            };
-            if (workdir == null) return p.failKey(&at, "links", "rule {s}: links are made in the rule's workdir, which it does not set", .{name});
-            var lit = lt.iterator();
-            while (lit.next()) |le| {
-                const lname = le.key_ptr.*;
-                const target = switch (le.value_ptr.*) {
-                    .string => |s| s,
-                    else => return p.failKey(&at, "links", "rule {s}: the target of link '{s}' must be a string", .{ name, lname }),
-                };
-                if (lname.len == 0 or std.mem.indexOfScalar(u8, lname, '/') != null or std.mem.eql(u8, lname, ".") or std.mem.eql(u8, lname, ".."))
-                    return p.failKey(&at, "links", "rule {s}: link name '{s}' must be a plain file name", .{ name, lname });
-                try links.append(arena, .{ .name = try arena.dupe(u8, lname), .target = try arena.dupe(u8, target), .target_abs = try sys.absolute(arena, root, target) });
-            }
-        }
-
-        const container = try p.str(r, "container", &at, name);
-        var labels = deriveLabels(name, container);
-        for (label_keys) |key| if (try p.str(r, key, &at, name)) |value| {
-            if (!validLabel(value)) return p.failKey(&at, key, "rule {s}: {s} must be 1 to 200 characters without control characters", .{ name, key });
-            if (std.mem.eql(u8, key, "step")) {
-                labels.step = value;
-                labels.declared.step = true;
-            } else if (std.mem.eql(u8, key, "category")) {
-                labels.category = value;
-                labels.declared.category = true;
-            } else if (std.mem.eql(u8, key, "tool")) {
-                labels.tool = value;
-                labels.declared.tool = true;
-            } else {
-                labels.sample = value;
-                labels.declared.sample = true;
-            }
-        };
-
-        rules[i] = .{
-            .line = p.line(&at),
-            .name = name,
-            .input = input,
-            .input_abs = try absAll(arena, root, input),
-            .output = output,
-            .output_abs = try absAll(arena, root, output),
-            .shell = shell,
-            .threads = @intCast(t),
-            .memory_mib = mib,
-            .memory_text = mtext,
-            .priority = priority,
-            .log = log,
-            .log_abs = if (log) |l| try sys.absolute(arena, root, l) else null,
-            .benchmark = bench,
-            .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
-            .retries = retries,
-            .timeout_s = timeout_s,
-            .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
-            .container = container,
-            .mounts = mounts,
-            .workdir = workdir,
-            .workdir_abs = if (workdir) |d| try sys.absolute(arena, root, d) else null,
-            .links = links.items,
-            .groups = group_uses.items,
-            .shared = shared_uses,
-            .labels = labels,
-        };
+        try rules.append(arena, r);
     }
-    wf.rules = rules;
+    // Rules that did not parse leave the rest to check against nothing.
+    if (problem.count > prior) return error.Invalid;
+    wf.rules = rules.items;
     try checkRules(gpa, &wf, problem);
     // Every shared name now exists: resolve each rule's to indices once.
-    for (rules) |*r| {
+    for (rules.items) |*r| {
         const idx = try arena.alloc(usize, r.shared.len);
         for (r.shared, idx) |s, *x| x.* = wf.sharedIndex(s).?;
         r.shared_index = idx;
@@ -769,10 +658,252 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
     return wf;
 }
 
+/// Parses `[resource_groups.NAME]`.
+fn parseGroup(p: *Parser, name: []const u8, v: toml.Value) !Group {
+    const at = [_]toml.PathSegment{ .{ .key = "resource_groups" }, .{ .key = name } };
+    const g = switch (v) {
+        .table => |t| t,
+        else => return p.fail(&at, "resource_groups.{s} must be a table", .{name}),
+    };
+    try p.keysNoted(g, &group_keys, &at, "a resource group");
+    const max = (try p.int(g, "max", &at, "resource group")) orelse return p.fail(&at, "resource_groups.{s}.max is required", .{name});
+    if (max < 1 or max > 1_000_000) return p.failKey(&at, "max", "resource_groups.{s}.max must be between 1 and 1000000", .{name});
+    return .{ .name = try p.arena.dupe(u8, name), .max = @intCast(max) };
+}
+
+/// Parses `[shared.NAME]`, a mapped file input or a service.
+fn parseShared(p: *Parser, root: []const u8, name: []const u8, v: toml.Value) !Shared {
+    const arena = p.arena;
+    const at = [_]toml.PathSegment{ .{ .key = "shared" }, .{ .key = name } };
+    const s = switch (v) {
+        .table => |t| t,
+        else => return p.fail(&at, "shared.{s} must be a table", .{name}),
+    };
+    if (!validName(name)) return p.fail(&at, "invalid shared name '{s}'", .{name});
+    try p.keysNoted(s, &shared_keys, &at, "a shared input");
+    const sp = try p.str(s, "path", &at, "shared");
+    if (sp) |shared_path| if (!localPath(shared_path)) return p.failKey(&at, "path", "shared.{s}.path must be an explicit local path", .{name});
+    const image = try p.str(s, "container", &at, "shared");
+    const command = try p.str(s, "command", &at, "shared");
+    const memory = try p.str(s, "memory", &at, "shared");
+    if (image == null) {
+        if (sp == null) return p.fail(&at, "shared.{s} needs a path, or a container, command and memory for a service", .{name});
+        if (command != null or memory != null) return p.fail(&at, "shared.{s}: command and memory belong to a service, which needs a container", .{name});
+    } else {
+        if (command == null) return p.failKey(&at, "container", "shared.{s}: a service needs a command", .{name});
+        if (memory == null) return p.failKey(&at, "container", "shared.{s}: a service needs the memory it holds", .{name});
+    }
+    const mib: ?u64 = if (memory) |m| parseMemoryMib(m) orelse return p.failKey(&at, "memory", "shared.{s}: invalid memory '{s}'", .{ name, m }) else null;
+    const timeout_s: ?u64 = if (try p.str(s, "timeout", &at, "shared")) |text| blk: {
+        if (image == null) return p.failKey(&at, "timeout", "shared.{s}: timeout limits a service's loading, which needs a container", .{name});
+        break :blk parseDuration(text) orelse return p.failKey(&at, "timeout", "shared.{s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ name, text });
+    } else null;
+    const retries: u32 = if (try p.int(s, "retries", &at, "shared")) |n| blk: {
+        if (image == null) return p.failKey(&at, "retries", "shared.{s}: retries start a service again, which needs a container", .{name});
+        if (n < 0 or n > 3) return p.failKey(&at, "retries", "shared.{s}: retries must be between 0 and 3", .{name});
+        break :blk @intCast(n);
+    } else 0;
+    const svc_mounts = try p.imageMounts(s, &at, "shared", name, root);
+    if (svc_mounts.len > 0 and image == null) return p.failKey(&at, "mounts", "shared.{s}: mounts place host files inside a service's image, which needs a container", .{name});
+    return .{
+        .name = try arena.dupe(u8, name),
+        .path = sp,
+        .path_abs = if (sp) |shared_path| try sys.absolute(arena, root, shared_path) else null,
+        .container = image,
+        .command = command,
+        .memory_mib = mib,
+        .timeout_s = timeout_s,
+        .retries = retries,
+        .mounts = svc_mounts,
+    };
+}
+
+/// Parses rule `i` of `[[rules]]`.
+fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads: ?i64, default_memory: ?[]const u8, i: usize, rv: toml.Value) !Rule {
+    const arena = p.arena;
+    const at = [_]toml.PathSegment{ .{ .key = "rules" }, .{ .index = i } };
+    const r = switch (rv) {
+        .table => |t| t,
+        else => return p.fail(&at, "rules[{d}] must be a table", .{i}),
+    };
+    try p.keysNoted(r, &rule_keys, &at, "a rule");
+    const name = (try p.str(r, "name", &at, "rule")) orelse return p.fail(&at, "rule {d} has no name", .{i + 1});
+    if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
+    const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
+    var input = try p.strings(r, "input", &at, name);
+    const output = try p.strings(r, "output", &at, name);
+    const diagnostics = try p.strings(r, "diagnostics", &at, name);
+    const version = try p.str(r, "version", &at, name);
+    if (version) |v| if (std.mem.trim(u8, v, " \t\n").len == 0) return p.failKey(&at, "version", "rule {s}: version must be a command, such as \"STAR --version\"", .{name});
+    const mounts = try p.imageMounts(r, &at, "rule", name, root);
+    if (mounts.len > 0) {
+        // Each mount source is also an input of the rule.
+        var extra: std.ArrayList([]const u8) = .empty;
+        try extra.appendSlice(arena, input);
+        for (mounts) |m| {
+            const listed = for (extra.items) |in| {
+                if (std.mem.eql(u8, in, m.source)) break true;
+            } else false;
+            if (!listed) try extra.append(arena, m.source);
+        }
+        input = extra.items;
+    }
+    if (output.len == 0) return p.fail(&at, "rule {s} must declare output files", .{name});
+
+    var threads: ?i64 = try p.int(r, "threads", &at, name);
+    var memory: ?[]const u8 = try p.str(r, "memory", &at, name);
+    var group_uses: std.ArrayList(GroupUse) = .empty;
+    var shared_uses: []const []const u8 = &.{};
+    if (r.get("resources")) |resv| {
+        const res_at = [_]toml.PathSegment{ .{ .key = "rules" }, .{ .index = i }, .{ .key = "resources" } };
+        const res = switch (resv) {
+            .table => |t| t,
+            else => return p.fail(&res_at, "rule {s}: resources must be a table", .{name}),
+        };
+        try p.keysNoted(res, &resource_keys, &res_at, "rule resources");
+        if (try p.int(res, "threads", &res_at, name)) |t| threads = t;
+        if (try p.str(res, "memory", &res_at, name)) |m| memory = m;
+        shared_uses = try p.strings(res, "shared", &res_at, name);
+        if (res.get("groups")) |gv| {
+            const gt = switch (gv) {
+                .table => |t| t,
+                else => return p.failKey(&res_at, "groups", "rule {s}: groups must be a table of counts", .{name}),
+            };
+            var git = gt.iterator();
+            while (git.next()) |ge| {
+                const count = switch (ge.value_ptr.*) {
+                    .integer => |n| n.value,
+                    else => return p.failKey(&res_at, "groups", "rule {s}: group counts must be integers", .{name}),
+                };
+                const units = std.math.cast(u32, count) orelse
+                    return p.failKey(&res_at, "groups", "rule {s}: group '{s}' count {d} must be from 1 to the group's max", .{ name, ge.key_ptr.*, count });
+                try group_uses.append(arena, .{ .name = try arena.dupe(u8, ge.key_ptr.*), .count = units });
+            }
+        }
+    }
+    // A rule reads the files of the shared inputs it uses, a mapped file or
+    // a service's index, so each path is also its input: a rebuilt index
+    // reruns it, and a rule writing the index runs before it.
+    for (shared_uses) |used| {
+        const sh = for (wf.shared) |s| {
+            if (std.mem.eql(u8, s.name, used)) break s;
+        } else continue;
+        const sp = sh.path orelse continue;
+        const sp_abs = sh.path_abs orelse continue;
+        const listed = for (input) |in| {
+            if (std.mem.eql(u8, try sys.absolute(arena, root, in), sp_abs)) break true;
+        } else false;
+        if (listed) continue;
+        const more = try arena.alloc([]const u8, input.len + 1);
+        @memcpy(more[0..input.len], input);
+        more[input.len] = sp;
+        input = more;
+    }
+    if (threads == null) threads = default_threads;
+    if (memory == null) memory = default_memory;
+    const t = threads orelse 1;
+    if (t < 1 or t > 4096) return p.fail(&at, "rule {s}: threads must be between 1 and 4096", .{name});
+    const mtext = memory orelse return p.fail(&at, "rule {s} must declare memory", .{name});
+    const mib = parseMemoryMib(mtext) orelse return p.fail(&at, "rule {s}: invalid memory '{s}'", .{ name, mtext });
+    const priority = (try p.int(r, "priority", &at, name)) orelse 0;
+    if (priority < -1_000_000 or priority > 1_000_000) return p.failKey(&at, "priority", "rule {s}: priority must be between -1000000 and 1000000", .{name});
+    const retries: ?u32 = if (try p.int(r, "retries", &at, name)) |n| blk: {
+        if (n < 0 or n > 3) return p.failKey(&at, "retries", "rule {s}: retries must be between 0 and 3", .{name});
+        break :blk @intCast(n);
+    } else null;
+    const timeout_s: ?u64 = if (try p.str(r, "timeout", &at, name)) |text|
+        parseDuration(text) orelse return p.failKey(&at, "timeout", "rule {s}: invalid timeout '{s}' (use for example \"90s\", \"30m\", \"2h\")", .{ name, text })
+    else
+        null;
+    const log = try p.str(r, "log", &at, name);
+    const bench = try p.str(r, "benchmark", &at, name);
+    const workdir = try p.str(r, "workdir", &at, name);
+    var links: std.ArrayList(Link) = .empty;
+    if (r.get("links")) |lv| {
+        const lt = switch (lv) {
+            .table => |tb| tb,
+            else => return p.failKey(&at, "links", "rule {s}: links must be a table of name = input path", .{name}),
+        };
+        if (workdir == null) return p.failKey(&at, "links", "rule {s}: links are made in the rule's workdir, which it does not set", .{name});
+        var lit = lt.iterator();
+        while (lit.next()) |le| {
+            const lname = le.key_ptr.*;
+            const target = switch (le.value_ptr.*) {
+                .string => |s| s,
+                else => return p.failKey(&at, "links", "rule {s}: the target of link '{s}' must be a string", .{ name, lname }),
+            };
+            if (lname.len == 0 or std.mem.indexOfScalar(u8, lname, '/') != null or std.mem.eql(u8, lname, ".") or std.mem.eql(u8, lname, ".."))
+                return p.failKey(&at, "links", "rule {s}: link name '{s}' must be a plain file name", .{ name, lname });
+            try links.append(arena, .{ .name = try arena.dupe(u8, lname), .target = try arena.dupe(u8, target), .target_abs = try sys.absolute(arena, root, target) });
+        }
+    }
+
+    const container = try p.str(r, "container", &at, name);
+    var labels = deriveLabels(name, container);
+    for (label_keys) |key| if (try p.str(r, key, &at, name)) |value| {
+        if (!validLabel(value)) return p.failKey(&at, key, "rule {s}: {s} must be 1 to 200 characters without control characters", .{ name, key });
+        if (std.mem.eql(u8, key, "step")) {
+            labels.step = value;
+            labels.declared.step = true;
+        } else if (std.mem.eql(u8, key, "category")) {
+            labels.category = value;
+            labels.declared.category = true;
+        } else if (std.mem.eql(u8, key, "tool")) {
+            labels.tool = value;
+            labels.declared.tool = true;
+        } else {
+            labels.sample = value;
+            labels.declared.sample = true;
+        }
+    };
+
+    return .{
+        .line = p.line(&at),
+        .name = name,
+        .input = input,
+        .input_abs = try absAll(arena, root, input),
+        .output = output,
+        .output_abs = try absAll(arena, root, output),
+        .shell = shell,
+        .threads = @intCast(t),
+        .memory_mib = mib,
+        .memory_text = mtext,
+        .priority = priority,
+        .log = log,
+        .log_abs = if (log) |l| try sys.absolute(arena, root, l) else null,
+        .benchmark = bench,
+        .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
+        .diagnostics = diagnostics,
+        .diagnostics_abs = try absAll(arena, root, diagnostics),
+        .version = version,
+        .retries = retries,
+        .timeout_s = timeout_s,
+        .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,
+        .container = container,
+        .mounts = mounts,
+        .workdir = workdir,
+        .workdir_abs = if (workdir) |d| try sys.absolute(arena, root, d) else null,
+        .links = links.items,
+        .groups = group_uses.items,
+        .shared = shared_uses,
+        .labels = labels,
+    };
+}
+
 fn absAll(arena: Allocator, root: []const u8, paths: []const []const u8) ![]const []const u8 {
     const out = try arena.alloc([]const u8, paths.len);
     for (paths, 0..) |path, i| out[i] = try sys.absolute(arena, root, path);
     return out;
+}
+
+/// How rule keys and `state.json` name path `abs`: relative to the working
+/// directory `root` when inside it, so moving the project keeps them, else
+/// absolute.
+pub fn keyPath(root: []const u8, abs: []const u8) []const u8 {
+    if (std.mem.eql(u8, root, "/")) return abs;
+    if (std.mem.eql(u8, abs, root)) return ".";
+    if (abs.len > root.len and std.mem.startsWith(u8, abs, root) and abs[root.len] == '/') return abs[root.len + 1 ..];
+    return abs;
 }
 
 /// True when `path` is `root` or lies beneath it.
@@ -852,6 +983,7 @@ const PathCache = struct {
 };
 
 fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
+    const prior = problem.count;
     var names: std.StringHashMapUnmanaged(void) = .empty;
     defer names.deinit(gpa);
     var outputs: std.StringHashMapUnmanaged([]const u8) = .empty;
@@ -863,111 +995,180 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
     var cache: PathCache = .{ .gpa = gpa };
     defer cache.deinit();
 
+    // Each problem is recorded and checking goes on: a bad item skips only
+    // itself, so the items after it are still checked against the others.
     for (wf.rules) |r| {
-        // Errors about this rule show its line.
-        problem.line = r.line;
-        if ((try names.fetchPut(gpa, r.name, {})) != null) return problem.set(gpa, "line {d}: duplicate rule name '{s}'", .{ r.line, r.name });
-        for (r.input) |in| if (!localPath(in)) return problem.set(gpa, "rule {s}: input '{s}' must be an explicit local path", .{ r.name, in });
-        for (r.output, r.output_abs) |out, abs| {
-            try checkWritable(gpa, wf, &cache, r.name, out, abs, problem);
+        // Problems with this rule show its line.
+        problem.current_line = r.line;
+        // A second rule of the same name would repeat the first one's
+        // problems; it is reported once.
+        if ((try names.fetchPut(gpa, r.name, {})) != null) {
+            try problem.add(gpa, "duplicate rule name '{s}'", .{r.name});
+            continue;
+        }
+        for (r.input) |in| if (!localPath(in))
+            try problem.add(gpa, "rule {s}: input '{s}' must be an explicit local path", .{ r.name, in });
+        outs: for (r.output, r.output_abs) |out, abs| {
+            checkWritable(gpa, wf, &cache, r.name, out, abs, problem) catch |err| switch (err) {
+                error.Invalid => continue,
+                else => return err,
+            };
             if (outputs.get(abs)) |other| {
-                if (std.mem.eql(u8, other, r.name)) return problem.set(gpa, "rule {s} lists output '{s}' twice", .{ r.name, out });
-                return problem.set(gpa, "rules {s} and {s} both produce '{s}'", .{ other, r.name, out });
+                if (std.mem.eql(u8, other, r.name))
+                    try problem.add(gpa, "rule {s} lists output '{s}' twice", .{ r.name, out })
+                else
+                    try problem.add(gpa, "rules {s} and {s} both produce '{s}'", .{ other, r.name, out });
+                continue;
             }
             try outputs.put(gpa, abs, r.name);
             const out_id = try cache.stat(abs);
             if (out_id) |id| {
-                if ((try out_inodes.fetchPut(gpa, .{ .dev = id.dev, .ino = id.ino }, {})) != null)
-                    return problem.set(gpa, "rule {s}: output '{s}' is a hard link to another declared output", .{ r.name, out });
+                if ((try out_inodes.fetchPut(gpa, .{ .dev = id.dev, .ino = id.ino }, {})) != null) {
+                    try problem.add(gpa, "rule {s}: output '{s}' is a hard link to another declared output", .{ r.name, out });
+                    continue;
+                }
             }
             for (r.input_abs) |in| {
-                if (std.mem.eql(u8, in, abs)) return problem.set(gpa, "rule {s} cannot overwrite its own input '{s}'", .{ r.name, out });
+                if (std.mem.eql(u8, in, abs)) {
+                    try problem.add(gpa, "rule {s} cannot overwrite its own input '{s}'", .{ r.name, out });
+                    continue :outs;
+                }
                 const b = out_id orelse continue;
                 const a = (try cache.stat(in)) orelse continue;
-                if (a.dev == b.dev and a.ino == b.ino)
-                    return problem.set(gpa, "rule {s}: input and output '{s}' are the same file", .{ r.name, out });
+                if (a.dev == b.dev and a.ino == b.ino) {
+                    try problem.add(gpa, "rule {s}: input and output '{s}' are the same file", .{ r.name, out });
+                    continue :outs;
+                }
             }
         }
         for ([_]?[]const u8{ r.log, r.benchmark }, [_]?[]const u8{ r.log_abs, r.benchmark_abs }) |w, a| {
             const written = w orelse continue;
             const abs = a.?;
-            try checkWritable(gpa, wf, &cache, r.name, written, abs, problem);
-            if (side.get(abs)) |other| return problem.set(gpa, "rules {s} and {s} write the same log or benchmark '{s}'", .{ other, r.name, written });
+            checkWritable(gpa, wf, &cache, r.name, written, abs, problem) catch |err| switch (err) {
+                error.Invalid => continue,
+                else => return err,
+            };
+            if (side.get(abs)) |other| {
+                try problem.add(gpa, "rules {s} and {s} write the same log or benchmark '{s}'", .{ other, r.name, written });
+                continue;
+            }
             try side.put(gpa, abs, r.name);
         }
+        // Diagnostics are only read, after a failure: any file inside the
+        // working directory but outside the records.
+        for (r.diagnostics, r.diagnostics_abs, 0..) |written, abs, k| {
+            if (!relativeLocal(written))
+                try problem.add(gpa, "rule {s}: diagnostics '{s}' must be a relative path inside the working directory", .{ r.name, written })
+            else if (inRecords(wf.root, abs))
+                try problem.add(gpa, "rule {s}: diagnostics '{s}' is inside the engine record directory", .{ r.name, written })
+            else for (r.diagnostics_abs[0..k]) |earlier| {
+                if (std.mem.eql(u8, earlier, abs)) {
+                    try problem.add(gpa, "rule {s} lists diagnostics '{s}' twice", .{ r.name, written });
+                    break;
+                }
+            }
+        }
         for (r.groups) |g| {
-            const max = wf.groupMax(g.name) orelse return problem.set(gpa, "rule {s} uses undeclared resource group '{s}'", .{ r.name, g.name });
-            if (g.count < 1 or g.count > max) return problem.set(gpa, "rule {s}: group '{s}' count {d} must be from 1 to the group's max of {d}", .{ r.name, g.name, g.count, max });
+            const max = wf.groupMax(g.name) orelse {
+                try problem.add(gpa, "rule {s} uses undeclared resource group '{s}'", .{ r.name, g.name });
+                continue;
+            };
+            if (g.count < 1 or g.count > max)
+                try problem.add(gpa, "rule {s}: group '{s}' count {d} must be from 1 to the group's max of {d}", .{ r.name, g.name, g.count, max });
         }
         var services: usize = 0;
         for (r.shared) |s| if (wf.sharedIndex(s)) |si| if (wf.shared[si].isService()) {
             services += 1;
-            if (r.container == null) return problem.set(gpa, "rule {s} uses the shared service '{s}'; only container rules can join a service", .{ r.name, s });
+            if (r.container == null)
+                try problem.add(gpa, "rule {s} uses the shared service '{s}'; only container rules can join a service", .{ r.name, s });
         };
-        if (services > 1) return problem.set(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
+        if (services > 1)
+            try problem.add(gpa, "rule {s} uses {d} shared services; a rule can join one", .{ r.name, services });
         if (r.workdir) |d| {
             if (!relativeLocal(d) or !within(wf.root, r.workdir_abs.?) or std.mem.eql(u8, r.workdir_abs.?, wf.root))
-                return problem.set(gpa, "rule {s}: workdir '{s}' must be a directory below the working directory", .{ r.name, d });
-            if (inRecords(wf.root, r.workdir_abs.?))
-                return problem.set(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d });
+                try problem.add(gpa, "rule {s}: workdir '{s}' must be a directory below the working directory", .{ r.name, d })
+            else if (inRecords(wf.root, r.workdir_abs.?))
+                try problem.add(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d });
         }
         for (r.links) |l| {
             const is_input = for (r.input_abs) |in| {
                 if (std.mem.eql(u8, in, l.target_abs)) break true;
             } else false;
-            if (!is_input) return problem.set(gpa, "rule {s}: link '{s}' points at '{s}', which is not an input of the rule", .{ r.name, l.name, l.target });
+            if (!is_input)
+                try problem.add(gpa, "rule {s}: link '{s}' points at '{s}', which is not an input of the rule", .{ r.name, l.name, l.target });
         }
-        if (r.mounts.len > 0 and r.container == null) return problem.set(gpa, "rule {s} has mounts but no container; mounts place host files inside an image", .{r.name});
-        if (r.container) |img| if (img.len == 0 or std.mem.indexOfAny(u8, img, " \t\n") != null) return problem.set(gpa, "rule {s}: invalid container image '{s}'", .{ r.name, img });
+        if (r.mounts.len > 0 and r.container == null)
+            try problem.add(gpa, "rule {s} has mounts but no container; mounts place host files inside an image", .{r.name});
+        if (r.container) |img| if (img.len == 0 or std.mem.indexOfAny(u8, img, " \t\n") != null)
+            try problem.add(gpa, "rule {s}: invalid container image '{s}'", .{ r.name, img });
         for (r.shared) |s| {
-            if (wf.sharedIndex(s) == null) {
-                var names_list: std.ArrayList([]const u8) = .empty;
-                defer names_list.deinit(gpa);
-                for (wf.shared) |d| try names_list.append(gpa, d.name);
-                if (closest(names_list.items, s)) |hint|
-                    return problem.set(gpa, "rule {s} uses undeclared shared input '{s}'; did you mean '{s}'?", .{ r.name, s, hint });
-                return problem.set(gpa, "rule {s} uses undeclared shared input '{s}'", .{ r.name, s });
-            }
+            if (wf.sharedIndex(s) != null) continue;
+            var names_list: std.ArrayList([]const u8) = .empty;
+            defer names_list.deinit(gpa);
+            for (wf.shared) |d| try names_list.append(gpa, d.name);
+            if (closest(names_list.items, s)) |hint|
+                try problem.add(gpa, "rule {s} uses undeclared shared input '{s}'; did you mean '{s}'?", .{ r.name, s, hint })
+            else
+                try problem.add(gpa, "rule {s} uses undeclared shared input '{s}'", .{ r.name, s });
         }
     }
+    problem.current_line = 0;
     var side_inodes: std.AutoHashMapUnmanaged(Inode, []const u8) = .empty;
     defer side_inodes.deinit(gpa);
-    problem.line = 0;
     var it = side.iterator();
-    while (it.next()) |e| {
-        if (outputs.contains(e.key_ptr.*)) return problem.set(gpa, "rule {s}: a log or benchmark overlaps a declared output", .{e.value_ptr.*});
+    sides: while (it.next()) |e| {
+        // Problems with a log or benchmark show the line of its rule.
+        problem.current_line = if (wf.ruleIndex(e.value_ptr.*)) |ri| wf.rules[ri].line else 0;
+        if (outputs.contains(e.key_ptr.*)) {
+            try problem.add(gpa, "rule {s}: a log or benchmark overlaps a declared output", .{e.value_ptr.*});
+            continue :sides;
+        }
         if (try cache.stat(e.key_ptr.*)) |id| {
-            if (out_inodes.contains(.{ .dev = id.dev, .ino = id.ino }))
-                return problem.set(gpa, "rule {s}: a log or benchmark is a hard link to a declared output", .{e.value_ptr.*});
+            if (out_inodes.contains(.{ .dev = id.dev, .ino = id.ino })) {
+                try problem.add(gpa, "rule {s}: a log or benchmark is a hard link to a declared output", .{e.value_ptr.*});
+                continue :sides;
+            }
             try side_inodes.put(gpa, .{ .dev = id.dev, .ino = id.ino }, e.value_ptr.*);
         }
     }
     for (wf.rules) |r| {
-        // Errors about this rule show its line.
-        problem.line = r.line;
-        for (r.input_abs, r.input) |in, written| {
-            if (side.get(in)) |w| return problem.set(gpa, "rule {s}: input '{s}' is the log or benchmark of rule {s}", .{ r.name, written, w });
+        // Problems with this rule show its line.
+        problem.current_line = r.line;
+        inputs: for (r.input_abs, r.input) |in, written| {
+            if (side.get(in)) |w| {
+                try problem.add(gpa, "rule {s}: input '{s}' is the log or benchmark of rule {s}", .{ r.name, written, w });
+                continue :inputs;
+            }
             if (side_inodes.count() > 0) if (try cache.stat(in)) |id| {
-                if (side_inodes.get(.{ .dev = id.dev, .ino = id.ino })) |w|
-                    return problem.set(gpa, "rule {s}: input '{s}' is a hard link to the log or benchmark of rule {s}", .{ r.name, written, w });
+                if (side_inodes.get(.{ .dev = id.dev, .ino = id.ino })) |w| {
+                    try problem.add(gpa, "rule {s}: input '{s}' is a hard link to the log or benchmark of rule {s}", .{ r.name, written, w });
+                    continue :inputs;
+                }
             };
             // An input that is a symlink to a declared output must name the producer path.
             if (!outputs.contains(in)) {
                 if (try cache.real(in)) |real| {
-                    if (outputs.contains(real)) return problem.set(gpa, "rule {s}: declare the producer path instead of the symlink '{s}'", .{ r.name, written });
+                    if (outputs.contains(real)) {
+                        try problem.add(gpa, "rule {s}: declare the producer path instead of the symlink '{s}'", .{ r.name, written });
+                        continue :inputs;
+                    }
                 }
             }
         }
     }
-    problem.line = 0;
+    problem.current_line = 0;
     // Mapped files are measured at launch, so they cannot be produced by the
     // run; a service's files can (the graph checks its users' order).
-    for (wf.shared) |s| {
+    shareds: for (wf.shared) |s| {
         const sp = s.path_abs orelse continue;
         if (s.isService()) continue;
         var oit = outputs.iterator();
         while (oit.next()) |e| {
-            if (within(sp, e.key_ptr.*)) return problem.set(gpa, "shared input '{s}' contains the output of rule {s}", .{ s.name, e.value_ptr.* });
+            if (within(sp, e.key_ptr.*)) {
+                try problem.add(gpa, "shared input '{s}' contains the output of rule {s}", .{ s.name, e.value_ptr.* });
+                continue :shareds;
+            }
         }
     }
+    if (problem.count > prior) return error.Invalid;
 }

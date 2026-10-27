@@ -34,7 +34,8 @@ name = "align_s1"
 step = "align"
 sample = "s1"
 category = "alignment"
-tool = "bowtie2 2.5.4"
+tool = "bowtie2"
+version = "bowtie2 --version | head -1"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
 shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
@@ -53,8 +54,9 @@ shared = ["index"]
 
 [[rules]]
 name = "star_s1"
-input = ["ref/star", "reads/s1_1.fq.gz", "reads/s1_2.fq.gz"]
+input = ["reads/s1_1.fq.gz", "reads/s1_2.fq.gz"]
 output = ["star/s1/Aligned.out.bam"]
+diagnostics = ["star/s1/Log.out"]
 container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
 workdir = "star/s1"
 links = { "r1.fq.gz" = "reads/s1_1.fq.gz", "r2.fq.gz" = "reads/s1_2.fq.gz" }
@@ -73,7 +75,7 @@ shared = ["genome"]
 - **Unknown keys are errors**, in every table. The message names the line and, when one is close, the key you probably meant.
 - **Names** of rules and shared inputs have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - **Paths** name files or directories explicitly. They cannot be empty, contain control characters, `*`, `?`, `[`, `]`, `{` or `}`, contain `://`, or start with `gh:`. Relative paths resolve against the working directory.
-- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. `K` values below `1024K` are too small, and the size must be above 0.
+- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. A size below 1 MiB, such as `"512K"`, is refused.
 - **Durations** are strings: a whole number of seconds, or numbers with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.
 
 ## [workflow]
@@ -95,10 +97,9 @@ shared = ["genome"]
 
 ## [resource_groups.NAME]
 
-| Key    | Type    | Default   | Meaning                         |
-| ------ | ------- | --------- | ------------------------------- |
-| `max`  | integer | required  | capacity, 1 to 1,000,000        |
-| `wait` | string  | `"queue"` | only `"queue"`; changes nothing |
+| Key   | Type    | Default  | Meaning                  |
+| ----- | ------- | -------- | ------------------------ |
+| `max` | integer | required | capacity, 1 to 1,000,000 |
 
 A rule takes units with `groups = { NAME = count }` in its resources; a count must be between 1 and the group's `max`. See [Resource groups](Resources-and-Scheduling.md#resource-groups).
 
@@ -122,39 +123,46 @@ An entry with `container` is a service:
 | `retries`   | integer  | 0        | restarts before ready, 0 to 3    |
 | `mounts`    | table    | none     | host path = path in the image    |
 
-- A file input is also an input of every rule that uses it. It may not hold the output of a rule; a service's `path` may, if every rule that joins it depends on that rule.
+- `path` is also an input of every rule that uses the shared input.
+- A file input's `path` may not hold the output of a rule, since its pages are measured when a launch starts.
+- A service's `path` may: the rules writing there run before the service's users, which may not write there themselves.
 - `command`, `memory`, `timeout`, `retries` and `mounts` belong to services only.
 - See [Shared inputs](Resources-and-Scheduling.md#shared-inputs) and [Shared services](Containers-and-Services.md#shared-services).
 
 ## [[rules]]
 
-| Key         | Type     | Default                | Meaning                             |
-| ----------- | -------- | ---------------------- | ----------------------------------- |
-| `name`      | string   | required               | unique rule name                    |
-| `input`     | paths    | `[]`                   | files and directories it reads      |
-| `output`    | paths    | required               | files it writes, at least one       |
-| `shell`     | string   | required               | the command line                    |
-| `threads`   | integer  | `[defaults]`, else 1   | 1 to 4096                           |
-| `memory`    | size     | `[defaults]`           | required from one of the two        |
-| `priority`  | integer  | 0                      | higher starts first                 |
-| `retries`   | integer  | `--retry`, else 0      | extra attempts, 0 to 3              |
-| `timeout`   | duration | `--timeout`, else none | limit per attempt                   |
-| `log`       | path     | none                   | copy of stdout and stderr           |
-| `benchmark` | path     | none                   | JSON summary of a completed attempt |
-| `cutoff`    | boolean  | `false`                | key consumers on output bytes       |
-| `workdir`   | path     | none                   | directory the command starts in     |
-| `links`     | table    | none                   | link name = input, in `workdir`     |
-| `container` | image    | none                   | run in this local image             |
-| `mounts`    | table    | none                   | host path = path in the image       |
-| `step`      | string   | from `name`            | pipeline step it is an instance of  |
-| `sample`    | string   | from `name`            | data it works on                    |
-| `category`  | string   | none                   | group of steps it belongs to        |
-| `tool`      | string   | from `container`       | program it runs                     |
-| `resources` | table    | none                   | the request, below                  |
+| Key           | Type     | Default                | Meaning                              |
+| ------------- | -------- | ---------------------- | ------------------------------------ |
+| `name`        | string   | required               | unique rule name                     |
+| `input`       | paths    | `[]`                   | files and directories it reads       |
+| `output`      | paths    | required               | files it writes, at least one        |
+| `shell`       | string   | required               | the command line                     |
+| `threads`     | integer  | `[defaults]`, else 1   | 1 to 4096                            |
+| `memory`      | size     | `[defaults]`           | the memory request                   |
+| `priority`    | integer  | 0                      | higher starts first                  |
+| `retries`     | integer  | `--retry`, else 0      | extra attempts, 0 to 3               |
+| `timeout`     | duration | `--timeout`, else none | limit per attempt                    |
+| `log`         | path     | none                   | copy of stdout and stderr            |
+| `benchmark`   | path     | none                   | JSON summary of a completed attempt  |
+| `diagnostics` | paths    | `[]`                   | files kept when an attempt fails     |
+| `version`     | string   | none                   | command that prints the tool version |
+| `cutoff`      | boolean  | `false`                | key consumers on output bytes        |
+| `workdir`     | path     | none                   | directory the command starts in      |
+| `links`       | table    | none                   | link name = input, in `workdir`      |
+| `container`   | image    | none                   | run in this local image              |
+| `mounts`      | table    | none                   | host path = path in the image        |
+| `step`        | string   | from `name`            | pipeline step it is an instance of   |
+| `sample`      | string   | from `name`            | data it works on                     |
+| `category`    | string   | none                   | group of steps it belongs to         |
+| `tool`        | string   | from `container`       | program it runs                      |
+| `resources`   | table    | none                   | the request, below                   |
 
+- Every rule needs a memory request: `memory`, in `resources`, or in `[defaults]`.
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
-- A rule may not read its own output, two rules may not write the same file, and no rule may read another rule's log or benchmark.
+- An input that is a directory depends on every rule that writes inside it, so it is read once they have completed.
+- `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
+- `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
 - An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
 - `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
@@ -174,6 +182,25 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 - Every group and shared input named must be declared.
 - Only container rules can use a service, and a rule can use one service.
 
+## Pipeline templates
+
+The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; their values may name `[params]` values as `{name}`.
+
+| Table          | Key        | Type   | Meaning                                    |
+| -------------- | ---------- | ------ | ------------------------------------------ |
+| `[samples]`    | `sheet`    | path   | TSV, or CSV for `.csv`, by the template    |
+| `[samples]`    | `names`    | names  | the samples, without a sheet               |
+| `[params]`     | any name   | value  | a string, number or boolean for `{name}`   |
+| `[[steps]]`    | `name`     | name   | the step, required                         |
+| `[[steps]]`    | `for_each` | string | `"sample"`: one rule per sample            |
+| `[[steps]]`    | rule keys  |        | as in `[[rules]]`                          |
+
+- The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow the [rules for names](#conventions).
+- A step takes every `[[rules]]` key except `step` and `sample`, which `prepare` sets, and `name`, which names the step. A template has no `[[rules]]`: a step without `for_each` is one rule.
+- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. A param may not share a column's name.
+- In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.
+- An unknown `{name}` is an error except in `shell` and a service's `command`, where it stays as written.
+
 ## What validate checks, and what it does not
 
 `workz validate` checks everything above and the graph: every key, every value, every name, unique outputs, and the absence of cycles. Some things are checked only when a launch starts, because they depend on the machine and the files, and only for the selected rules:
@@ -181,4 +208,4 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 - An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `workz plan` shows `input missing: PATH`.
 - The path of every shared file input must exist and be readable; otherwise `workz run` refuses with `shared input NAME (PATH): ...`.
 - Every container image must be available locally; otherwise `workz run` refuses with `container image NAME is not available locally; workz does not pull images`.
-- Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB with its shared inputs; the run allows M MiB`.
+- Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.

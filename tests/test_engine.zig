@@ -44,7 +44,7 @@ test "container mounts list each directory once with the access it needs" {
     try testing.expectEqual(@as(usize, 4), nested.len);
 }
 
-test "a service may load produced files only for rules that depend on their producer" {
+test "a rule that joins a service depends on the rules writing what the service loads" {
     const svc = "[shared.idx]\npath = \"idx\"\ncontainer = \"img\"\ncommand = \"load idx\"\nmemory = \"1G\"\n\n" ++
         "[[rules]]\nname = \"build\"\noutput = [\"idx/SA\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     const user = "[[rules]]\nname = \"use\"\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
@@ -53,17 +53,37 @@ test "a service may load produced files only for rules that depend on their prod
     var problem: workflow.Problem = .{};
     var wf = try loadText(&s, head ++ svc ++ user, &problem);
     defer wf.deinit();
-    try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf, &problem));
-    defer testing.allocator.free(problem.message);
-    try testing.expectEqualStrings("rule use joins service 'idx', which loads idx/SA from rule build; make an output of build an input of use", problem.message);
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    try testing.expectEqualSlices(usize, &.{0}, g.parents[1]);
+    try testing.expect(g.produces(wf.rules[1].input_abs[0]));
 
+    // A rule joining the service cannot write what it loads.
     var s2 = try Scratch.init();
     defer s2.deinit();
-    const ordered = "[[rules]]\nname = \"use\"\ninput = [\"idx/SA\"]\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
-    var wf2 = try loadText(&s2, head ++ svc ++ ordered, &problem);
+    const writes = "[[rules]]\nname = \"use\"\noutput = [\"idx/extra\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
+    var wf2 = try loadText(&s2, head ++ svc ++ writes, &problem);
     defer wf2.deinit();
-    var g = try workz.graph.build(testing.allocator, &wf2, &problem);
-    g.deinit();
+    try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf2, &problem));
+    defer testing.allocator.free(problem.message);
+    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule use joins service 'idx' and writes idx/extra, which the service loads; the service would start before the file exists"));
+}
+
+test "a directory input depends on every rule writing inside it, and not on a sibling" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"w1\"\noutput = [\"d/a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"w2\"\noutput = [\"d/sub/b.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"sib\"\noutput = [\"d-x/c.txt\", \"d.y\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"read\"\ninput = [\"d\"]\noutput = [\"d/n.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    // Its own output inside the directory is no dependency.
+    try testing.expectEqualSlices(usize, &.{ 0, 1 }, g.parents[3]);
+    try testing.expect(g.produces(wf.rules[3].input_abs[0]));
 }
 
 test "a service runs in a shareable IPC namespace in its own /tmp and waits on its stop FIFO" {
@@ -115,4 +135,63 @@ test "removing a launch directory does not follow symlinks out of it" {
     try testing.expect(bytes >= 5);
     try testing.expect(!sys.exists(testing.allocator, gone));
     try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "keep/precious" })));
+}
+
+test "[unit] - [views]: focus expressions name a rule and its depths" {
+    const Focus = workz.views.Focus;
+    const up = Focus.parse("+align").?;
+    try testing.expectEqualStrings("align", up.rule);
+    try testing.expectEqual(@as(?u32, Focus.all), up.up);
+    try testing.expectEqual(@as(?u32, null), up.down);
+    const down = Focus.parse("align+2").?;
+    try testing.expectEqual(@as(?u32, 2), down.down);
+    try testing.expectEqual(@as(?u32, null), down.up);
+    const both = Focus.parse("1+align+").?;
+    try testing.expectEqual(@as(?u32, 1), both.up);
+    try testing.expectEqual(@as(?u32, Focus.all), both.down);
+    try testing.expect(Focus.parse("align") == null);
+    try testing.expect(Focus.parse("+") == null);
+}
+
+test "[unit] - [views]: steps collapse samples, and a shared input shows what loads and joins it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[shared.genome]\npath = \"ref\"\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\n\n" ++
+        "[[rules]]\nname = \"index\"\noutput = [\"ref/SA\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S1__align\"\noutput = [\"S1.bam\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"genome\"]\n" ++
+        "[[rules]]\nname = \"S2__align\"\noutput = [\"S2.bam\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"genome\"]\n" ++
+        "[[rules]]\nname = \"report\"\ninput = [\"S1.bam\", \"S2.bam\"]\noutput = [\"r.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+
+    const steps = try workz.views.build(a, &wf, &g, mask, .{ .layer = .resources, .by_step = true });
+    var kinds = [_]usize{0} ** 5;
+    for (steps.nodes) |n| kinds[@intFromEnum(n.kind)] += 1;
+    try testing.expectEqual(@as(usize, 3), kinds[@intFromEnum(workz.views.NodeKind.step)]);
+    try testing.expectEqual(@as(usize, 1), kinds[@intFromEnum(workz.views.NodeKind.shared)]);
+    var loads: usize = 0;
+    var joins: usize = 0;
+    for (steps.edges) |e| switch (e.kind) {
+        .loads => loads += 1,
+        .joins => joins += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), loads);
+    try testing.expectEqual(@as(usize, 1), joins);
+
+    const users = try workz.views.build(a, &wf, &g, mask, .{ .users = "genome" });
+    try testing.expectEqual(@as(usize, 4), users.nodes.len);
+
+    const path = try workz.views.whyPath(a, &wf, &g, "index", "report");
+    try testing.expectEqual(@as(usize, 3), path.len);
+    try testing.expectEqualStrings("report", wf.rules[path[2]].name);
+    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, "report", "index"));
 }

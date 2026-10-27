@@ -45,6 +45,8 @@ pub const RuleView = struct {
     name: []const u8,
     status: Status = .waiting,
     attempt: u32 = 0,
+    /// The shared inputs its latest attempt holds.
+    shared: []const []const u8 = &.{},
     /// Attempt directory and cgroup of the latest attempt.
     dir: []const u8 = "",
     cg: ?[]const u8 = null,
@@ -72,6 +74,8 @@ pub const RuleView = struct {
 pub const SharedView = struct {
     name: []const u8,
     state: []const u8,
+    /// Rules whose attempts started using it, by rule index, each once.
+    users: std.ArrayList(usize) = .empty,
     /// The largest memory peak of any of its holders.
     memory_peak: ?u64 = null,
     /// cgroup of the current holder, for live counters.
@@ -100,6 +104,8 @@ pub const Sample = struct {
     ns: i128,
     threads_reserved: f64,
     memory_reserved_mib: f64,
+    /// The part of it shared inputs hold, once.
+    shared_reserved_mib: f64 = 0,
     /// The run cgroup's memory in use and CPU cores used, when isolated.
     memory_current: ?u64,
     cpu_cores: ?f64,
@@ -150,6 +156,8 @@ pub const Tracker = struct {
     /// The engine that ran the launch, with its digest, from `launch.json`.
     engine: []const u8 = "",
     engine_key: ?i64 = null,
+    /// Bytes of earlier outputs moved into `previous/` so far.
+    previous_bytes: u64 = 0,
     /// The open group wait of each rule, by rule index.
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
@@ -252,6 +260,8 @@ pub const Tracker = struct {
             self.finished_ns = at;
             self.final_status = try a.dupe(u8, str(v, "status") orelse "");
             self.final_error = try a.dupe(u8, str(v, "error") orelse "");
+        } else if (eql(u8, ev, "output_preserved")) {
+            self.previous_bytes += whole(u64, v, "bytes") orelse 0;
         } else if (eql(u8, ev, "sample")) {
             self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
             self.cpu_cores = float(v, "cpu_cores_used");
@@ -259,6 +269,7 @@ pub const Tracker = struct {
                 .ns = at,
                 .threads_reserved = float(v, "threads_reserved") orelse 0,
                 .memory_reserved_mib = float(v, "memory_reserved_mib") orelse 0,
+                .shared_reserved_mib = float(v, "shared_reserved_mib") orelse 0,
                 .memory_current = self.memory_current,
                 .cpu_cores = self.cpu_cores,
             });
@@ -310,6 +321,16 @@ pub const Tracker = struct {
                 r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
+                // The shared inputs the attempt holds.
+                if (v.object.get("shared")) |list| if (list == .array) {
+                    var names: std.ArrayList([]const u8) = .empty;
+                    for (list.array.items) |item| if (item == .string) {
+                        try names.append(a, try a.dupe(u8, item.string));
+                        const sv = try self.sharedView(item.string);
+                        if (std.mem.indexOfScalar(usize, sv.users.items, ri) == null) try sv.users.append(a, ri);
+                    };
+                    r.shared = names.items;
+                };
                 r.reason = "";
                 r.live_memory = null;
                 r.live_peak = null;

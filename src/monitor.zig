@@ -308,6 +308,14 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             try w.splatByteAll(' ', name_w + 2);
             try w.print("{s}| {s}{s}\n", .{ s.dim(), said, s.reset() });
         }
+        // The last line of each diagnostics file it kept, after its name.
+        for (r.diagnostics) |d| {
+            const line = lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "diagnostics", d }), 160);
+            if (line.len == 0 or std.mem.indexOf(u8, r.reason, line) != null) continue;
+            try label(w, s, col, "");
+            try w.splatByteAll(' ', name_w + 2);
+            try w.print("{s}| {s}: {s}{s}\n", .{ s.dim(), d, line, s.reset() });
+        }
         shown += 1;
     }
     if (failures > shown) {
@@ -333,6 +341,12 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     const has_page = sys.exists(gpa, page);
     try label(w, s, col, if (has_page) "page" else "records");
     try w.print("{s}\n", .{shownPath(a, if (has_page) page else launch_dir)});
+    // Earlier outputs this launch replaced stay on disk until removed.
+    if (int(v, "previous_bytes")) |b| if (b > 0 and try keepsPrevious(gpa, a, launch_dir)) {
+        try label(w, s, col, "previous");
+        try units.size(w, @as(f64, @floatFromInt(b)) / 1048576.0);
+        try w.print(" of replaced outputs kept; {s}workz clean --previous{s} removes them\n", .{ s.cyan(), s.reset() });
+    };
     try label(w, s, col, "next");
     if (std.mem.eql(u8, outcome, "completed")) {
         try w.print("{s}workz report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
@@ -402,7 +416,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+    const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8, diagnostics: []const []const u8 };
     const ChangedOutput = struct { rule: []const u8, path: []const u8 };
     var failures: std.ArrayList(Failure) = .empty;
     for (tr.rules.items) |r| switch (r.status) {
@@ -411,6 +425,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
             .status = @tagName(r.status),
             .reason = r.reason,
             .stderr = if (r.dir.len > 0) try std.fs.path.join(a, &.{ r.dir, "stderr.log" }) else null,
+            .diagnostics = if (r.dir.len > 0) try records.keptDiagnostics(gpa, a, r.dir) else &.{},
         }),
         else => {},
     };
@@ -440,10 +455,23 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
         .launch_dir = dir,
         .failures = failures.items,
         .changed_outputs = @as([]const ChangedOutput, &.{}),
+        .previous_bytes = tr.previous_bytes,
     };
     var w: std.Io.Writer.Allocating = .init(gpa);
     defer w.deinit();
     try w.writer.print("{f}\n", .{std.json.fmt(doc, .{})});
     try sys.writeAll(1, w.written());
     return true;
+}
+
+/// Whether some attempt of the launch still keeps earlier outputs in its
+/// `previous/` directory.
+fn keepsPrevious(gpa: Allocator, a: Allocator, launch_dir: []const u8) !bool {
+    const attempts = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
+    for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {
+        const rule_dir = try std.fs.path.join(a, &.{ attempts, rule });
+        for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n|
+            if (sys.exists(gpa, try std.fs.path.join(a, &.{ rule_dir, n, "previous" }))) return true;
+    }
+    return false;
 }

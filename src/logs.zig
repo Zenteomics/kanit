@@ -1,5 +1,6 @@
 //! `workz logs RULE`: the standard output and error of a rule's attempt,
-//! found without browsing `.workz/launches`. By default the newest attempt
+//! and the diagnostics a failed attempt kept, found without browsing
+//! `.workz/launches`. By default the newest attempt
 //! in the newest launch that ran the rule, else the attempt recorded in
 //! `state.json`. `--follow` streams them until the attempt ends.
 const std = @import("std");
@@ -61,6 +62,7 @@ pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, op
             if (opts.stream == .both) try w.print("==> {s}/{s} <==\n", .{ dir, n });
             _ = try copy(gpa, w, try std.fs.path.join(a, &.{ dir, n }), 0);
         }
+        if (opts.stream == .both) try diagnostics(gpa, a, w, dir);
         return;
     }
     // Following both streams interleaves them as they grow.
@@ -70,9 +72,20 @@ pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, op
         const done = sys.exists(gpa, record);
         for (names, 0..) |n, k| offsets[k] = try copy(gpa, w, try std.fs.path.join(a, &.{ dir, n }), offsets[k]);
         try w.flush();
-        if (done) return;
+        if (done) {
+            if (opts.stream == .both) try diagnostics(gpa, a, w, dir);
+            return;
+        }
         const ts: linux.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
         _ = linux.nanosleep(&ts, null);
+    }
+}
+
+/// Writes the diagnostics a failed attempt kept, each under its path.
+fn diagnostics(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8) !void {
+    for (try records.keptDiagnostics(gpa, a, dir)) |p| {
+        try w.print("==> {s} <==\n", .{p});
+        _ = try copy(gpa, w, p, 0);
     }
 }
 

@@ -3,6 +3,8 @@
 //! containers labelled with the working directory, and with `--keep N` the
 //! launch directories older than the newest N, except a launch that holds
 //! the recorded attempt of a rule, whose logs belong to current outputs.
+//! With `--previous` it removes the earlier outputs that attempts moved
+//! into their `previous/` directories, in every launch.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -14,10 +16,11 @@ const Allocator = std.mem.Allocator;
 
 pub const Options = struct {
     keep: ?usize = null,
+    previous: bool = false,
     dry_run: bool = false,
 };
 
-pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0 };
+pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, failed: usize = 0 };
 
 fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
     const p = try sys.z(gpa, path);
@@ -38,6 +41,9 @@ pub fn removeAt(gpa: Allocator, parent: sys.Fd, name: [:0]const u8, dry: bool, d
     }
     const fd: sys.Fd = @intCast(try sys.check(linux.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0)));
     defer sys.close(fd);
+    // A directory kept read-only, such as an output directory moved aside
+    // whole, is the user's own: it is made writable to empty it.
+    if (!dry) _ = linux.fchmod(fd, 0o700);
     var total: u64 = 0;
     var names: std.ArrayList([:0]u8) = .empty;
     defer {
@@ -74,6 +80,8 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             try container.removeLeftovers(gpa, a, podman, root, &envp, devnull);
     }
 
+    if (opts.previous) try removePrevious(gpa, a, rec, opts.dry_run, &result, w);
+
     const keep = opts.keep orelse return result;
     const names = try records.launchNames(gpa, a, rec);
     if (names.len <= keep) return result;
@@ -101,4 +109,35 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
         try w.print("{s} launch {s}\n", .{ if (opts.dry_run) "would remove" else "removed", name });
     }
     return result;
+}
+
+/// Removes the `previous/` directory of every attempt in every launch,
+/// with a line for each launch that had any.
+fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, result: *Result, w: *std.Io.Writer) !void {
+    for (try records.launchNames(gpa, a, rec)) |launch| {
+        const attempts = try std.fs.path.join(a, &.{ rec, "launches", launch, "attempts" });
+        var dirs: usize = 0;
+        var bytes: u64 = 0;
+        for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {
+            const rule_dir = try std.fs.path.join(a, &.{ attempts, rule });
+            for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
+                const fd = openDir(gpa, try std.fs.path.join(a, &.{ rule_dir, n })) catch continue;
+                defer sys.close(fd);
+                bytes += removeAt(gpa, fd, "previous", dry, 0) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    error.OutOfMemory => return err,
+                    else => {
+                        try w.print("cannot remove {s}/{s}/previous: {s}\n", .{ rule_dir, n, sys.errorText(err) });
+                        result.failed += 1;
+                        continue;
+                    },
+                };
+                dirs += 1;
+            }
+        }
+        if (dirs == 0) continue;
+        result.previous += dirs;
+        result.previous_bytes += bytes;
+        try w.print("{s} previous/ of {d} attempt(s) in launch {s}, {d:.1} MiB\n", .{ if (dry) "would remove" else "removed", dirs, launch, @as(f64, @floatFromInt(bytes)) / 1048576.0 });
+    }
 }

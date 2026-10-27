@@ -1,4 +1,4 @@
-A rule can run its command inside a local container image through rootless Podman, and a shared service can hold a large index in memory once for many container rules. This page covers both, with a STAR alignment example that loads its genome once. You need rootless Podman and the images already pulled; everything else on this page is optional.
+A rule can run its command inside a local container image through rootless Podman, and a shared service can hold a large index in memory once for many container rules. This page covers both, with a STAR alignment example that loads its genome once. You need rootless Podman and the images already pulled.
 
 ## Container rules
 
@@ -29,7 +29,7 @@ At the start of a launch, workz resolves every image reference to its image ID a
 - **Files.** The working directory and the directory of every input outside it are mounted read-only at their own paths; the directory of every output, and the rule's `workdir`, read-write. An output directly in the working directory makes the whole working directory writable. The command starts in the `workdir`, or in the working directory, so relative paths work as in a host rule.
 - **Isolation.** No network, no capabilities, no new privileges, and a read-only root file system; Podman gives the container its own writable `/tmp`, `/var/tmp` and `/run` in memory.
 - **Environment.** The image's own environment, plus `TZ`, `LANG`, `LC_ALL`, the names given with `--pass-env`, and `WORKZ_RULE`, `WORKZ_ATTEMPT_DIR`, `WORKZ_THREADS` and `WORKZ_MEMORY_MIB`. The host's `PATH` and `HOME` do not enter.
-- **Resources.** With isolation, the container's processes run in the attempt's cgroup, so the memory limit, the out-of-memory kill and the attempt's counters cover the tool itself; without isolation nothing limits them. The Podman client and its monitor run in a separate group of the run.
+- **Resources.** With isolation, the container's processes run in the attempt's cgroup, so the memory limit, the out-of-memory kill and the attempt's counters cover the tool itself; without isolation nothing limits them. The Podman client and conmon, its monitor, run in a separate group of the run, and take about 20 MiB per container; admission reserves 32 MiB for them beside the rule's request, so the budget covers them too.
 
 ### Mounts over image paths
 
@@ -116,8 +116,8 @@ workz run workflow.toml --max-threads 4 --max-memory 4G
 [0/2] starting shared service genome (1024 MiB)
 [0/2] started align_s1 (attempt 1)
 [0/2] started align_s2 (attempt 1)
-[1/2] completed align_s1 (0.3 s)
-[2/2] completed align_s2 (0.3 s)
+[1/2] completed align_s2 (0.5 s)
+[2/2] completed align_s1 (0.5 s)
 ```
 
 Both alignments report `Found genome in shared memory` in their STAR logs. The genome here is a small test genome; with a human genome the service holds about 30 GB once, instead of once per alignment.
@@ -126,7 +126,7 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 
 - **Start.** Before the first rule that lists the service in `resources.shared` starts, workz runs `command` in a container of the image with a shareable IPC namespace, its own cgroup limited to `memory` (with isolation), `/tmp` as its working directory, and the working directory and `path` mounted read-only.
 - **Ready.** The service is ready when `command` exits 0. Its users then start and join its IPC namespace, so they see the shared memory it created. The container stays up, holding that memory, until workz stops it.
-- **Memory.** The service's `memory` counts once against the budget while it runs. With isolation, the shared memory it holds is charged to its cgroup, not to its users; without isolation nothing limits it. A user's own request covers only what it uses besides the index.
+- **Memory.** The service's `memory`, and 32 MiB for its Podman client, count once against the budget while it runs. With isolation, the shared memory it holds is charged to its cgroup, not to its users; without isolation nothing limits it. A user's own request covers only what it uses besides the index.
 - **Lifetime.** The service stays up while a rule that has yet to run needs it, so later users do not load it again. It gives way when a waiting rule needs its memory and no user is running, and it stops after its last user.
 - **Time limit and retries.** `timeout` limits how long the service may take to become ready, and `retries` (0 to 3) starts it again if it fails before it is ready. After that, every rule that needs it fails with `shared input NAME could not be loaded:` and the reason.
 - **Logs.** The service's standard error is kept in `.workz/launches/<ID>/shared/<NAME>-<N>.stderr.log`, one file per start.
@@ -134,18 +134,19 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 ### Rules for services
 
 - Only container rules can join a service, and a rule can join one service.
-- `path` may hold files that rules of the same workflow produce, such as the index itself. Every rule that joins the service must then depend on those rules, and `workz validate` says which input to add if one does not.
-- The service's image, command, path and mounts are part of its users' rule keys. The files in `path` are not, so list the index in each user's `input` as well, as the example does, to rerun the users when the index is rebuilt.
+- `path` may hold files that rules of the same workflow produce, such as the index itself.
+- The service's image, command, path and mounts are part of its users' rule keys, and its `path` is an input of every rule that joins it: a rule that writes the index runs before them, and rebuilding the index reruns them. Listing it in `input` as well changes nothing.
+- A rule that joins a service may not write inside its `path`: the service would load before the file exists.
 - `mounts` on a service places host files inside its image, as on a rule.
 
 ### Sizing a service
 
-`workz report --bottlenecks` lists every shared input with its starts, load time, declared memory and peak, and suggests a `memory` for services:
+`workz report --bottlenecks` lists every shared input with its starts, the rules that used it, its load time, the time it was held, its declared memory and its peak, and suggests a `memory` for services:
 
 ```text
 shared inputs
-  NAME                           TYPE     STARTS       LOAD     MEMORY       PEAK    SUGGEST
-  genome                         service       1      0.2 s    1.0 GiB    154 MiB    192 MiB  declares 832 MiB more than the suggestion
+  NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
+  genome                         service       1      2      0.2 s      0.8 s    1.0 GiB    191 MiB    256 MiB  declares 768 MiB more than the suggestion
 ```
 
 A service holds mostly what it loaded, so its suggestion is the peak plus a twentieth, rounded up to a multiple of 64 MiB. A service loaded more than once, or one that failed, says so at the end of its line.

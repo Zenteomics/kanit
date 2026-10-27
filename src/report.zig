@@ -274,6 +274,7 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
         // has not shown a change.
         const noise = @max(spread(x) orelse 0, spread(y) orelse 0);
         if (noise > 0 and x.median_s >= 0.1 and @abs(y.median_s / x.median_s - 1) < noise) try w.writeAll("  wall time within its runs' spread");
+        if (x.threads != y.threads) try w.print("  threads {d} against {d}", .{ x.threads, y.threads });
         if (y.reused == y.runs) try w.writeAll("  reused in the launch") else if (y.reused > 0) try w.print("  {d} reused in the launch", .{y.reused});
         try w.writeAll("\n");
     }
@@ -617,11 +618,13 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
 fn writeShared(w: *std.Io.Writer, l: *const model.Launch) !void {
     if (l.shared().len == 0) return;
     try w.writeAll("\nshared inputs\n");
-    try w.writeAll("  NAME                           TYPE     STARTS       LOAD     MEMORY       PEAK    SUGGEST\n");
+    try w.writeAll("  NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST\n");
     for (l.shared()) |s| {
         const peak: f64 = if (s.memory_peak) |p| @as(f64, @floatFromInt(p)) / 1048576.0 else 0;
-        try w.print("  {f} {s:<8} {d:>6} ", .{ units.field(s.name, 30), if (s.service) "service" else "mapped", s.starts });
+        try w.print("  {f} {s:<8} {d:>6} {d:>6} ", .{ units.field(s.name, 30), if (s.service) "service" else "mapped", s.starts, s.users.items.len });
         try units.right(w, 10, units.duration, .{s.load_s});
+        try w.writeAll(" ");
+        try units.right(w, 10, units.duration, .{s.held_s});
         try w.writeAll(" ");
         try units.right(w, 10, units.size, .{s.declared_mib});
         try w.writeAll(" ");

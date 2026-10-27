@@ -11,10 +11,12 @@ const records = @import("records.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
-/// Format 2 adds the recorded environments, and format 3 records file
-/// identities without the device number. Format 1 and 2 files are read as
-/// format 3 (`dropDevice`).
-pub const format_version: i64 = 3;
+/// Format 2 adds the recorded environments, format 3 records file
+/// identities without the device number, and format 4 writes paths inside
+/// the working directory relative to it, so a moved project keeps its
+/// records. Older files are read as the current format (`dropDevice`; their
+/// paths are absolute).
+pub const format_version: i64 = 4;
 
 /// Version of what a rule key covers. Raise it when the key parts or their
 /// encoding change, when what a command starts with changes (shell, flags,
@@ -22,7 +24,7 @@ pub const format_version: i64 = 3;
 /// taken or judged complete changes, or when a fix changes the bytes a rule
 /// leaves for the same inputs. Raising it reruns every rule once. Scheduling,
 /// records, monitoring and speed changes do not raise it.
-pub const engine_key: u32 = 2;
+pub const engine_key: u32 = 3;
 pub const engine_key_text = std.fmt.comptimePrint("workz-key {d}", .{engine_key});
 
 pub const Output = struct {
@@ -71,6 +73,8 @@ pub const State = struct {
     arena: std.heap.ArenaAllocator,
     data: Data,
     path: []const u8,
+    /// The working directory, which relative paths in the file are under.
+    root: []const u8,
 
     pub fn deinit(self: *State) void {
         self.arena.deinit();
@@ -90,9 +94,12 @@ pub const State = struct {
             } else false;
             if (used) i += 1 else self.data.envs.map.swapRemoveAt(i);
         }
+        var scratch = std.heap.ArenaAllocator.init(gpa);
+        defer scratch.deinit();
+        const data = try relativeData(scratch.allocator(), self.root, &self.data);
         var w: std.Io.Writer.Allocating = .init(gpa);
         defer w.deinit();
-        try w.writer.print("{f}\n", .{std.json.fmt(self.data, .{})});
+        try w.writer.print("{f}\n", .{std.json.fmt(data, .{})});
         try sys.writeFileAtomic(gpa, self.path, w.written());
     }
 };
@@ -110,10 +117,11 @@ pub fn loadRecorded(gpa: Allocator, a: Allocator, rec: []const u8) !State {
 
 /// Loads `<rec>/state.json`, or returns an empty state when it is absent.
 pub fn load(gpa: Allocator, rec: []const u8) !State {
-    var s: State = .{ .arena = std.heap.ArenaAllocator.init(gpa), .data = .{}, .path = undefined };
+    var s: State = .{ .arena = std.heap.ArenaAllocator.init(gpa), .data = .{}, .path = undefined, .root = undefined };
     errdefer s.arena.deinit();
     const a = s.arena.allocator();
     s.path = try std.fs.path.join(a, &.{ rec, "state.json" });
+    s.root = try a.dupe(u8, std.fs.path.dirname(rec) orelse "/");
     const bytes = sys.readFile(gpa, s.path, 1 << 30) catch |err| switch (err) {
         error.FileNotFound => return s,
         else => return err,
@@ -128,6 +136,7 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
     // and 2 record identities with the device number. Once read, the file
     // is saved as the current format.
     if (v < 3) try dropDevice(a, &s.data);
+    if (v >= 4) try absoluteData(a, s.root, &s.data);
     s.data.format_version = format_version;
     return s;
 }
@@ -138,6 +147,60 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
 /// identities of its files in that form and cannot be read again, so a rule
 /// that wrote a directory loses its record and runs again. The `files` map
 /// keeps the old text: `explain` shows it as the identity that was.
+/// A path as `state.json` writes it: relative to the working directory when
+/// inside it, else absolute.
+fn relative(root: []const u8, p: []const u8) []const u8 {
+    return workflow.keyPath(root, p);
+}
+
+/// A path as `state.json` wrote it, made absolute again.
+fn absolute(a: Allocator, root: []const u8, p: []const u8) ![]const u8 {
+    if (p.len == 0 or std.fs.path.isAbsolute(p)) return p;
+    if (std.mem.eql(u8, p, ".")) return root;
+    return std.fs.path.join(a, &.{ root, p });
+}
+
+/// A copy of `d` with its paths as `state.json` writes them.
+fn relativeData(a: Allocator, root: []const u8, d: *const Data) !Data {
+    var out = d.*;
+    out.rules = .{};
+    for (d.rules.map.keys(), d.rules.map.values()) |name, e| {
+        var n = e;
+        n.attempt = relative(root, e.attempt);
+        const outputs = try a.alloc(Output, e.outputs.len);
+        for (e.outputs, outputs) |o, *x| x.* = .{ .path = relative(root, o.path), .id = o.id, .sha256 = o.sha256 };
+        n.outputs = outputs;
+        const input_ids = try a.alloc(InputId, e.input_ids.len);
+        for (e.input_ids, input_ids) |iid, *x| x.* = .{ .path = relative(root, iid.path), .id = iid.id };
+        n.input_ids = input_ids;
+        try out.rules.map.put(a, name, n);
+    }
+    out.files = .{};
+    for (d.files.map.keys(), d.files.map.values()) |p, id| try out.files.map.put(a, relative(root, p), id);
+    out.manifest = .{};
+    for (d.manifest.map.keys(), d.manifest.map.values()) |p, m| try out.manifest.map.put(a, relative(root, p), m);
+    return out;
+}
+
+/// Makes the relative paths of a format 4 file absolute under `root`.
+fn absoluteData(a: Allocator, root: []const u8, d: *Data) !void {
+    for (d.rules.map.values()) |*e| {
+        e.attempt = try absolute(a, root, e.attempt);
+        const outputs = try a.dupe(Output, e.outputs);
+        for (outputs) |*o| o.path = try absolute(a, root, o.path);
+        e.outputs = outputs;
+        const input_ids = try a.dupe(InputId, e.input_ids);
+        for (input_ids) |*x| x.path = try absolute(a, root, x.path);
+        e.input_ids = input_ids;
+    }
+    var files: std.json.ArrayHashMap([]const u8) = .{};
+    for (d.files.map.keys(), d.files.map.values()) |p, id| try files.map.put(a, try absolute(a, root, p), id);
+    d.files = files;
+    var manifest: std.json.ArrayHashMap(ManifestEntry) = .{};
+    for (d.manifest.map.keys(), d.manifest.map.values()) |p, m| try manifest.map.put(a, try absolute(a, root, p), m);
+    d.manifest = manifest;
+}
+
 fn dropDevice(a: Allocator, d: *Data) !void {
     var i: usize = 0;
     rules: while (i < d.rules.map.count()) {
@@ -466,6 +529,8 @@ pub fn computeKey(
     a: Allocator,
     ids: *Identities,
     r: *const workflow.Rule,
+    /// The working directory: paths inside it enter the key relative to it.
+    root: []const u8,
     env_text: []const u8,
     parent_names: []const []const u8,
     parent_keys: []const []const u8,
@@ -484,7 +549,7 @@ pub fn computeKey(
         var w: std.Io.Writer.Allocating = .init(a);
         try w.writer.writeAll(r.shell);
         if (r.workdir) |d| try w.writer.print("\x00workdir {s}", .{d});
-        for (r.links) |l| try w.writer.print("\x00link {s} {s}", .{ l.name, l.target_abs });
+        for (r.links) |l| try w.writer.print("\x00link {s} {s}", .{ l.name, workflow.keyPath(root, l.target_abs) });
         shell = w.written();
     }
     if (extra.len == 0) {
@@ -514,7 +579,7 @@ pub fn computeKey(
                 return null;
             };
             iid.* = .{ .path = in, .id = id };
-            try w.writer.print("{s}\t{s}\n", .{ in, id });
+            try w.writer.print("{s}\t{s}\n", .{ workflow.keyPath(root, in), id });
         }
         k.inputs = try hex(a, w.written());
         k.input_ids = input_ids;
@@ -535,13 +600,15 @@ pub fn computeKey(
 
 /// The first differing key part between a recorded entry and a new key.
 pub fn firstDifference(e: *const Entry, k: *const Key) ?[]const u8 {
+    // Another engine key encodes the other parts differently: it alone
+    // explains the difference.
+    if (!std.mem.eql(u8, e.engine, k.engine)) return "engine key";
     if (!std.mem.eql(u8, e.command, k.command)) return "command";
     if (!std.mem.eql(u8, e.env, k.env)) return "environment";
     if (!std.mem.eql(u8, e.request, k.request)) return "resource request";
     if (!std.mem.eql(u8, e.writes, k.writes)) return "declared outputs, log or benchmark";
     if (!std.mem.eql(u8, e.inputs, k.inputs)) return "inputs";
     if (!std.mem.eql(u8, e.parents, k.parents)) return "a producing rule";
-    if (!std.mem.eql(u8, e.engine, k.engine)) return "engine key";
     return null;
 }
 
@@ -591,7 +658,7 @@ pub fn ruleKey(
         const recorded = if (st.data.rules.map.get(n.*)) |e| e.key else "none";
         k.* = cut.parentKey(p, launch.get(p) orelse recorded);
     }
-    return computeKey(a, ids, &wf.rules[i], env_text, names, keys, engine, cut, extra, missing);
+    return computeKey(a, ids, &wf.rules[i], wf.root, env_text, names, keys, engine, cut, extra, missing);
 }
 
 /// Why a recorded rule cannot be reused with key `k`, or `.reuse`.

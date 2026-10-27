@@ -62,6 +62,8 @@ pub const Attempt = struct {
     /// The attempt mapped shared inputs, which count in its RSS but are
     /// charged to their holders.
     uses_shared: bool,
+    /// The diagnostics files a failed attempt kept, as the rule wrote them.
+    diagnostics: []const []const u8 = &.{},
     /// Ran in a container: its process is the Podman client.
     in_container: bool = false,
     /// Start time, nanoseconds since the epoch; 0 when not recorded.
@@ -117,6 +119,15 @@ pub const Attempt = struct {
 /// A string field, or "" when it is missing.
 fn str(v: Value, key: []const u8) []const u8 {
     return fields.str(v, key) orelse "";
+}
+
+/// The strings of array `v`; others and a missing array give none.
+fn stringsOf(a: Allocator, v: ?Value) ![]const []const u8 {
+    const x = v orelse return &.{};
+    if (x != .array) return &.{};
+    var out: std.ArrayList([]const u8) = .empty;
+    for (x.array.items) |item| if (item == .string) try out.append(a, item.string);
+    return out.items;
 }
 
 fn optStr(v: ?Value) ?[]const u8 {
@@ -214,6 +225,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
         .io_stall = stall(cg, "io_some_us", wall),
         .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
         .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
+        .diagnostics = try stringsOf(a, get(v, "diagnostics")),
         .started_ns = tracker.parseTime(str(v, "started")) orelse 0,
         .step = labels.step,
         .category = labels.category,
@@ -496,6 +508,8 @@ pub const Launch = struct {
     /// digest, as `launch.json` holds them; "" when not recorded.
     engine_id: []const u8 = "",
     workflow_sha256: []const u8 = "",
+    /// The `--threads STEP=N` the launch ran with.
+    thread_overrides: []const []const u8 = &.{},
     started_text: []const u8 = "",
     max_threads: f64 = 0,
     max_memory_mib: f64 = 0,
@@ -698,13 +712,12 @@ fn pairKey(a: Allocator, x: []const u8, y: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}\x00{s}", .{ x, y });
 }
 
-/// The reason a workflow snapshot gave no graph: the problem's line and
-/// message, or the error's name.
+/// The reason a workflow snapshot gave no graph: its problems, which name
+/// their lines, on one line, or the error's name.
 fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]const u8 {
     if (err == error.OutOfMemory) return error.OutOfMemory;
     if (p.message.len == 0) return @errorName(err);
-    if (p.line > 0) return std.fmt.allocPrint(a, "line {d}: {s}", .{ p.line, p.message });
-    return a.dupe(u8, p.message);
+    return std.mem.replaceOwned(u8, a, p.message, "\n", "; ");
 }
 
 /// A JSON record, or null when it is missing or cannot be parsed; running
@@ -743,6 +756,11 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
         l.engine_id = str(v, "engine");
         l.engine = engineName(l.engine_id);
         l.workflow_sha256 = str(v, "workflow_sha256");
+        if (get(v, "thread_overrides")) |list| if (list == .array) {
+            var given: std.ArrayList([]const u8) = .empty;
+            for (list.array.items) |item| if (item == .string) try given.append(a, item.string);
+            l.thread_overrides = given.items;
+        };
         l.started_text = str(v, "started");
         l.max_threads = num(get(v, "max_threads")) orelse 0;
         l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
@@ -787,6 +805,11 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     if (l.workdir.len > 0) {
         if (workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
             l.wf = wf;
+            // The launch ran with its `--threads` overrides.
+            for (l.thread_overrides) |o| if (std.mem.indexOfScalar(u8, o, '=')) |eq| {
+                const n = std.fmt.parseInt(u32, o[eq + 1 ..], 10) catch continue;
+                _ = l.wf.?.overrideThreads(o[0..eq], n);
+            };
             if (graph.build(gpa, &l.wf.?, &problem)) |g| {
                 l.g = g;
             } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);

@@ -1,8 +1,12 @@
 # A workz workflow: an explicit graph of rules. Each rule names its inputs,
 # its outputs, one shell command and what it needs. A rule runs after the
-# rules that produce its inputs; `workz plan` shows what would run.
+# rules that produce its inputs. For many samples, write a pipeline
+# template instead and let `workz prepare` write this file:
+# `workz init --template`.
 #
-#   workz validate workflow.toml
+#   workz validate workflow.toml      every key and path, every problem at once
+#   workz graph --layer resources     what feeds what, and the shared inputs
+#   workz plan --budget               what would run, and whether it fits
 #   workz run workflow.toml
 #   workz watch
 
@@ -10,45 +14,63 @@
 name = "example"
 version = "1"
 
+# Requests of rules that set none.
+[defaults]
+memory = "256M"
+
 # A resource group: rules take units of it with `groups = { disk = 1 }`, and
 # at most `max` units are in use at once.
 [resource_groups.disk]
 max = 2
 
-# Large read-only inputs held once in memory for the rules that use them:
+# A large read-only input, held once in memory for the rules that use it,
+# and an input of each of them:
 # [shared.reference]
-# path = "/data/reference/index"
+# path = "reference/index"
+#
+# A service holding an index in shared memory for container rules, such as
+# a STAR genome; its command runs in /tmp, so name absolute paths:
+# [shared.genome]
+# path = "reference/star"
+# container = "community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4"
+# command = "STAR --genomeDir /abs/path/reference/star --genomeLoad LoadAndExit"
+# memory = "32G"
 
 [[rules]]
-name = "count"
-input = ["data/reads.txt"]
-output = ["out/count.txt"]
-shell = "mkdir -p out && wc -l < data/reads.txt > out/count.txt"
-log = "logs/count.log"
+name = "S1__count"                  # SAMPLE__STEP: reports group by step and sample
+step = "count"
+sample = "S1"
+input = ["data/S1.txt"]
+output = ["out/S1.count"]
+shell = "wc -l < data/S1.txt > out/S1.count"
+version = "wc --version | head -1"  # recorded, for workz report --methods
+log = "logs/S1.count.log"
+cutoff = true                       # consumers rerun only if the count changes
 
 [rules.resources]
 threads = 1
-memory = "256M"
 groups = { disk = 1 }
 
 [[rules]]
 name = "report"
-input = ["out/count.txt"]
+input = ["out/S1.count"]
 output = ["out/report.txt"]
-shell = "echo \"reads: $(cat out/count.txt)\" > out/report.txt"
-
-[rules.resources]
+shell = "echo \"lines: $(cat out/S1.count)\" > out/report.txt"
 memory = "64M"
 
 # A rule can run its command in a local container image (rootless Podman;
-# images are never pulled):
+# images are never pulled), keep a tool's own log when it fails, and join a
+# shared service:
 # [[rules]]
-# name = "trim"
-# input = ["data/reads.fq.gz"]
-# output = ["out/trimmed.fq.gz"]
-# container = "community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57"
-# shell = "fastp -i data/reads.fq.gz -o out/trimmed.fq.gz"
+# name = "S1__align"
+# input = ["trimmed/S1.fq"]
+# output = ["aligned/S1/Aligned.out.bam"]
+# diagnostics = ["aligned/S1/Log.out"]
+# container = "community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4"
+# version = "STAR --version"
+# shell = "STAR --genomeDir reference/star --genomeLoad LoadAndKeep --readFilesIn trimmed/S1.fq --outFileNamePrefix aligned/S1/"
 #
 # [rules.resources]
-# threads = 2
-# memory = "2G"
+# threads = 8
+# memory = "4G"
+# shared = ["genome"]

@@ -87,6 +87,23 @@ valid: gc-content (4 rules, 4 selected, 0 groups, 0 shared)
 
 `validate` checks the file, every key in it, and the graph. A misspelled key is an error that points at its line and suggests the key you meant ([Troubleshooting](Troubleshooting.md#workflow-errors)).
 
+`graph` shows what feeds what, here as text; it also writes DOT and JSON, and draws the shared inputs and groups of larger workflows ([Writing workflows](Writing-Workflows.md#check-before-running)):
+
+```sh
+workz graph --format text workflow.toml
+```
+
+```text
+gc_s1  1 thread, 64 MiB
+  before summary (gc/s1.txt)
+gc_s2  1 thread, 64 MiB
+  before summary (gc/s2.txt)
+gc_s3  1 thread, 64 MiB
+  before summary (gc/s3.txt)
+summary  1 thread, 64 MiB
+  after gc_s1 (gc/s1.txt), gc_s2 (gc/s2.txt), gc_s3 (gc/s3.txt)
+```
+
 `plan` says what a run would do, and why:
 
 ```sh
@@ -109,7 +126,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 
 ```text
 [0/4] budget 2 threads, 1.0 GiB, 2 jobs
-[0/4] page .workz/launches/20261027T024204.840-54cd2d10/report.html, drawn again every 5 s while the launch runs
+[0/4] page .workz/launches/20261027T224948.994-d496b983/report.html, drawn again every 5 s while the launch runs
 [0/4] started gc_s1 (attempt 1)
 [0/4] started gc_s2 (attempt 1)
 [1/4] completed gc_s1 (3 ms)
@@ -118,7 +135,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 [3/4] completed gc_s3 (3 ms)
 [3/4] started summary (attempt 1)
 [4/4] completed summary (4 ms)
-{"engine":"workz 0.4.0 sha256:...","engine_key":2,"launch":"20261027T024204.840-54cd2d10","status":"completed","counts":{"completed":4,...}
+{"engine":"workz 0.5.0 sha256:...","engine_key":3,"launch":"20261027T224948.994-d496b983","status":"completed","counts":{"completed":4,...}
 ```
 
 The first line gives the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. The second line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here).
@@ -149,7 +166,7 @@ reuse summary  (unchanged)
 0 to run, 4 to reuse
 ```
 
-`workz run workflow.toml --max-threads 2 --max-memory 1G` now prints its budget, its page and its summary, with `"reused":4`, and runs nothing. A rule is reused when every part of its key is the same as when it last completed (its command, environment, request, declared outputs, inputs, producers and the engine key) and its outputs are still the files it wrote. [Reuse and resume](Reuse-and-Resume.md) has the details.
+`workz run workflow.toml --max-threads 2 --max-memory 1G` prints its budget, its page and its summary, with `"reused":4`, and runs nothing. A rule is reused when every part of its [key](Reuse-and-Resume.md#the-rule-key) is the same as when it last completed and its outputs are still the files it wrote.
 
 ## Change one input
 
@@ -176,7 +193,7 @@ workz explain workflow.toml gc_s2
 
 ```text
 rule gc_s2: runs (inputs changed)
-  recorded: 2026-10-27T02:42:04.851Z, attempt .../gc-content/.workz/launches/20261027T024204.840-54cd2d10/attempts/gc_s2/001
+  recorded: 2026-10-27T22:49:49.006Z, attempt .../gc-content/.workz/launches/20261027T224948.994-d496b983/attempts/gc_s2/001
   command    same
   environment same
   request    same
@@ -185,8 +202,8 @@ rule gc_s2: runs (inputs changed)
   producers  same
   engine key same
   input changed: .../gc-content/reads/s2.txt
-    was 149547190:33:1793068924808576430:1793068924808576430
-    now 149547190:44:1793068924885822274:1793068924885822274
+    was 26697629:33:1793141388966199637:1793141388966199637
+    now 26697629:44:1793141389057291996:1793141389057291996
 ```
 
 The `was` and `now` lines are the file's [identity](Reuse-and-Resume.md#file-identity): inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
@@ -197,7 +214,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 
 ```text
 [0/4] budget 2 threads, 1.0 GiB, 2 jobs
-[0/4] page .workz/launches/20261027T024204.898-a79259e8/report.html, drawn again every 5 s while the launch runs
+[0/4] page .workz/launches/20261027T224949.073-f2ed00dc/report.html, drawn again every 5 s while the launch runs
 [2/4] started gc_s2 (attempt 1)
 [3/4] completed gc_s2 (3 ms)
 [3/4] started summary (attempt 1)
@@ -214,9 +231,9 @@ workz status --history
 
 ```text
 LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
-20261027T024204.898-a79259e8    completed        20 ms     4       0          0
-20261027T024204.875-bcc425e1    completed         9 ms     4       0          0
-20261027T024204.840-54cd2d10    completed        24 ms     4       0          0
+20261027T224949.073-f2ed00dc    completed        21 ms     4       0          0
+20261027T224949.047-acd754d6    completed         9 ms     4       0          0
+20261027T224948.994-d496b983    completed        23 ms     4       0          0
 ```
 
 `workz report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `workz report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `workz watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.
@@ -224,5 +241,6 @@ LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
 ## Where next
 
 - Read [Concepts](Concepts.md) for the vocabulary the rest of the guide uses.
-- Learn to [write larger workflows](Writing-Workflows.md), usually generated by a script, and to [choose requests](Resources-and-Scheduling.md).
+- One rule per sample, as here, is what a [pipeline template](Writing-Workflows.md#prepare-from-a-template) writes for you: `workz init --template` starts one, and `workz prepare` turns it into `workflow.toml`.
+- Learn to [write larger workflows](Writing-Workflows.md) and to [choose requests](Resources-and-Scheduling.md).
 - Keep the [workflow reference](Workflow-Reference.md) and the [command reference](Command-Reference.md) at hand.

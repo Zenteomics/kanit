@@ -15,6 +15,8 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
       control                       commands from workz control
       summary.json                  the result, written at the end
       report.html                   the launch as one page, drawn again while it runs
+      versions.json                 the output of each tool's version command
+      versions/                     each version command's full output
       shared/                       service scripts and their standard error
       attempts/
         align_S1/
@@ -24,6 +26,7 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
             stdout.log  stderr.log  the command's output
             record.json             what the attempt used and how it ended
             previous/               earlier outputs, moved aside before it ran
+            diagnostics/            tails of the rule's diagnostics files, kept when it failed
 ```
 
 A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs.
@@ -37,33 +40,47 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 - `manifest`: the digests of input-manifest files, with the identity each was hashed at.
 - `envs`: the keyed environment of each recorded rule, for `explain` to name what changed.
 
-workz 0.4.0 reads the state of earlier versions. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
+
+workz reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
 ## Launch files
 
 ### launch.json
 
-Written when the launch starts: `engine` (version and the executable's SHA-256), `engine_key`, `launch`, `workflow` and `workflow_sha256`, `workdir`, `started`, the budget (`max_threads`, `max_memory_mib`, `jobs`), and the options `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env` and `slice`, and the number of `selected` rules.
+Written when the launch starts:
+
+- `engine` (the version and the executable's SHA-256), `engine_key` and `launch`;
+- `workflow` and `workflow_sha256`, and `workflow_name` and `workflow_version` from its `[workflow]` table;
+- `workdir` and `started`;
+- the budget: `max_threads`, `max_memory_mib` and `jobs`;
+- the options: `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env`, `thread_overrides` (each `--threads STEP=N` as given) and `slice`;
+- `selected`, the number of selected rules.
+
+### versions.json
+
+Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
 
 ### summary.json
 
-Written when the launch ends, and printed by `workz run` as one line. From the demo launch (path and digest shortened, nested objects on one line):
+Written when the launch ends, and printed by `workz run` as one line. From the demo launch in [Reports](Reports.md) (path and digest shortened, nested objects on one line):
 
 ```json
 {
-  "engine": "workz 0.4.0 sha256:...",
-  "engine_key": 2,
-  "launch": "20261027T025023.762-56876086",
+  "engine": "workz 0.5.0 sha256:...",
+  "engine_key": 3,
+  "launch": "20261027T224512.478-40c9943e",
   "status": "completed",
   "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },
   "selected": 25,
-  "elapsed_s": 48.127714058,
-  "finished": "2026-10-27T02:51:11.890Z",
+  "elapsed_s": 48.368567907,
+  "finished": "2026-10-27T22:46:00.846Z",
   "error": null,
-  "engine_cost": { "cpu_s": 0.106239, "max_rss_mib": 6.30078125 },
-  "launch_dir": ".../.workz/launches/20261027T025023.762-56876086",
+  "engine_cost": { "cpu_s": 0.111436, "max_rss_mib": 6.5546875 },
+  "launch_dir": ".../.workz/launches/20261027T224512.478-40c9943e",
   "failures": [],
-  "changed_outputs": []
+  "changed_outputs": [],
+  "previous_bytes": 0
 }
 ```
 
@@ -71,9 +88,11 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `error` holds the reason a launch was refused or stopped, or `null`.
 - `engine_cost` is the CPU time and peak memory of the engine itself.
 - A refused launch counts every selected rule as `not_started`.
-- `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal; then `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
-- `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started.
+- `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal.
+- In that running summary, `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
+- `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started, and `diagnostics`, the paths of the copies its last attempt kept ([Writing workflows](Writing-Workflows.md#diagnostics)).
 - `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
+- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/`, which stay until `workz clean --previous` removes them.
 
 ## Attempt files
 
@@ -98,10 +117,18 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `request`              | `threads`, `memory_mib`, `groups`, `shared`, `container`   |
 | `labels`               | `step`, `sample`, `category`, `tool`; `declared` for each  |
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
+| `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
+| `image`                | the image ID a container rule ran, else `null`             |
+| `version`              | the rule's version command, else `null`                    |
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |
 
-The `cgroup` object holds `memory_peak`, `memory_current`, `oom`, `oom_kill` and `memory_max_events`, `cpu_usage_usec`, `file` (page cache still charged when the attempt ended), `anon_peak` (the largest anonymous memory, heap and stacks, that the run's samples every 5 s saw while the attempt ran; null for an attempt shorter than one sample), and the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
+The `cgroup` object holds:
+
+- `memory_peak`, `memory_current`, `oom`, `oom_kill`, `memory_max_events` and `cpu_usage_usec`;
+- `file`, the page cache still charged when the attempt ended;
+- `anon_peak`, the largest anonymous memory (heap and stacks) that the run samples, every 5 s, saw while the attempt ran, or `null` for an attempt shorter than one sample;
+- the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
 
 ## Events
 
@@ -120,27 +147,27 @@ Launch events:
 - `inputs_checked`: `manifest`, `files`, `files_read`, `bytes_read`, `seconds`, `ok`.
 - `containers_checked`: `images`, `leftovers_removed`, `seconds`.
 - `memory_protected`: `memory_low_mib`, `ok`.
-- `sample`: `running`, `ready`, `threads_reserved`, `memory_reserved_mib`, `memory_current`, `cpu_cores_used`.
+- `sample`: `running`, `ready`, `threads_reserved`, `memory_reserved_mib` (with `shared_reserved_mib`, the part shared inputs hold), `memory_current`, `cpu_cores_used`.
 - `control`: `command`, `rule`, `result`.
 - `cancel_requested`: `signal`.
 
 Rule events:
 
 - `task_waiting`: `rule`, `reason`.
-- `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`.
+- `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`, `shared` (the shared inputs it holds).
 - `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.
 - `task_failed`: `rule`, `attempt` (null when the rule failed before an attempt started) and `reason`.
 - `task_blocked`, `task_reused`, `task_cancelling`: `rule`.
 - `task_timeout`: `rule`, `attempt`.
-- `output_preserved`: `rule`, `path`, `moved_to`.
+- `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
 - `output_changed`, `output_identity_refreshed`: `rule`, `path`.
 
 Shared input events:
 
 - `shared_loading`: `name`, `pid`, `cgroup`, and `path` and `bytes` for a file input, or `container` and `memory_mib` for a service.
 - `shared_loaded`: `name`, `bytes`, `holder_file_bytes`.
-- `shared_released`: `name`, `memory_peak`, `cpu_s`.
+- `shared_released`: `name`, `memory_peak`, `cpu_s`, `users` (attempts that started using it while it was held) and `held_s`.
 - `shared_retry`: `name`, `reason`, `next_start`.
 - `shared_failed`: `name`, `reason`, `memory_peak`.
 - `shared_timeout`: `name`.
@@ -164,9 +191,10 @@ would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) t
 
 - Without options, `workz clean` removes only the containers earlier launches left behind.
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to.
+- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--dry-run` lists what would go.
-- It takes the run lock, so it never removes anything while a launch runs.
+- It takes the working directory's lock, so it never removes anything while a launch runs.
 
 Removing `.workz/` entirely is safe when no launch runs; the next launch then runs every rule.
 
@@ -180,5 +208,5 @@ To cite a run, in a lab notebook or a methods section, note its launch ID and ke
 - `report.html`, the launch as one page.
 - `attempts/RULE/NNN/`, each attempt's command, request, record, standard output and standard error.
 
-`workz report --format json` lists every attempt's measures in one file. The tools a rule ran are those its command names: label them with `tool` ([Concepts](Concepts.md#steps-samples-categories-and-tools)), and print their versions from the command, so each attempt's output records them.
+`workz report --methods` turns these records into a description of what produced the results ([Reports](Reports.md#methods)); give each rule a `tool` label and a `version` command so it can name them. `workz report --format json` lists every attempt's measures in one file.
 

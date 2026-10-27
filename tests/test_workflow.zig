@@ -63,7 +63,6 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
         \\
         \\[resource_groups.disk]
         \\max = 2
-        \\wait = "queue"
         \\
         \\[shared.ref]
         \\path = "ref"
@@ -76,6 +75,8 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
         \\priority = -5
         \\log = "logs/a.log"
         \\benchmark = "bench/a.json"
+        \\diagnostics = ["out/a/Log.out"]
+        \\version = "tool --version"
         \\retries = 2
         \\timeout = "1h30m"
         \\cutoff = true
@@ -104,11 +105,15 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
     try testing.expectEqualStrings("ref", r.shared[0]);
     try testing.expectEqualStrings("/abs/in.txt", r.input_abs[1]);
     try testing.expect(std.mem.endsWith(u8, r.output_abs[0], "/out/a.txt"));
+    try testing.expectEqualStrings("out/a/Log.out", r.diagnostics[0]);
+    try testing.expectEqualStrings("tool --version", r.version.?);
+    try testing.expect(wf.rules[1].version == null);
+    try testing.expect(std.mem.endsWith(u8, r.diagnostics_abs[0], "/out/a/Log.out"));
     try testing.expectEqual(@as(u32, 2), wf.rules[1].threads);
     try testing.expectEqual(@as(u64, 1024), wf.rules[1].memory_mib);
 }
 
-test "[unit] - [workflow]: a mapped shared input is an input of the rules that use it" {
+test "[unit] - [workflow]: a shared input's path is an input of the rules that use it" {
     var s = try Scratch.init();
     defer s.deinit();
     var problem: workflow.Problem = .{};
@@ -156,7 +161,9 @@ test "[unit] - [workflow]: a mapped shared input is an input of the rules that u
     try testing.expectEqualStrings("ref/index", r.input[1]);
     try testing.expect(std.mem.endsWith(u8, r.input_abs[1], "/ref/index"));
     try testing.expectEqual(@as(usize, 2), wf.rules[1].input.len);
-    try testing.expectEqual(@as(usize, 0), wf.rules[2].input.len);
+    // A service's index too: a rebuilt one reruns the rules that join it.
+    try testing.expectEqual(@as(usize, 1), wf.rules[2].input.len);
+    try testing.expectEqualStrings("ref/star", wf.rules[2].input[0]);
 }
 
 test "format 1 rejects unknown keys, bad values and unsafe paths" {
@@ -172,8 +179,10 @@ test "format 1 rejects unknown keys, bad values and unsafe paths" {
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ninput = [\"*.bam\"]\n", "explicit local path");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"/tmp/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "relative path inside the working directory");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\".workz/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "engine record directory");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ndiagnostics = [\"/var/log/x\"]\n", "diagnostics '/var/log/x' must be a relative path");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\nversion = \" \"\n", "version must be a command");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\ngroups = { disk = 1 }\n", "undeclared resource group");
-    try expectInvalid(head ++ "[resource_groups.disk]\nmax = 1\nwait = \"skip\"\n[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "must be \"queue\"");
+    try expectInvalid(head ++ "[resource_groups.disk]\nmax = 1\nwait = \"queue\"\n[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "unknown key 'wait' in a resource group");
     try expectInvalid(head ++ "[shared.ref]\npath = \"r\"\n[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"rfe\"]\n", "did you mean 'ref'?");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n[[rules]]\nname = \"x\"\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n", "duplicate rule name");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\ninput = [\"x\"]\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "cannot overwrite its own input");
@@ -269,8 +278,8 @@ test "[unit] - [workflow]: declared labels replace the derived ones and are not 
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const ka = (try state.computeKey(arena.allocator(), &ids, &plain.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
-    const kb = (try state.computeKey(arena.allocator(), &ids, &labelled.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const ka = (try state.computeKey(arena.allocator(), &ids, &plain.rules[0], plain.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const kb = (try state.computeKey(arena.allocator(), &ids, &labelled.rules[0], labelled.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings(ka.key, kb.key);
 }
 
@@ -300,7 +309,7 @@ test "an input reaching a declared output through a symlinked directory is refus
     const text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"real/x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"b\"\ninput = [\"alias/x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     try testing.expectError(error.Invalid, loadText(&s, text, &problem));
-    try testing.expectEqualStrings("rule b: declare the producer path instead of the symlink 'alias/x'", problem.message);
+    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule b: declare the producer path instead of the symlink 'alias/x'"));
 }
 
 test "a shared timeout belongs to a service" {
@@ -322,4 +331,237 @@ test "service retries and mounts need a service" {
     try expectInvalid(head ++ "[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\nretries = 4\n", "retries must be between 0 and 3");
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nretries = 1\n", "retries start a service again");
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nmounts = { \"a\" = \"/b\" }\n", "mounts place host files inside a service's image");
+}
+
+test "[unit] - [workflow]: a thread override sets every rule of its step and no other" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        \\[[rules]]
+        \\name = "align_s1"
+        \\output = ["a1"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "align_s2"
+        \\output = ["a2"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "count"
+        \\output = ["c"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem);
+    defer wf.deinit();
+    try testing.expectEqual(@as(usize, 2), wf.overrideThreads("align", 16));
+    try testing.expectEqual(@as(u32, 16), wf.rules[0].threads);
+    try testing.expectEqual(@as(u32, 16), wf.rules[1].threads);
+    try testing.expectEqual(@as(u32, 1), wf.rules[2].threads);
+    try testing.expectEqual(@as(usize, 0), wf.overrideThreads("algn", 2));
+}
+
+test "[unit] - [workflow]: validation reports every problem, each with its line" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[resource_groups.disk]
+        \\max = 0
+        \\
+        \\[[rules]]
+        \\name = "a"
+        \\outputs = ["a"]
+        \\output = ["a"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["b"]
+        \\shell = "true"
+        \\memory = "lots"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "resource_groups.disk.max must be between 1 and 1000000") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'outputs' in a rule; did you mean 'output'?") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "invalid memory") != null or std.mem.indexOf(u8, problem.message, "'lots'") != null);
+    var lines = std.mem.splitScalar(u8, problem.message, '\n');
+    while (lines.next()) |line| try testing.expect(std.mem.startsWith(u8, line, "line "));
+}
+
+test "[unit] - [workflow]: checks across rules report every rule at fault" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[[rules]]
+        \\name = "a"
+        \\output = ["x"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["x"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "c"
+        \\output = ["c"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[rules.resources]
+        \\groups = { disk = 1 }
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 2), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rules a and b both produce 'x'") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rule c uses undeclared resource group 'disk'") != null);
+}
+
+test "[unit] - [workflow]: every unknown key and the problems around them are reported" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s,
+        \\[workflow]
+        \\version = "1"
+        \\
+        \\[[rules]]
+        \\name = "a"
+        \\outptu = ["a"]
+        \\shel = "true"
+        \\output = ["a"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "workflow.name is required") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'outptu'") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "unknown key 'shel'") != null);
+}
+
+test "[unit] - [workflow]: a bad output does not hide a conflict with the rule's next output" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(&s, head ++
+        \\[[rules]]
+        \\name = "a"
+        \\output = ["../bad", "shared.txt"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\diagnostics = ["log.txt", "./log.txt"]
+        \\[[rules]]
+        \\name = "b"
+        \\output = ["shared.txt"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem));
+    try testing.expectEqual(@as(u32, 3), problem.count);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "'../bad' must be a relative path") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rule a lists diagnostics './log.txt' twice") != null);
+    try testing.expect(std.mem.indexOf(u8, problem.message, "rules a and b both produce 'shared.txt'") != null);
+}
+
+test "[unit] - [schema]: every key the parser accepts has a type in the schema" {
+    for (workz.schema.tables) |t| for (t.keys) |name| {
+        if (workz.schema.find(t.types, name) == null) {
+            std.debug.print("no schema type for key '{s}'\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    };
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    try workz.schema.write(&text.writer);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text.written(), .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("properties").?.object.get("rules") != null);
+}
+
+test "[unit] - [prepare]: a template becomes one rule per sample, with labels, gathers and literal braces" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.tsv", "sample\tr1\n# a comment\nS1\treads/a.fq\nS2\treads/b.fq\n");
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[params]
+        \\ref = "ref/idx"
+        \\[samples]
+        \\sheet = "samples.tsv"
+        \\[[steps]]
+        \\name = "count"
+        \\for_each = "sample"
+        \\input = ["{r1}", "{ref}"]
+        \\output = ["counts/{sample}.txt"]
+        \\shell = "awk '{print $1}' {r1} > counts/{sample}.txt -t {threads}"
+        \\threads = 2
+        \\memory = "1M"
+        \\[[steps]]
+        \\name = "merge"
+        \\input = ["counts/{sample}.txt"]
+        \\output = ["all.txt"]
+        \\shell = "cat {input} > {output}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    for ([_][]const u8{
+        "name = \"S1__count\"\nstep = \"count\"\nsample = \"S1\"\ninput = [\"reads/a.fq\", \"ref/idx\"]",
+        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t 2\"",
+        "input = [\"counts/S1.txt\", \"counts/S2.txt\"]",
+        "shell = \"cat counts/S1.txt counts/S2.txt > all.txt\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "[unit] - [prepare]: mistakes in a template are named" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("dup.tsv", "sample\nS1\nS1\n");
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [\"{x}.txt\"]\nshell = \"true\"\n", .want = "output names {x}, which is no sample-sheet column, param or placeholder" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nnames = [\"s1\"]\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"echo {sample}\"\n", .want = "a column of the sample sheet, but the step has no for_each" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"dup.tsv\"\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "lists sample S1 twice" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutputs = [\"a.txt\"]\nshell = \"true\"\n", .want = "unknown key 'outputs'; did you mean 'output'?" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[rules]]\nname = \"a\"\n", .want = "write rules as [[steps]]" },
+    }, 0..) |c, k| {
+        var name_buf: [16]u8 = undefined;
+        const path = try s.file(try std.fmt.bufPrint(&name_buf, "t{d}.toml", .{k}), c.text);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var problem: workz.prepare.Problem = .{};
+        try testing.expectError(error.Invalid, workz.prepare.compile(testing.allocator, arena.allocator(), path, "t.toml", &problem));
+        if (std.mem.indexOf(u8, problem.message, c.want) == null) {
+            std.debug.print("message: {s}\nexpected: {s}\n", .{ problem.message, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "[unit] - [prepare]: --check reads rule names that a comment follows" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    const old = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"   # SAMPLE__STEP\nshell = \"true\"\n";
+    const new = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"\nshell = \"true\"\n";
+    try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
+    try testing.expectEqualStrings("change 1: S1__count\n", text.written());
 }

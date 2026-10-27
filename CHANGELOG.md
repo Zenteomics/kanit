@@ -4,6 +4,106 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
+## [Unreleased]
+
+0.5.0 is about writing pipelines and seeing them. `workz prepare` writes the explicit workflow from a template that describes each step once over a sample sheet, and `workz graph` shows it in layers: rules, files, and each shared input held once with the rules that write and use it. Results become citable, a failed tool's own log is kept, a moved project keeps its results, and the memory budget counts container clients and shared inputs honestly.
+
+Four changes need action:
+
+- **Expect every rule to run once.**
+  - Rule keys name paths inside the working directory relative to it, so the engine key moves to 3.
+  - `state.json` moves to format 4, which 0.4.0 and earlier refuse; to go back, delete `.workz/state.json`, which reruns every rule.
+  - Workflows that use the new `diagnostics` or `version` keys need 0.5.0.
+- **Remove what workz no longer accepts:** a resource group's `wait` key, and `--resume-failed` and `--provenance` on `run`.
+- **Budget 32 MiB more per container rule.** A container rule or service reserves 32 MiB beside its request for its Podman client, so one within 32 MiB of `--max-memory` is refused, and fewer run at once on a tight budget.
+- **Update scripts that read records or output.**
+  - `record.json` adds `diagnostics`, `image` and `version`.
+  - `summary.json` and `status --json` add `previous_bytes`, and each failure adds `diagnostics`.
+  - `launch.json` adds `workflow_name`, `workflow_version` and `thread_overrides`.
+  - Events: `task_started` adds `shared`, `shared_released` adds `users` and `held_s`, `output_preserved` adds `bytes`, and `sample` adds `shared_reserved_mib`.
+  - A rule waiting for a shared input waits for `loading shared:NAME`, not `loading shared inputs`.
+  - A launch whose rules name `version` writes `versions.json`.
+  - Workflow errors come as one line per problem, under their count.
+  - `workz graph` prints text on a terminal, and its DOT names nodes by kind, such as `rule:NAME`.
+  - `watch`, `status`, `logs`, `report`, `control` and `clean` refuse `-t`, which they ignored.
+  - An input manifest that cannot be read refuses the launch with exit status 2, not 1.
+  - `plan` gives a changed output as `output changed: PATH (run refuses without --rerun-rule or --rerun)`.
+
+### Added
+
+- **Pipeline templates.** `workz prepare` writes the explicit workflow from a pipeline template and a sample sheet ([Writing workflows](wiki/Writing-Workflows.md#prepare-from-a-template)).
+  - A step with `for_each = "sample"` becomes one rule per sample, named `SAMPLE__STEP` and labelled with its step and sample.
+  - `{name}` takes a sheet column, a `[params]` value or the step's name; in `shell`, `{input}`, `{output}` and `{threads}` are the rule's own.
+  - In a step without `for_each`, a list element naming a column becomes one element per sample, so a report step reads every sample's file.
+  - Other braces stay as written, so awk programs and shell variables need no escaping.
+  - The workflow is checked as `validate` would before it replaces `workflow.toml`.
+  - `prepare --check` lists the rules an edit would add, remove and change, without writing.
+  - `workz init --template` writes a commented starter template and sample sheet.
+- **The graph in layers.** `workz graph` prints text on a terminal, DOT to a file or a pipe, or JSON.
+  - `--layer files` puts the files between the rules; `--layer resources` adds the shared inputs and resource groups; `--layer all` shows both.
+  - `--by step` draws one node per step instead of per rule.
+  - `--focus +RULE`, `RULE+` and `2+RULE` keep a rule with its upstream or downstream rules.
+  - `--why FROM:TO` prints one path between two rules, with the file each one reads.
+  - `--users NAME` shows a shared input, the rules writing what it loads, and the rules using it.
+- **Shared inputs you can see.**
+  - The launch page draws each shared input under the pipeline, with the memory it holds once and its users, wired to the steps that use it and from the step writing what a service loads; a checkbox hides the layer.
+  - FIG. 5 draws the memory shared inputs hold as its own band.
+  - Each attempt records the shared inputs it held, and `report --bottlenecks` shows each input's users and holding time.
+  - The rule detail in `watch` lists the rules it reads from, the rules reading from it and the shared inputs it holds.
+- **Results you can cite.** `workz report --methods` describes what produced the results in a working directory, across the launches that made them, as text or JSON.
+  - It names the workflow file and its digest, the engine, each tool with its version and image, and each step's request and command.
+  - A rule may name a `version` command, such as `STAR --version`, run once per launch for each image and command; a failed one records no version.
+- **Failures you can read.** A rule may name `diagnostics`, files such as STAR's `Log.out` where a tool writes why it failed.
+  - A failed attempt keeps the last 64 KiB of each in its `diagnostics/` directory.
+  - The terminal, `status`, `workz logs` and the launch page show them.
+  - The failure reason quotes the first one when standard error is empty.
+- **A budget check before the launch.** `workz plan --budget` checks every rule as `run` would, with each shared input counted once.
+  - It names each rule that does not fit and the largest need, and exits 1 when `run` would refuse the launch.
+  - `--max-threads` and `--max-memory` set the budget it checks.
+- **Threads you can try.** `workz run --threads STEP=N` gives a step's rules N threads for one launch, without editing the workflow.
+  - `plan` and `explain` take it, to preview.
+  - The request stays part of the rule key, so those rules run again with it, and again without it.
+  - `report --compare` notes a step whose thread request differs between the two launches.
+- **Disk you can reclaim.** `workz clean --previous` removes the earlier outputs that reruns moved into `previous/`, and keeps the rest of each launch.
+  - `run` and `status` say how much a launch kept there.
+- **Help while writing.**
+  - `workz schema` prints a JSON Schema of the format, built from the parser's own key lists, so editors complete keys and mark mistakes as you type.
+  - `validate` notes shared inputs and groups no rule uses, and rules left out of the per-sample views.
+  - `validate --inputs` lists the inputs that exist nowhere and that no rule writes.
+  - `workz init` writes a starter workflow that shows labels, `version`, `cutoff`, diagnostics and a shared service.
+
+### Changed
+
+- **Every problem at once.** `validate`, and every command that reads a workflow, reports up to 50 problems and a count of the rest, each with its line where it has one.
+  - Each rule, resource group and shared input reports every unknown key and its first bad value.
+  - Checks between rules run once every rule reads well, and report every item at fault.
+- **Projects you can move.** Paths inside the working directory enter rule keys and `state.json` relative to it.
+  - Moving or renaming a project within one file system keeps every rule reused.
+  - Paths outside it stay absolute.
+- **A service's index is an input.** The path of a shared service is an input of every rule that joins it.
+  - A rebuilt index reruns those rules, after the rule that writes it; listing the index in `input` is no longer needed.
+  - A rule that joins a service may not write inside its path.
+- **Containers inside the budget.** Each running container rule and service reserves 32 MiB beside its request for its Podman client and conmon, which take about 20 MiB.
+  - They shared the engine's 256 MiB of headroom before, which 16 container rules at once outgrew.
+  - The refusal of a rule too large for the budget names what its memory need includes.
+
+### Removed
+
+- **A resource group's `wait` key.** Its only accepted value, `"queue"`, described how every group works.
+- **`run --resume-failed` and `--provenance`,** which 0.4.0 accepted and ignored.
+
+### Fixed
+
+- **A rule that reads a directory** waits for every rule writing inside it; it could start first and find the directory empty.
+- **A shared input that fails to start** fails the rule being admitted without miscounting its other shared inputs, which could crash the engine.
+- **A report on a launch whose workflow copy is invalid** names each problem's line once.
+- **Command-line mistakes** get a clear answer.
+  - `--pass-env` refuses a name that is not a variable name; an empty one was recorded and shown as a change.
+  - A negative count, such as `-r -1`, is named as an invalid value, not a missing one.
+  - `report --compare .`, or another relative working directory, compares with its newest launch.
+  - `explain` and `--rerun-rule` suggest the closest rule name.
+- **File errors** read as words, such as `no such file or directory`; `init` and `prepare` report a file they cannot write instead of crashing.
+
 ## [0.4.0] - 2026-10-27
 
 Rules can now say what they are, by step, sample, category and tool, and the reports and a rebuilt HTML page group by those labels; every launch keeps that page up to date while it runs. The terminal output is rebuilt too: `run` keeps a status line and ends with a summary, `watch` draws gauges, and every command explains itself with `--help`. Reports say what limited a launch from lower bounds its records support, and a launch that failed or was refused says what went wrong and the command that resolves it. A rule that cannot be set up, or a killed engine, no longer takes the rest of the launch with it, and reuse survives a reboot on btrfs.

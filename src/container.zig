@@ -228,13 +228,13 @@ pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std
         };
         var w: std.Io.Writer.Allocating = .init(a);
         try w.writer.print("image {s}", .{images.get(img) orelse img});
-        for (r.mounts) |m| try w.writer.print(" mount {s} {s}", .{ m.target, m.source_abs });
+        for (r.mounts) |m| try w.writer.print(" mount {s} {s}", .{ m.target, workflow.keyPath(wf.root, m.source_abs) });
         for (r.shared) |s| if (wf.sharedIndex(s)) |si| {
             const svc = wf.shared[si];
             const simg = svc.container orelse continue;
             var text_w: std.Io.Writer.Allocating = .init(a);
-            try text_w.writer.print("{s}\x00{s}\x00{s}", .{ images.get(simg) orelse simg, svc.command.?, svc.path_abs orelse "" });
-            for (svc.mounts) |m| try text_w.writer.print("\x00mount {s} {s}", .{ m.target, m.source_abs });
+            try text_w.writer.print("{s}\x00{s}\x00{s}", .{ images.get(simg) orelse simg, svc.command.?, if (svc.path_abs) |p| workflow.keyPath(wf.root, p) else "" });
+            for (svc.mounts) |m| try text_w.writer.print("\x00mount {s} {s}", .{ m.target, workflow.keyPath(wf.root, m.source_abs) });
             const text = text_w.written();
             try w.writer.print(" service {s} {s}", .{ svc.name, &sys.sha256Bytes(text) });
         };

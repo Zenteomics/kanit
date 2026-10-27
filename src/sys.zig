@@ -50,6 +50,21 @@ pub fn errnoName() []const u8 {
     return @tagName(last_errno);
 }
 
+/// An error of these calls in words, for messages; others by name.
+pub fn errorText(err: anyerror) []const u8 {
+    return switch (err) {
+        error.FileNotFound => "no such file or directory",
+        error.PathAlreadyExists => "it already exists",
+        error.AccessDenied => "permission denied, or a read-only file system",
+        error.Busy => "busy, or a directory that is not empty",
+        error.NotDir => "a part of the path is not a directory",
+        error.IsDir => "it is a directory",
+        error.NoSpace => "no space left on the device",
+        error.FileTooBig => "the file is too large",
+        else => @errorName(err),
+    };
+}
+
 /// Copies `path` into a null-terminated buffer owned by `gpa`.
 pub fn z(gpa: Allocator, path: []const u8) ![:0]u8 {
     return gpa.dupeZ(u8, path);
@@ -136,6 +151,24 @@ pub fn readFile(gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     return list.toOwnedSlice(gpa);
 }
 
+/// Returns at most the first `max` bytes of a file, or an empty slice if it is missing.
+pub fn readHead(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
+    const fd = openRead(gpa, path) catch |err| switch (err) {
+        error.FileNotFound => return gpa.alloc(u8, 0),
+        else => return err,
+    };
+    defer close(fd);
+    const out = try gpa.alloc(u8, max);
+    errdefer gpa.free(out);
+    var done: usize = 0;
+    while (done < max) {
+        const n = try check(linux.pread(fd, out[done..].ptr, max - done, @intCast(done)));
+        if (n == 0) break;
+        done += n;
+    }
+    return gpa.realloc(out, done);
+}
+
 /// Returns at most the last `max` bytes of a file, or an empty slice if it is missing.
 pub fn readTail(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = openRead(gpa, path) catch |err| switch (err) {
@@ -201,6 +234,16 @@ pub fn rename(gpa: Allocator, from: []const u8, to: []const u8) !void {
     const b = try z(gpa, to);
     defer gpa.free(b);
     _ = try check(linux.renameat(linux.AT.FDCWD, a, linux.AT.FDCWD, b));
+}
+
+/// Removes file `path`; a missing one is no error.
+pub fn unlink(gpa: Allocator, path: []const u8) !void {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    _ = check(linux.unlinkat(linux.AT.FDCWD, p, 0)) catch |err| switch (err) {
+        error.FileNotFound => {},
+        else => return err,
+    };
 }
 
 pub fn mkdir(gpa: Allocator, path: []const u8) !void {

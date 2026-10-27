@@ -24,30 +24,30 @@ test "the rule key changes with each of its parts" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const base = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
-    const same = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const base = (try state.computeKey(a, &ids, &wf.rules[0], wf.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const same = (try state.computeKey(a, &ids, &wf.rules[0], wf.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings(base.key, same.key);
-    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], "/usr/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const other_path = (try state.computeKey(a, &ids, &wf.rules[0], wf.root, "/usr/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_path.key));
-    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{}, &.{}, "engine 2", null, "", &missing)).?;
+    const other_engine = (try state.computeKey(a, &ids, &wf.rules[0], wf.root, "/bin", &.{}, &.{}, "engine 2", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_engine.key));
-    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], "/bin", &.{"p"}, &.{"k"}, "engine 1", null, "", &missing)).?;
+    const with_parent = (try state.computeKey(a, &ids, &wf.rules[0], wf.root, "/bin", &.{"p"}, &.{"k"}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, with_parent.key));
     var changed = wf.rules[0];
     changed.threads = 2;
-    const more_threads = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const more_threads = (try state.computeKey(a, &ids, &changed, wf.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expectEqualStrings("threads=2 memory=1M", more_threads.request);
     try testing.expect(!std.mem.eql(u8, base.key, more_threads.key));
     changed = wf.rules[0];
     changed.shell = "cat in.txt in.txt > x";
-    const other_cmd = (try state.computeKey(a, &ids, &changed, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const other_cmd = (try state.computeKey(a, &ids, &changed, wf.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.key, other_cmd.key));
 
     // Rewriting the input changes its identity even with the same size.
     _ = try s.file("in.txt", "DATA");
     var fresh = state.Identities.init(testing.allocator);
     defer fresh.deinit();
-    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    const rewritten = (try state.computeKey(a, &fresh, &wf.rules[0], wf.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
     try testing.expect(!std.mem.eql(u8, base.inputs, rewritten.inputs));
     try testing.expectEqualStrings(base.command, rewritten.command);
 }
@@ -109,7 +109,7 @@ test "[regression] - [state]: a format 1 file is saved as the current format" {
     try old.save(testing.allocator);
     const text = try sys.readFile(testing.allocator, try std.fs.path.join(old.allocator(), &.{ s.path, "state.json" }), 1 << 20);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":3,"));
+    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":4,"));
 }
 
 test "[regression] - [state]: identities recorded with the device number match without it" {
@@ -145,9 +145,9 @@ test "the key of a fixed rule matches its pinned value" {
     var ids = state.Identities.init(testing.allocator);
     defer ids.deinit();
     var missing: ?[]const u8 = null;
-    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, "", &missing)).?;
-    try testing.expectEqualStrings("workz-key 2", k.engine);
-    try testing.expectEqualStrings("7d15b2e0e68740f40d5a9f9e3081ebc2563c64ef5783a077ec50bee62edf996e", k.key);
+    const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], wf.root, "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, "", &missing)).?;
+    try testing.expectEqualStrings("workz-key 3", k.engine);
+    try testing.expectEqualStrings("0f80fc5a9c30961c380a885b9374fe954123c66b09a0fc820368ba7be745f830", k.key);
 }
 
 test "the keyed environment lists PATH, locale, time zone and passed names in order" {
@@ -194,4 +194,92 @@ test "[regression] - [sys]: a recorded file identity does not change when only t
     var y: [96]u8 = undefined;
     try testing.expectEqualStrings(try std.fmt.bufPrint(&x, "{f}", .{a}), try std.fmt.bufPrint(&y, "{f}", .{b}));
     try testing.expectEqualStrings("148455540:21511621:1793000094563445142:1793000094576445205", try std.fmt.bufPrint(&x, "{f}", .{a}));
+}
+
+test "[unit] - [state]: a rule keeps its key when its project directory moves" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("p1");
+    _ = try s.file("p1/in.txt", "data");
+    const text = head ++ "[[rules]]\nname = \"x\"\ninput = [\"in.txt\"]\noutput = [\"x\"]\nshell = \"cat in.txt > x\"\nmemory = \"1M\"\n";
+    const wf_path = try s.file("p1/wf.toml", text);
+    const p1 = try std.fs.path.join(testing.allocator, &.{ s.path, "p1" });
+    defer testing.allocator.free(p1);
+    const p2 = try std.fs.path.join(testing.allocator, &.{ s.path, "p2" });
+    defer testing.allocator.free(p2);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var missing: ?[]const u8 = null;
+    var problem: workflow.Problem = .{};
+
+    var ids1 = state.Identities.init(testing.allocator);
+    defer ids1.deinit();
+    var wf1 = try workflow.load(testing.allocator, wf_path, p1, &problem);
+    defer wf1.deinit();
+    const before = (try state.computeKey(a, &ids1, &wf1.rules[0], wf1.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+
+    // Moved within the file system, each file keeps its identity.
+    try sys.rename(testing.allocator, p1, p2);
+    defer sys.rename(testing.allocator, p2, p1) catch {};
+    var ids2 = state.Identities.init(testing.allocator);
+    defer ids2.deinit();
+    var wf2 = try workflow.load(testing.allocator, try std.fs.path.join(a, &.{ p2, "wf.toml" }), p2, &problem);
+    defer wf2.deinit();
+    const after = (try state.computeKey(a, &ids2, &wf2.rules[0], wf2.root, "/bin", &.{}, &.{}, "engine 1", null, "", &missing)).?;
+    try testing.expectEqualStrings(before.key, after.key);
+}
+
+test "[unit] - [state]: paths inside the working directory are saved relative to it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    _ = try s.file(".workz/state.json",
+        \\{"format_version": 4, "files": {"out.txt": "7:3:100:200", "/data/ref.fa": "9:5:300:400"},
+        \\"manifest": {}, "envs": {},
+        \\"rules": {"x": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g",
+        \\  "outputs": [{"path": "out.txt", "id": "7:3:100:200"}], "attempt": ".workz/launches/L/attempts/x/001", "finished": "f",
+        \\  "input_ids": [{"path": "/data/ref.fa", "id": "9:5:300:400"}]}}}
+    );
+    var st = try state.load(testing.allocator, rec);
+    defer st.deinit();
+    const e = st.data.rules.map.get("x").?;
+    const out = try std.fs.path.join(st.allocator(), &.{ s.path, "out.txt" });
+    try testing.expectEqualStrings(out, e.outputs[0].path);
+    try testing.expectEqualStrings(try std.fs.path.join(st.allocator(), &.{ s.path, ".workz/launches/L/attempts/x/001" }), e.attempt);
+    try testing.expectEqualStrings("/data/ref.fa", e.input_ids[0].path);
+    try testing.expect(st.data.files.map.get(out) != null);
+    try st.save(testing.allocator);
+    const saved = try sys.readFile(testing.allocator, try std.fs.path.join(st.allocator(), &.{ rec, "state.json" }), 1 << 20);
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"path\":\"out.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"attempt\":\".workz/launches/L/attempts/x/001\"") != null);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"/data/ref.fa\"") != null);
+}
+
+test "[unit] - [state]: key paths are relative only inside the working directory" {
+    try testing.expectEqualStrings("a/b.txt", workflow.keyPath("/w", "/w/a/b.txt"));
+    try testing.expectEqualStrings(".", workflow.keyPath("/w", "/w"));
+    try testing.expectEqualStrings("/work/a", workflow.keyPath("/w", "/work/a"));
+    try testing.expectEqualStrings("/data/ref.fa", workflow.keyPath("/w", "/data/ref.fa"));
+    try testing.expectEqualStrings("/w/x", workflow.keyPath("/", "/w/x"));
+}
+
+test "[unit] - [state]: manifest entries round-trip relative to the working directory" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    _ = try s.file(".workz/state.json",
+        \\{"format_version": 4, "files": {}, "envs": {}, "rules": {},
+        \\"manifest": {"in/r1.fq": {"id": "9:5:300:400", "sha256": "ab"}, "/data/r2.fq": {"id": "1:2:3:4", "sha256": "cd"}}}
+    );
+    var st = try state.load(testing.allocator, rec);
+    defer st.deinit();
+    try testing.expect(st.data.manifest.map.get(try std.fs.path.join(st.allocator(), &.{ s.path, "in/r1.fq" })) != null);
+    try testing.expect(st.data.manifest.map.get("/data/r2.fq") != null);
+    try st.save(testing.allocator);
+    const saved = try sys.readFile(testing.allocator, try std.fs.path.join(st.allocator(), &.{ rec, "state.json" }), 1 << 20);
+    defer testing.allocator.free(saved);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"in/r1.fq\"") != null);
+    try testing.expect(std.mem.indexOf(u8, saved, "\"/data/r2.fq\"") != null);
 }

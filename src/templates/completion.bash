@@ -5,7 +5,7 @@ _workz() {
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
-    local commands="init validate plan explain graph run control watch status logs report verify clean completion help version"
+    local commands="init prepare schema validate plan explain graph run control watch status logs report verify clean completion help version"
     if [ "$COMP_CWORD" = 1 ]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
@@ -18,7 +18,7 @@ _workz() {
             -d | --workdir) wd=${COMP_WORDS[i+1]}; ((i++)) ;;
             -t | --target | --rerun-rule | --pass-env | -j | --jobs | --max-threads | --max-memory | -r | --retry | \
                 --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | \
-                --compare | --keep | --interval) ((i++)) ;;
+                --compare | --keep | --interval | --threads | --layer | --by | --focus | --why | --users) ((i++)) ;;
             *.toml) wf=${COMP_WORDS[i]} ;;
             -*) ;;
             *) words+=("${COMP_WORDS[i]}") ;;
@@ -33,7 +33,12 @@ _workz() {
             return ;;
         -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
         --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
-        --format) COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); return ;;
+        --format)
+            if [ "$cmd" = graph ]; then COMPREPLY=($(compgen -W "text dot json" -- "$cur"))
+            else COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); fi
+            return ;;
+        --layer) COMPREPLY=($(compgen -W "rules files resources all" -- "$cur")); return ;;
+        --by) COMPREPLY=($(compgen -W "step" -- "$cur")); return ;;
         --launch) COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur")); return ;;
         --compare)
             compopt -o filenames 2> /dev/null
@@ -42,18 +47,21 @@ _workz() {
     esac
     local opts="-h --help -d --workdir"
     case $cmd in
-        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --grace --slice --no-isolation -q --quiet --json --no-color" ;;
-        plan | dry-run) opts="$opts -t --target --summary --rerun --rerun-rule --pass-env" ;;
-        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env" ;;
-        validate | graph) opts="$opts -t --target" ;;
+        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet --json --no-color" ;;
+        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --pass-env --threads" ;;
+        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
+        validate) opts="$opts -t --target --inputs" ;;
+        graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
+        prepare) opts="-h --help -o --output --check" ;;
+        schema | version) opts="-h --help" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
         status) opts="$opts --history --json --launch --no-color" ;;
-        report) opts="$opts --launch --format --json --bottlenecks --suggest --compare -o --output" ;;
+        report) opts="$opts --launch --format --json --bottlenecks --suggest --compare --methods -o --output" ;;
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
-        clean) opts="$opts --keep --dry-run" ;;
+        clean) opts="$opts --keep --previous --dry-run" ;;
         control) ;;
-        init) opts="-h --help" ;;
+        init) opts="-h --help --template" ;;
         completion) COMPREPLY=($(compgen -W "bash" -- "$cur")); return ;;
         help) COMPREPLY=($(compgen -W "$commands" -- "$cur")); return ;;
     esac

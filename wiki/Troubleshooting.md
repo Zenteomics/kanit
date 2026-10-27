@@ -1,4 +1,4 @@
-The errors you are most likely to meet, what each means, and what to do about it. Messages are quoted as workz prints them; `NAME`, `PATH` and `N` stand for the values in yours.
+The errors you are most likely to meet, what each means, and what to do about it. Messages are quoted as workz prints them; `NAME`, `PATH`, `DIR` and `N` stand for the values in yours.
 
 ## Starting a run
 
@@ -8,7 +8,7 @@ The errors you are most likely to meet, what each means, and what to do about it
 
 - `cannot create the run's network namespace: ...`: Unprivileged user namespaces are disabled or restricted on this system. Check `sysctl user.max_user_namespaces`, ask your administrator, or use `--no-isolation`.
 
-- `another launch is running in PATH; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse while it runs with `a launch is running in PATH; verify after it ends`, or `clean after it ends`.
+- `another launch is running in DIR; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse while it runs with `a launch is running in DIR; verify after it ends`, or `clean after it ends`.
 
 - `the workflow has container rules but podman is not on PATH`: Install rootless Podman, or put it on the `PATH` of the shell that runs workz.
 
@@ -22,6 +22,19 @@ Every error in a workflow file names its line and shows it:
 workz: typo.toml: line 9: unknown key 'memroy' in a rule; did you mean 'memory'?
   9 | memroy = "64M"
 ```
+
+A file with several problems gets them all at once, up to 50 and a count of the rest, each with its line where it has one, and the first shown:
+
+```text
+workz: workflow.toml: 3 problems
+  line 5: resource_groups.disk.max must be between 1 and 1000000
+  line 9: unknown key 'outputs' in a rule; did you mean 'output'?
+  line 14: rule b: invalid memory 'lots'
+  5 | max = 0
+```
+
+- Each rule, resource group and shared input reports every unknown key and its first bad value. Checks between rules, such as two rules writing one file or a rule using an undeclared group, run once every rule reads well and report every item at fault, so fixing the first list can show a second.
+- A file that is not valid TOML, or that lacks its `[workflow]` table, stops at that one problem.
 
 - `rule NAME must declare output files`: Every rule writes at least one file that workz can check. A rule that only has side effects can write a marker file, such as `touch done/NAME`.
 
@@ -45,7 +58,7 @@ workz: typo.toml: line 9: unknown key 'memroy' in a rule; did you mean 'memory'?
 
 A refused launch stops before any rule runs. It still leaves a launch directory and a summary with status `refused` and the reason, which `workz status` shows.
 
-- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB with its shared inputs; the run allows M MiB`: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request. A rule's memory need includes the shared inputs it uses.
+- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB; the run allows M MiB`, which says `with its shared inputs` or `with its Podman client` where they count: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request; `workz plan --budget` finds every such rule before a launch.
 
 - `missing input of rule NAME: PATH`: An input that no rule produces does not exist. Create it, fix the path, or add the rule that makes it.
 
@@ -53,13 +66,15 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 - `input does not match its manifest digest: PATH` and `input manifest file is missing: PATH`: An input differs from the input manifest. Fix the input or the manifest. The launch exits with status 1.
 
+- `cannot read input manifest PATH: ...` or `input manifest PATH must be a JSON object of absolute paths`, then `the input manifest cannot be used`: The file given with `--input-manifest` is missing or not a manifest. The launch exits with status 2.
+
 - `.../.workz/state.json has an unsupported format version` or `.../.workz/state.json cannot be read`: The state was written by another version of workz, usually a newer one. Use that version, or delete `.workz/state.json` to run every rule again.
 
 ## Rules that fail
 
 A failure prints the reason and the path of the attempt's standard error. `workz logs NAME` prints the attempt's output, and `workz status` lists every failed rule of the newest launch.
 
-- `exited with status N: LINE`: The command failed, and LINE is the last line of its standard error, which usually says why; `workz logs NAME` prints the rest.
+- `exited with status N: LINE`: The command failed, and LINE is the last line of its standard error, which usually says why; `workz logs NAME` prints the rest. A tool that writes its errors to a log of its own, such as STAR's `Log.out`, can name that log in `diagnostics` ([Writing workflows](Writing-Workflows.md#diagnostics)); then its last line is quoted when standard error is empty, and its tail is kept with the attempt.
 
 - `out of memory: could not stay within its N MiB request`: The attempt needed more memory than it requested, and the kernel killed all of its processes. Raise `memory`, guided by `workz report --suggest` on attempts that completed.
 

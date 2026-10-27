@@ -12,6 +12,15 @@ pub const Graph = struct {
     order: []const usize,
     /// Output path to producing rule.
     producer: std.StringHashMapUnmanaged(usize),
+    /// Every output path with its rule, sorted by path, to find the rules
+    /// writing inside a directory.
+    outputs: []const Output,
+
+    /// Whether a rule writes `path`, or a file below it.
+    pub fn produces(self: *const Graph, path: []const u8) bool {
+        if (self.producer.contains(path)) return true;
+        return below(self.outputs, path).len > 0;
+    }
 
     pub fn deinit(self: *Graph) void {
         self.arena.deinit();
@@ -27,6 +36,10 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
 
     g.producer = .empty;
     for (wf.rules, 0..) |r, i| for (r.output_abs) |o| try g.producer.put(a, o, i);
+    var outs: std.ArrayList(Output) = .empty;
+    for (wf.rules, 0..) |r, i| for (r.output_abs) |o| try outs.append(a, .{ .path = o, .rule = i });
+    std.mem.sort(Output, outs.items, {}, Output.lessThan);
+    g.outputs = outs.items;
 
     const parents = try a.alloc([]const usize, n);
     var child_lists = try a.alloc(std.ArrayList(usize), n);
@@ -34,8 +47,14 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
     for (wf.rules, 0..) |r, i| {
         var ps: std.ArrayList(usize) = .empty;
         for (r.input_abs) |in| {
-            const pi = g.producer.get(in) orelse continue;
-            if (std.mem.indexOfScalar(usize, ps.items, pi) == null) try ps.append(a, pi);
+            if (g.producer.get(in)) |pi| {
+                if (std.mem.indexOfScalar(usize, ps.items, pi) == null) try ps.append(a, pi);
+            }
+            // A directory input depends on every rule writing inside it.
+            for (below(g.outputs, in)) |o| {
+                if (o.rule == i) continue;
+                if (std.mem.indexOfScalar(usize, ps.items, o.rule) == null) try ps.append(a, o.rule);
+            }
         }
         std.mem.sort(usize, ps.items, {}, std.sort.asc(usize));
         parents[i] = ps.items;
@@ -65,12 +84,13 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
         var text: std.Io.Writer.Allocating = .init(a);
         for (cycle) |i| try text.writer.print("{s} -> ", .{wf.rules[i].name});
         try text.writer.writeAll(wf.rules[cycle[0]].name);
+        cycle_message.current_line = wf.rules[cycle[0]].line;
         _ = cycle_message.set(gpa, "the rule graph has a cycle: {s} (each rule writes an input of the next)", .{text.written()}) catch {};
-        cycle_message.line = wf.rules[cycle[0]].line;
+        cycle_message.current_line = 0;
         return error.Cycle;
     }
     g.order = order.items;
-    try checkServiceInputs(gpa, a, wf, &g, cycle_message);
+    try checkServiceInputs(gpa, wf, &g, cycle_message);
     return g;
 }
 
@@ -96,11 +116,52 @@ fn findCycle(a: Allocator, parents: []const []const usize, pending: []const usiz
     return loop;
 }
 
-/// A service may load files that rules of the workflow produce; each rule
-/// that joins it must then depend on those rules, so the service starts
-/// after them.
-fn checkServiceInputs(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const Graph, problem: *workflow.Problem) !void {
-    const seen = try a.alloc(bool, wf.rules.len);
+/// An output path and the rule that writes it.
+pub const Output = struct {
+    path: []const u8,
+    rule: usize,
+
+    fn lessThan(_: void, x: Output, y: Output) bool {
+        return std.mem.lessThan(u8, x.path, y.path);
+    }
+};
+
+/// The outputs strictly below directory `dir`, from outputs sorted by path:
+/// they start with "dir/", so they are the run that begins at the first
+/// path not sorting before "dir/".
+pub fn below(outputs: []const Output, dir: []const u8) []const Output {
+    var lo: usize = 0;
+    var hi: usize = outputs.len;
+    while (lo < hi) {
+        const mid = lo + (hi - lo) / 2;
+        if (beforeDirSlash(outputs[mid].path, dir)) lo = mid + 1 else hi = mid;
+    }
+    var end = lo;
+    while (end < outputs.len and isBelow(dir, outputs[end].path)) end += 1;
+    return outputs[lo..end];
+}
+
+/// Whether `path` sorts before `dir` followed by '/'.
+fn beforeDirSlash(path: []const u8, dir: []const u8) bool {
+    const n = @min(path.len, dir.len);
+    switch (std.mem.order(u8, path[0..n], dir[0..n])) {
+        .lt => return true,
+        .gt => return false,
+        .eq => {},
+    }
+    if (path.len <= dir.len) return true;
+    return path[dir.len] < '/';
+}
+
+fn isBelow(dir: []const u8, path: []const u8) bool {
+    return path.len > dir.len + 1 and std.mem.startsWith(u8, path, dir) and path[dir.len] == '/';
+}
+
+/// A service loads its path when its first user starts; a rule that joins
+/// the service cannot also write there, since the service would start
+/// before the file exists. Rules that write there are producers of every
+/// user, through the service's path as their input.
+fn checkServiceInputs(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, problem: *workflow.Problem) !void {
     for (wf.shared) |s| {
         const sp = s.path_abs orelse continue;
         if (!s.isService()) continue;
@@ -109,25 +170,14 @@ fn checkServiceInputs(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow
                 if (std.mem.eql(u8, name, s.name)) break true;
             } else false;
             if (!joins) continue;
-            @memset(seen, false);
-            markAncestors(g, u, seen);
-            var it = g.producer.iterator();
-            while (it.next()) |e| {
-                if (!workflow.within(sp, e.key_ptr.*) or seen[e.value_ptr.*]) continue;
-                const out = std.mem.trimStart(u8, e.key_ptr.*[wf.root.len..], "/");
-                if (e.value_ptr.* == u)
-                    return problem.set(gpa, "rule {s} joins service '{s}' and writes {s}, which the service loads; the service would start before the file exists", .{ r.name, s.name, out });
-                return problem.set(gpa, "rule {s} joins service '{s}', which loads {s} from rule {s}; make an output of {s} an input of {s}", .{ r.name, s.name, out, wf.rules[e.value_ptr.*].name, wf.rules[e.value_ptr.*].name, r.name });
-            }
+            for (below(g.outputs, sp)) |o| if (o.rule == u) {
+                problem.current_line = r.line;
+                defer problem.current_line = 0;
+                const out = std.mem.trimStart(u8, o.path[wf.root.len..], "/");
+                return problem.set(gpa, "rule {s} joins service '{s}' and writes {s}, which the service loads; the service would start before the file exists", .{ r.name, s.name, out });
+            };
         }
     }
-}
-
-fn markAncestors(g: *const Graph, i: usize, seen: []bool) void {
-    for (g.parents[i]) |p| if (!seen[p]) {
-        seen[p] = true;
-        markAncestors(g, p, seen);
-    };
 }
 
 fn lessIndex(_: void, x: usize, y: usize) std.math.Order {
@@ -159,21 +209,4 @@ pub fn select(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, tar
         try stack.appendSlice(gpa, g.parents[i]);
     }
     return mask;
-}
-
-/// Writes the selected graph in Graphviz DOT form.
-pub fn writeDot(w: *std.Io.Writer, wf: *const workflow.Workflow, g: *const Graph, mask: []const bool) !void {
-    // Rule names cannot hold quotes; the workflow name can.
-    try w.writeAll("digraph \"");
-    for (wf.name) |c| {
-        if (c == '"' or c == '\\') try w.writeByte('\\');
-        try w.writeByte(c);
-    }
-    try w.writeAll("\" {\n  rankdir=LR;\n  node [shape=box];\n");
-    for (g.order) |i| {
-        if (!mask[i]) continue;
-        try w.print("  \"{s}\";\n", .{wf.rules[i].name});
-        for (g.parents[i]) |p| try w.print("  \"{s}\" -> \"{s}\";\n", .{ wf.rules[p].name, wf.rules[i].name });
-    }
-    try w.writeAll("}\n");
 }
