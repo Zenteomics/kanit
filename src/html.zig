@@ -11,6 +11,7 @@
 const std = @import("std");
 const sys = @import("sys.zig");
 const model = @import("model.zig");
+const report = @import("report.zig");
 const units = @import("units.zig");
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
@@ -179,7 +180,7 @@ const style =
     \\.wide{overflow-x:auto;scrollbar-color:var(--hair) transparent}.scroll{max-height:70vh;overflow:auto;border:1px solid var(--hair)}
     \\.scroll thead th{position:sticky;top:0;z-index:1}
     \\.bar{position:relative;height:9px;min-width:110px;border:1px solid var(--ink2)}
-    \\.bar i{position:absolute;left:0;top:0;bottom:0}.b-use{background:var(--c1)}.b-cache{background:var(--q2)}.b-wait{background:var(--q3)}
+    \\.bar i{position:absolute;left:0;top:0;bottom:0}.b-use{background:var(--c1)}.b-cache{background:var(--q2)}.b-wait{background:var(--q3)}.b-held{background:repeating-linear-gradient(135deg,var(--q3) 0 1.5px,transparent 1.5px 4px)}
     \\.hbar{display:flex;align-items:center;gap:10px}.hbar .bar{flex:1}.hbar span{min-width:84px;text-align:right;color:var(--ink2);white-space:nowrap;font-family:var(--mono);font-size:12px}
     \\.matrix{border-collapse:separate;border-spacing:2px;width:auto}
     \\.matrix th{border:0;padding:4px;background:none}
@@ -343,15 +344,15 @@ const Page = struct {
         try escape(w, if (l.engine.len > 0) l.engine else "workz");
         try w.writeAll("</div></div>\n<div class=\"row r2\">");
 
-        // Elapsed, and how much of the critical path was waiting.
+        // Elapsed, and what limited it: the largest lower bound.
         try w.writeAll("<div class=\"cell\"><span class=\"k\">elapsed</span><div class=\"big\">");
         try duration(w, l.elapsed_s);
         try w.writeAll("</div><div class=\"sub\">");
-        if (l.path.len > 0) {
-            try units.count(w, l.path.len, "rule", "rules");
-            try w.writeAll(" on the critical path, ");
-            try duration(w, l.path_waited_s);
-            try w.writeAll(" of it waiting");
+        if (l.binding) |bi| {
+            const b = l.bounds[bi];
+            try w.writeAll("limited by ");
+            try report.boundName(w, b);
+            try w.print(", {d:.0}% over the least it needed", .{if (b.seconds > 0) @max(l.elapsed_s / b.seconds - 1, 0) * 100 else 0});
         } else try w.writeAll(if (l.finished) "nothing ran in this launch" else "starting");
         try w.writeAll("</div></div>\n");
 
@@ -871,7 +872,7 @@ const Page = struct {
         var bars: std.ArrayList(Bar) = .empty;
         for (l.rows) |r| if (r.started_ns > 0) {
             const crit = for (l.path) |p| {
-                if (eql(u8, l.rules[p.rule].name, r.rule) and l.rules[p.rule].final.?.attempt == r.attempt) break true;
+                if (eql(u8, l.rules[p.rule].name, r.rule)) break true;
             } else false;
             try bars.append(self.a, .{ .name = r.rule, .attempt = r.attempt, .start = l.at(r.started_ns), .wall = r.wall_s, .waited = r.waited_s, .status = r.status, .slot = self.slotOfRule(r.rule), .open = false, .crit = crit });
         };
@@ -1050,43 +1051,75 @@ const Page = struct {
         const w = self.w;
         const l = self.l;
         try self.figure("limits", "FIG. 6", "What limited the launch", "this launch only");
+        if (l.bounds.len == 0) {
+            try w.writeAll("<p class=\"muted\">No attempt ran in this launch.</p>");
+            return self.endFigure();
+        }
+        const span = @max(l.elapsed_s, 0.001);
+        // The bounds: the launch could not take less than any of them, so
+        // the largest is what limited it.
+        try w.writeAll("<p class=\"lead\">");
+        var verdict: std.Io.Writer.Allocating = .init(self.a);
+        try report.writeVerdict(&verdict.writer, l);
+        const text = verdict.written();
+        if (text.len > 0) {
+            try w.writeAll(&.{std.ascii.toUpper(text[0])});
+            try escape(w, text[1..]);
+            try w.writeAll(". ");
+        }
+        try w.writeAll("The launch could not take less than any bound below; a full bar is its elapsed time.</p>\n");
+        try w.writeAll("<div class=\"wide\"><table><thead><tr><th>bound</th><th class=\"n\">at least</th><th>use</th><th>against the elapsed time</th></tr></thead><tbody>\n");
+        for (l.bounds, 0..) |b, i| {
+            try w.print("<tr><td class=\"name\"{s}>", .{if (l.binding == i) " style=\"font-weight:700\"" else ""});
+            try report.boundName(w, b);
+            try w.writeAll("</td><td class=\"n\">");
+            try duration(w, b.seconds);
+            try w.writeAll("</td><td>");
+            try report.boundUse(w, l, b);
+            try w.print("</td><td><div class=\"bar\"><i class=\"{s}\" style=\"width:{d:.2}%\"></i></div></td></tr>\n", .{ if (l.binding == i) "b-use" else "b-cache", @min(b.seconds / span, 1) * 100 });
+        }
+        try w.writeAll("</tbody></table></div>\n");
+
         if (l.path.len > 0) {
-            try w.writeAll("<div class=\"k\">critical path</div><p class=\"lead\">The chain of final attempts that ended last, each started after the producer it waited for: ");
+            try w.writeAll("<div class=\"k\" style=\"margin-top:18px\">critical path</div><p class=\"lead\">The longest chain of work in this launch: ");
             try duration(w, l.path_ran_s);
-            try w.writeAll(" running and ");
+            try w.writeAll(" of work. Once ready, its rules waited ");
             try duration(w, l.path_waited_s);
-            try w.writeAll(" waiting for resources.</p>\n<div class=\"wide\"><table><thead><tr><th>rule</th><th>step</th><th class=\"n\">started</th><th class=\"n\">waited</th><th class=\"n\">ran</th><th>over the launch</th></tr></thead><tbody>\n");
-            const span = @max(l.elapsed_s, 0.001);
+            try w.writeAll(" for resources, and they were held ");
+            try duration(w, l.path_held_s);
+            try w.writeAll(" for producers off the path.</p>\n<div class=\"wide\"><table><thead><tr><th>rule</th><th>step</th><th class=\"n\">started</th><th class=\"n\">held</th><th class=\"n\">waited</th><th class=\"n\">ran</th><th>over the launch</th></tr></thead><tbody>\n");
             for (l.path) |p| {
                 const r = l.rules[p.rule];
                 try w.print("<tr><td class=\"name\"><i class=\"g{d}\"></i>", .{self.slotOfStep(r.step)});
                 try escape(w, r.name);
-                if (p.earlier > 0) try w.print("<small>after {d} earlier {s}</small>", .{ p.earlier, if (p.earlier == 1) "attempt" else "attempts" });
+                if (p.earlier > 0) try w.print("<small>over {d} attempts</small>", .{p.earlier + 1});
                 try w.writeAll("</td><td>");
                 try escape(w, r.labels.step);
-                try w.writeAll("</td><td class=\"n\">");
-                try duration(w, p.start_s);
-                try w.writeAll("</td><td class=\"n\">");
-                try duration(w, p.waited_s);
-                try w.writeAll("</td><td class=\"n\">");
-                try duration(w, p.ran_s);
-                const from = @max(p.start_s - p.waited_s, 0) / span * 100;
+                inline for (.{ p.start_s, p.held_s, p.waited_s, p.ran_s }) |v| {
+                    try w.writeAll("</td><td class=\"n\">");
+                    try duration(w, v);
+                }
+                const ready = @max(p.start_s - p.waited_s, 0);
+                const held_from = @max(ready - p.held_s, 0) / span * 100;
+                const wait_from = ready / span * 100;
                 const at = p.start_s / span * 100;
-                try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-wait\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"g{d}\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ from, at - from, self.slotOfStep(r.step), at, @max(p.ran_s / span * 100, 0.5) });
+                try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-held\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"b-wait\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"g{d}\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ held_from, wait_from - held_from, wait_from, at - wait_from, self.slotOfStep(r.step), at, @max(p.ran_s / span * 100, 0.5) });
             }
-            try w.writeAll("</tbody></table></div>\n");
+            try w.writeAll("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"b-held\"></i>held for producers off the path</li><li><i class=\"b-wait\"></i>ready, waiting for resources</li><li><i class=\"g0\"></i>running, in the color of its category</li></ul>\n");
         }
         try w.writeAll("<div class=\"k\" style=\"margin-top:18px\">waiting for resources</div>");
         var most: f64 = 0;
         for (l.waits.values()) |v| most = @max(most, v);
         if (!l.waits_recorded or most < 0.05) {
-            try w.writeAll(if (l.rows.len == 0) "<p class=\"muted\">No attempt ran in this launch.</p>\n" else if (!l.waits_recorded) "<p class=\"muted\">This launch's engine did not record why rules waited.</p>\n" else "<p class=\"muted\">No rule waited for resources once it was ready.</p>\n");
+            try w.writeAll(if (!l.waits_recorded) "<p class=\"muted\">This launch's engine did not record why rules waited.</p>\n" else "<p class=\"muted\">No rule waited for resources once it was ready.</p>\n");
         } else {
-            try w.writeAll("<p class=\"lead\">Seconds that ready attempts waited, added up over all attempts, by what they waited for.</p>\n<div class=\"wide\"><table><thead><tr><th>waited for</th><th>rule-seconds</th></tr></thead><tbody>\n");
+            try w.writeAll("<p class=\"lead\">How many ready rules waited for each resource, on average over the launch, and the seconds they waited added up.</p>\n<div class=\"wide\"><table><thead><tr><th>waited for</th><th class=\"n\">rules waiting</th><th>rule-seconds</th></tr></thead><tbody>\n");
             for (l.waits.keys(), l.waits.values()) |k, v| {
                 if (v < 0.05) continue;
                 try w.writeAll("<tr><td>");
                 try escape(w, k);
+                const avg = v / span;
+                if (avg < 0.05) try w.writeAll("</td><td class=\"n\">&lt;0.1") else try w.print("</td><td class=\"n\">{d:.1}", .{avg});
                 try w.print("</td><td><div class=\"hbar\"><div class=\"bar\"><i class=\"b-wait\" style=\"width:{d:.2}%\"></i></div><span>", .{v / @max(most, 0.001) * 100});
                 try duration(w, v);
                 try w.writeAll("</span></div></td></tr>\n");

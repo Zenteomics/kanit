@@ -107,13 +107,13 @@ For an index a tool loads into System V shared memory, such as a STAR genome, us
 On the demo workflow from [Reports](Reports.md), with six samples through qc, trim, align and count on 10 threads, the bottleneck report shows where ready rules waited:
 
 ```text
-waiting for resources (rule-seconds that ready attempts waited)
-  threads                             2m 24s
-  group:disk                          58.2 s
-  loading shared inputs                0.2 s
+waiting for resources (ready rules that waited, on average over the launch, and their rule-seconds)
+  threads                             3.0 rules     2m 24s
+  group:disk                          1.2 rules     58.2 s
+  loading shared inputs              <0.1 rules      0.2 s
 
 resource groups (while their rules waited)
   disk                              58.2 s waited; in 100% of the samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier
 ```
 
-Most of the waiting was for threads: more threads would help, if the machine has them. And in every sample taken while a rule waited for the `disk` group, that rule would have fitted the free threads and memory, so a larger `max` for `disk` would help too, if the disk can take it. When that share is under 25%, the report says instead that the budget was full and a higher `max` would not help much.
+Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. And in every sample taken while a rule waited for the `disk` group, that rule would have fitted the free threads and memory, so a larger `max` for `disk` would help too, if the disk can take it. When that share is under 25%, the report says instead that the budget was full and a higher `max` would not help much.

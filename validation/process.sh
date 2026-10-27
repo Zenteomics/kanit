@@ -569,8 +569,7 @@ new budget
 overlap=$(cat m1.txt m2.txt m3.txt | paste - - | sort -n | awk 'NR > 1 && $1 < prev { o = 1 } { prev = $2 } END { print o + 0 }')
 check "memory admission never exceeds the budget" '[ "$overlap" = 0 ]'
 "$workz" report -d . --bottlenecks > b.txt
-held=$(awk '/^  at / { for (i = 1; i <= NF; i++) if ($i == "waited") w = $(i + 1) } END { print (w + 0 > 0.4) }' b.txt)
-check "the critical path shows the wait of a rule held by the budget" '[ "$held" = 1 ]'
+check "rules that run one at a time for memory are reported as limited by the memory budget" 'grep -q "^  > memory " b.txt && grep -q "the memory budget limited this launch" b.txt'
 { header toolarge; rule big '[]' '["b.txt"]' '"true"'; } | sed 's/memory = "64M"/memory = "8G"/' > big.toml
 "$workz" run big.toml --max-memory 1G -q > /dev/null 2> err.txt
 rc=$?

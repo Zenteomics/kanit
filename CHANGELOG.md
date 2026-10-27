@@ -66,6 +66,11 @@ Three changes need action:
   - Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
   - `X` cancels the launch only when pressed twice within 3 s, and the selection stays on the top row as rules finish, until a key moves it.
   - The key hints put `?` second, so a narrow terminal still shows it, and the table's hints name `S`, `R` and `X`.
+- **What limited a launch** is answered from lower bounds on its elapsed time: the longest chain of work, and the work each limit of the budget carried, threads, memory, jobs and every resource group.
+  - `report --bottlenecks` and the HTML page name the largest bound and how far the launch ran over it, such as `the thread budget limited this launch: it took 1m 32s, 5% more than its work needs at that limit`.
+  - The critical path is the longest chain of work, the chain the scheduler ranks rules by, instead of the chain that ended last, which in a launch held back by its budget followed whichever rule started last.
+  - Each rule on the critical path shows the time it waited for resources once ready and the time it was held for producers off the path, so its work, waits and holds add up to the elapsed time.
+  - Waiting for resources is shown as the ready rules that waited on average, beside the rule-seconds.
 - **Plain views and summaries** write durations and sizes as the reports do, such as `1m 27s` and `203 MiB`.
   - The plain view of a launch that has ended drops its empty running table.
   - Failure lines off a terminal give the path of standard error relative to the current directory.
@@ -98,7 +103,6 @@ Three changes need action:
 - **Reports agree.** The text reports and the HTML page compute each figure once, from the same records.
   - A step whose attempt was killed for exceeding its memory is suggested half again the request it exceeded, not the memory it reached before the kill.
   - Memory sizing names its basis, process memory or cgroup peak, and the HTML steps table shows page cache apart, so a suggestion no longer sits below the peak printed beside it.
-  - The critical path counts the final attempt's own wait; an earlier cancelled attempt no longer counts as waiting.
   - `--bottlenecks` shows each step's median wall time, as `--compare` and the HTML page do, instead of a total under the same name.
   - The HTML page marks a failure that a later attempt recovered from, and counts blocked rules apart from failed attempts.
   - A launch without a summary takes its elapsed time from its events, and reused rules whose records were cleaned up are counted.

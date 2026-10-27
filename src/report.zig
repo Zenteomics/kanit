@@ -250,6 +250,7 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     for (l.rows) |r| delegated += @intFromBool(r.delegated());
     if (delegated > 0) try w.print("note: {d} {s} used almost none of {s} requests while running; the commands most likely handed the work to another supervisor (delegated), so workz's counters do not describe it\n", .{ delegated, if (delegated == 1) "attempt" else "attempts", if (delegated == 1) "its" else "their" });
 
+    try writeLimits(w, &l);
     try writePath(w, &l);
     try writeWaits(w, &l);
     try writeSteps(w, &l);
@@ -258,8 +259,95 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     try writeUtilization(w, &l);
 }
 
+/// What a bound is, in a few words: `threads`, `group disk`.
+pub fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
+    switch (b.kind) {
+        .chain => try w.writeAll("critical path"),
+        .threads, .memory, .jobs => try w.writeAll(@tagName(b.kind)),
+        .group => try w.print("group {s}", .{b.name}),
+    }
+}
+
+/// How hard a bound's limit was used: the average reserved over the
+/// elapsed time against the limit, or the critical path's rules.
+pub fn boundUse(w: *std.Io.Writer, l: *const model.Launch, b: model.Bound) !void {
+    const avg = if (l.elapsed_s > 0) b.work / l.elapsed_s else 0;
+    switch (b.kind) {
+        .chain => {
+            try units.count(w, l.path.len, "rule", "rules");
+            try w.writeAll(" in a chain of work");
+        },
+        .threads => try w.print("{d:.1} of {d:.0} threads reserved on average", .{ avg, b.limit }),
+        .jobs => try w.print("{d:.1} of {d:.0} jobs running on average", .{ avg, b.limit }),
+        .group => try w.print("{d:.1} of {d:.0} units held on average", .{ avg, b.limit }),
+        .memory => {
+            try units.size(w, avg);
+            try w.writeAll(" of ");
+            try units.size(w, b.limit);
+            try w.writeAll(" reserved on average");
+        },
+    }
+}
+
+/// One sentence on what limited the launch, from the largest bound.
+pub fn writeVerdict(w: *std.Io.Writer, l: *const model.Launch) !void {
+    const b = l.bounds[l.binding orelse return];
+    const over = if (b.seconds > 0) @max(l.elapsed_s / b.seconds - 1, 0) * 100 else 0;
+    switch (b.kind) {
+        .chain => try w.writeAll("the critical path"),
+        .threads => try w.writeAll("the thread budget"),
+        .memory => try w.writeAll("the memory budget"),
+        .jobs => try w.writeAll("the jobs limit"),
+        .group => try w.print("resource group {s}", .{b.name}),
+    }
+    try w.writeAll(if (l.finished) " limited this launch: it took " else " limits this launch so far: it has taken ");
+    try units.duration(w, l.elapsed_s);
+    try w.print(", {d:.0}% more than ", .{over});
+    if (b.kind == .chain) {
+        try w.writeAll("the work on its critical path");
+        // Each delay names what would cut it: the path's own waits yield to
+        // a higher priority; a hold means producers off the path started
+        // late, which only more room in the budget changes.
+        const notable = struct {
+            fn f(s: f64, work: f64) bool {
+                return s >= 0.5 and s >= 0.05 * work;
+            }
+        }.f;
+        if (notable(l.path_waited_s, l.path_ran_s)) {
+            try w.writeAll("; its rules waited ");
+            try units.duration(w, l.path_waited_s);
+            try w.writeAll(" for resources once ready, which a higher priority for them would cut");
+        }
+        if (notable(l.path_held_s, l.path_ran_s)) {
+            try w.writeAll("; its rules were held ");
+            try units.duration(w, l.path_held_s);
+            try w.writeAll(" for producers off the path, which started late for want of resources");
+        }
+    } else {
+        try w.writeAll("its work needs at that limit");
+    }
+}
+
+fn writeLimits(w: *std.Io.Writer, l: *const model.Launch) !void {
+    try w.writeAll("\nwhat limited the launch (it could not take less than any of these)\n");
+    if (l.bounds.len == 0) return w.writeAll("  nothing: no attempt ran in this launch\n");
+    for (l.bounds, 0..) |b, i| {
+        var name_buf: [64]u8 = undefined;
+        var nw: std.Io.Writer = .fixed(&name_buf);
+        try boundName(&nw, b);
+        try w.print("  {s} {s:<28} ", .{ if (l.binding == i) ">" else " ", cut(nw.buffered(), 28) });
+        try units.right(w, 9, units.duration, .{b.seconds});
+        try w.writeAll("  ");
+        try boundUse(w, l, b);
+        try w.writeAll("\n");
+    }
+    try w.writeAll("  ");
+    try writeVerdict(w, l);
+    try w.writeAll("\n");
+}
+
 fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
-    try w.writeAll("\ncritical path (final attempts, from the first to the one that ended last)\n");
+    try w.writeAll("\ncritical path (the longest chain of work in this launch, and when each rule waited once ready)\n");
     if (l.path.len == 0) return w.writeAll("  none: no attempt ran, or the workflow snapshot cannot be read\n");
     for (l.path) |p| {
         try w.writeAll("  at ");
@@ -268,25 +356,33 @@ fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
         try units.right(w, 8, units.duration, .{p.ran_s});
         try w.writeAll(", waited ");
         try units.right(w, 8, units.duration, .{p.waited_s});
-        if (p.earlier > 0) try w.print(", after {d} earlier {s}", .{ p.earlier, if (p.earlier == 1) "attempt" else "attempts" });
+        if (p.held_s >= 0.05) {
+            try w.writeAll(", held ");
+            try units.duration(w, p.held_s);
+            try w.writeAll(" for producers off the path");
+        }
+        if (p.earlier > 0) try w.print(", over {d} attempts", .{p.earlier + 1});
         try w.writeAll("\n");
     }
     try w.print("  {d} {s}: ", .{ l.path.len, if (l.path.len == 1) "rule" else "rules" });
     try units.duration(w, l.path_ran_s);
-    try w.writeAll(" running, ");
+    try w.writeAll(" of work, ");
     try units.duration(w, l.path_waited_s);
-    try w.writeAll(" waiting for resources\n");
+    try w.writeAll(" waiting for resources, ");
+    try units.duration(w, l.path_held_s);
+    try w.writeAll(" held for producers off the path\n");
 }
 
 fn writeWaits(w: *std.Io.Writer, l: *const model.Launch) !void {
-    try w.writeAll("\nwaiting for resources (rule-seconds that ready attempts waited)\n");
+    try w.writeAll("\nwaiting for resources (ready rules that waited, on average over the launch, and their rule-seconds)\n");
     if (!l.waits_recorded) {
         try w.writeAll(if (l.rows.len == 0) "  none: no attempt ran\n" else "  not recorded: this launch's engine did not record wait reasons\n");
     } else {
         var any = false;
         for (l.waits.keys(), l.waits.values()) |k, s| if (s >= 0.05) {
             any = true;
-            try w.print("  {s:<32} ", .{cut(k, 32)});
+            const avg = if (l.elapsed_s > 0) s / l.elapsed_s else 0;
+            if (avg < 0.05) try w.print("  {s:<32}   <0.1 rules  ", .{cut(k, 32)}) else try w.print("  {s:<32} {d:>6.1} rules  ", .{ cut(k, 32), avg });
             try units.right(w, 9, units.duration, .{s});
             try w.writeAll("\n");
         };

@@ -87,6 +87,11 @@ pub const SharedView = struct {
     /// pages of its files.
     declared_mib: f64 = 0,
     failed: bool = false,
+    /// Seconds its holders held memory, from loading to release, and when
+    /// the current one began; a holder still held when the records end
+    /// counts to that end.
+    held_s: f64 = 0,
+    held_since: i128 = 0,
 };
 
 /// One run sample, taken every 5 s while rules run.
@@ -123,6 +128,7 @@ pub const Tracker = struct {
     launch_ns: i128 = 0,
     max_threads: u32 = 0,
     max_memory_mib: u64 = 0,
+    max_jobs: u32 = 0,
     /// The run's cgroup, when isolated.
     run_cg: ?[]const u8 = null,
     finished: bool = false,
@@ -227,6 +233,7 @@ pub const Tracker = struct {
             self.selected = @intCast(int(v, "selected") orelse 0);
             self.max_threads = @intCast(int(v, "max_threads") orelse 0);
             self.max_memory_mib = @intCast(int(v, "max_memory_mib") orelse 0);
+            self.max_jobs = @intCast(int(v, "jobs") orelse 0);
             self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
             // Every selected rule is listed from the start, as pending.
             if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
@@ -263,6 +270,13 @@ pub const Tracker = struct {
             } else if (eql(u8, ev, "shared_loaded")) {
                 if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;
             } else if (eql(u8, ev, "shared_failed")) s.failed = true;
+            // Its memory is held from loading until release or failure.
+            if (eql(u8, ev, "shared_loading")) {
+                s.held_since = at;
+            } else if ((eql(u8, ev, "shared_released") or eql(u8, ev, "shared_failed")) and s.held_since > 0) {
+                s.held_s += @as(f64, @floatFromInt(at - s.held_since)) / 1e9;
+                s.held_since = 0;
+            }
         } else if (str(v, "rule")) |name| {
             const r = try self.rule(name);
             const ri = self.index.get(name).?;

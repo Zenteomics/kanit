@@ -226,3 +226,75 @@ test "[regression] - [report]: a step killed for its memory is sized above the r
         }
     }
 }
+
+test "[unit] - [report]: the critical path is the longest chain of work, and the largest bound limited the launch" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/p1", "launch/attempts/p1/001", "launch/attempts/p2", "launch/attempts/p2/001", "launch/attempts/join", "launch/attempts/join/001" }) |d| _ = try s.dir(d);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try s.file("launch/workflow",
+        \\[workflow]
+        \\name = "t"
+        \\version = "1"
+        \\
+        \\[[rules]]
+        \\name = "p1"
+        \\output = ["p1.txt"]
+        \\shell = "true"
+        \\[rules.resources]
+        \\memory = "64M"
+        \\
+        \\[[rules]]
+        \\name = "p2"
+        \\output = ["p2.txt"]
+        \\shell = "true"
+        \\[rules.resources]
+        \\memory = "64M"
+        \\
+        \\[[rules]]
+        \\name = "join"
+        \\input = ["p1.txt", "p2.txt"]
+        \\output = ["j.txt"]
+        \\shell = "true"
+        \\[rules.resources]
+        \\memory = "64M"
+        \\
+    );
+    _ = try s.file("launch/launch.json", try std.fmt.allocPrint(a, "{{\"workdir\":\"{s}\",\"max_threads\":1,\"max_memory_mib\":1024}}", .{s.path}));
+    _ = try s.file("launch/summary.json",
+        \\{"status":"completed","elapsed_s":5.0,"selected":3,"counts":{"completed":3}}
+    );
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","selected":3,"max_threads":1,"max_memory_mib":1024,"rules":["p1","p2","join"]}
+        \\
+    );
+    // One thread: p2 runs first, p1 waits for the thread, and join follows
+    // p1, which is not on the longest chain.
+    _ = try s.file("launch/attempts/p2/001/record.json",
+        \\{"rule":"p2","attempt":1,"status":"completed","wall_s":3.0,"cpu_s":3.0,"started":"2026-01-01T00:00:00.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":0,"reasons":[]}}
+    );
+    _ = try s.file("launch/attempts/p1/001/record.json",
+        \\{"rule":"p1","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-01T00:00:03.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":3.0,"reasons":[{"reason":"threads","seconds":3.0}]}}
+    );
+    _ = try s.file("launch/attempts/join/001/record.json",
+        \\{"rule":"join","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"started":"2026-01-01T00:00:04.000Z","request":{"threads":1,"memory_mib":64},"queue":{"waited_s":0,"reasons":[]}}
+    );
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+    try testing.expectEqual(@as(usize, 2), l.path.len);
+    try testing.expectEqualStrings("p2", l.rules[l.path[0].rule].name);
+    try testing.expectEqualStrings("join", l.rules[l.path[1].rule].name);
+    try testing.expectApproxEqAbs(@as(f64, 4.0), l.path_ran_s, 1e-6);
+    // join became ready when p1 ended, a second after p2 did.
+    try testing.expectApproxEqAbs(@as(f64, 1.0), l.path[1].held_s, 1e-6);
+    try testing.expectApproxEqAbs(@as(f64, 0.0), l.path_waited_s, 1e-6);
+    const b = l.bounds[l.binding.?];
+    try testing.expect(b.kind == .threads);
+    try testing.expectApproxEqAbs(@as(f64, 5.0), b.seconds, 1e-6);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.report.writeVerdict(&out.writer, &l);
+    try testing.expectEqualStrings("the thread budget limited this launch: it took 5.0 s, 0% more than its work needs at that limit", out.written());
+}

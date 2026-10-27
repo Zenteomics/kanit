@@ -30,6 +30,9 @@ const num = fields.number;
 /// Time a ready attempt waited for one resource.
 pub const Wait = struct { reason: []const u8, seconds: f64 };
 
+/// Units of a resource group an attempt held while it ran.
+pub const GroupUse = struct { name: []const u8, count: f64 };
+
 pub const Attempt = struct {
     rule: []const u8,
     attempt: i64,
@@ -39,6 +42,8 @@ pub const Attempt = struct {
     cpu_s: f64,
     threads: f64,
     request_mib: f64,
+    /// Units of resource groups it held.
+    groups: []const GroupUse = &.{},
     /// cgroup peak (includes page cache) and process peak RSS.
     peak_mib: ?f64,
     rss_mib: f64,
@@ -181,6 +186,10 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
             top_reason = str(item, "reason");
         }
     };
+    var groups: std.ArrayList(GroupUse) = .empty;
+    if (req) |q| if (get(q, "groups")) |gs| if (gs == .array) for (gs.array.items) |item| {
+        try groups.append(a, .{ .name = str(item, "name"), .count = num(get(item, "count")) orelse 1 });
+    };
     const labels = labelsOf(v);
     return .{
         .rule = str(v, "rule"),
@@ -191,6 +200,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
         .cpu_s = num(get(v, "cpu_s")) orelse if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
         .threads = if (req) |q| num(get(q, "threads")) orelse 1 else 1,
         .request_mib = if (req) |q| num(get(q, "memory_mib")) orelse 0 else 0,
+        .groups = groups.items,
         .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,
         .rss_mib = if (get(v, "rusage")) |ru| (num(get(ru, "maxrss_kib")) orelse 0) / 1024.0 else 0,
         .oom_kill = if (cg) |c| num(get(c, "oom_kill")) orelse 0 else 0,
@@ -392,16 +402,33 @@ pub const Step = struct {
     }
 };
 
-/// One rule on the critical path, from its final attempt in this launch.
+/// One rule on the critical path, with every attempt it made in this launch.
 pub const PathRow = struct {
     rule: usize,
-    /// Seconds from the launch start to the attempt's start.
+    /// Seconds from the launch start to its first attempt's start.
     start_s: f64,
-    /// Waiting for resources once ready, as the attempt recorded it.
+    /// Time its attempts waited once ready, and the time they ran.
     waited_s: f64,
     ran_s: f64,
     /// Attempts before the final one.
     earlier: i64,
+    /// Time between the end of the rule before it on the path, or the
+    /// launch's start, and its becoming ready: it waited for producers off
+    /// the path.
+    held_s: f64 = 0,
+};
+
+/// A lower bound on the elapsed time: the longest chain of work, which no
+/// budget can shorten, or the work one limit of the budget had to carry.
+pub const Bound = struct {
+    kind: enum { chain, threads, memory, jobs, group },
+    /// The group, for a group.
+    name: []const u8 = "",
+    /// Thread-, MiB-, job- or unit-seconds of work, and the limit that
+    /// carried it; both 0 for the chain.
+    work: f64 = 0,
+    limit: f64 = 0,
+    seconds: f64,
 };
 
 pub const GroupAdvice = struct {
@@ -439,6 +466,7 @@ pub const Launch = struct {
     started_text: []const u8 = "",
     max_threads: f64 = 0,
     max_memory_mib: f64 = 0,
+    max_jobs: f64 = 0,
     /// "running" until `summary.json` exists, then its status.
     status: []const u8 = "running",
     finished: bool = false,
@@ -472,9 +500,16 @@ pub const Launch = struct {
     samples: []const []const u8 = &.{},
     /// Some selected rule declares a category.
     by_category: bool = false,
+    /// The critical path: the longest chain of work in this launch, its
+    /// work and the time its rules waited once ready.
     path: []const PathRow = &.{},
     path_ran_s: f64 = 0,
     path_waited_s: f64 = 0,
+    path_held_s: f64 = 0,
+    /// Lower bounds on the elapsed time, and the largest of them: what
+    /// limited the launch.
+    bounds: []const Bound = &.{},
+    binding: ?usize = null,
     /// Rule-seconds that ready attempts waited, by reason, most first.
     waits: std.StringArrayHashMapUnmanaged(f64) = .empty,
     /// Some attempt recorded its queue.
@@ -641,9 +676,11 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
         l.started_text = str(v, "started");
         l.max_threads = num(get(v, "max_threads")) orelse 0;
         l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
+        l.max_jobs = num(get(v, "jobs")) orelse 0;
     }
     if (tr.max_threads > 0) l.max_threads = @floatFromInt(tr.max_threads);
     if (tr.max_memory_mib > 0) l.max_memory_mib = @floatFromInt(tr.max_memory_mib);
+    if (tr.max_jobs > 0) l.max_jobs = @floatFromInt(tr.max_jobs);
     l.t0_ns = if (tr.launch_ns != 0) tr.launch_ns else tr.started_ns;
     l.selected = tr.selected;
 
@@ -691,6 +728,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     try collectRules(a, &l, reused);
     try collectSteps(a, &l);
     try collectPath(a, &l);
+    try collectBounds(a, &l);
     try collectWaits(a, &l);
     return l;
 }
@@ -896,38 +934,104 @@ fn size(s: Step) Sizing {
     return out;
 }
 
-/// The critical path of this launch: from the final attempt that finished
-/// last, back through the producer whose final attempt finished last.
+/// The critical path: the longest chain of work through the graph, each
+/// rule weighing the wall time of its attempts in this launch, as retries
+/// run one after another. However large the budget, the launch could not
+/// take less.
 fn collectPath(a: Allocator, l: *Launch) !void {
     const g = l.g orelse return;
-    var cur: ?usize = null;
-    var best: i128 = 0;
-    for (l.rules, 0..) |r, i| if (r.final) |f| if (f.started_ns > 0) {
-        const end = f.started_ns + @as(i128, @intFromFloat(f.wall_s * 1e9));
-        if (cur == null or end > best) {
-            cur = i;
-            best = end;
+    const n = l.rules.len;
+    const work = try a.alloc(f64, n);
+    const waited = try a.alloc(f64, n);
+    const tries = try a.alloc(i64, n);
+    // When each rule first became ready and when its last attempt ended,
+    // in seconds from the launch's start.
+    const first = try a.alloc(?Attempt, n);
+    const ended = try a.alloc(f64, n);
+    @memset(work, 0);
+    @memset(waited, 0);
+    @memset(tries, 0);
+    @memset(first, null);
+    @memset(ended, 0);
+    for (l.rows) |r| if (l.rule_index.get(r.rule)) |i| {
+        work[i] += r.wall_s;
+        waited[i] += r.waited_s;
+        tries[i] += 1;
+        if (r.started_ns > 0) {
+            if (first[i] == null or r.started_ns < first[i].?.started_ns) first[i] = r;
+            ended[i] = @max(ended[i], l.at(r.started_ns) + r.wall_s);
         }
     };
-    var rows: std.ArrayList(PathRow) = .empty;
-    while (cur) |i| {
-        const f = l.rules[i].final.?;
-        try rows.append(a, .{ .rule = i, .start_s = l.at(f.started_ns), .waited_s = f.waited_s, .ran_s = f.wall_s, .earlier = f.attempt - 1 });
-        l.path_ran_s += f.wall_s;
-        l.path_waited_s += f.waited_s;
-        var next: ?usize = null;
-        var next_end: i128 = 0;
-        for (g.parents[i]) |p| if (l.rules[p].final) |pf| if (pf.started_ns > 0) {
-            const end = pf.started_ns + @as(i128, @intFromFloat(pf.wall_s * 1e9));
-            if (next == null or end > next_end) {
-                next = p;
-                next_end = end;
-            }
+    // The longest chain ending at each rule, and the producer it continues.
+    const longest = try a.alloc(f64, n);
+    const from = try a.alloc(?usize, n);
+    var end: ?usize = null;
+    for (g.order) |i| {
+        from[i] = null;
+        for (g.parents[i]) |p| if (from[i] == null or longest[p] > longest[from[i].?]) {
+            from[i] = p;
         };
-        cur = next;
+        longest[i] = work[i] + if (from[i]) |p| longest[p] else 0;
+        if (work[i] > 0 and (end == null or longest[i] > longest[end.?])) end = i;
+    }
+    var rows: std.ArrayList(PathRow) = .empty;
+    var cur = end;
+    while (cur) |i| : (cur = from[i]) {
+        // A rule that did no work here, reused or not selected, only links.
+        if (work[i] == 0) continue;
+        const start = if (first[i]) |f| l.at(f.started_ns) else 0;
+        const ready = if (first[i]) |f| start - f.waited_s else 0;
+        try rows.append(a, .{ .rule = i, .start_s = start, .waited_s = waited[i], .ran_s = work[i], .earlier = tries[i] - 1, .held_s = ready });
     }
     std.mem.reverse(PathRow, rows.items);
+    // Held: from the end of the rule before on the path, or from the start.
+    var prev_end: f64 = 0;
+    for (rows.items) |*p| {
+        p.held_s = @max(p.held_s - prev_end, 0);
+        prev_end = ended[p.rule];
+        l.path_ran_s += p.ran_s;
+        l.path_waited_s += p.waited_s;
+        l.path_held_s += p.held_s;
+    }
     l.path = rows.items;
+}
+
+/// The lower bounds on the elapsed time: the critical path, and for each
+/// limit of the budget the work it carried over the limit. The largest is
+/// what limited the launch; the elapsed time beyond it went to waiting
+/// that scheduling could not avoid, to launching and to starting rules.
+fn collectBounds(a: Allocator, l: *Launch) !void {
+    var bounds: std.ArrayList(Bound) = .empty;
+    if (l.path.len > 0) try bounds.append(a, .{ .kind = .chain, .seconds = l.path_ran_s });
+    var threads: f64 = 0;
+    var memory: f64 = 0;
+    var jobs: f64 = 0;
+    for (l.rows) |r| {
+        threads += r.threads * r.wall_s;
+        memory += r.request_mib * r.wall_s;
+        jobs += r.wall_s;
+    }
+    if (l.max_threads > 0 and threads > 0) try bounds.append(a, .{ .kind = .threads, .work = threads, .limit = l.max_threads, .seconds = threads / l.max_threads });
+    // A shared input's memory counts against the budget while it is held.
+    const end_ns = l.t0_ns + @as(i128, @intFromFloat(l.elapsed_s * 1e9));
+    for (l.shared()) |s| {
+        const open: f64 = if (s.held_since > 0) @as(f64, @floatFromInt(@max(end_ns - s.held_since, 0))) / 1e9 else 0;
+        memory += s.declared_mib * (s.held_s + open);
+    }
+    if (l.max_memory_mib > 0 and memory > 0) try bounds.append(a, .{ .kind = .memory, .work = memory, .limit = l.max_memory_mib, .seconds = memory / l.max_memory_mib });
+    // Every rule takes a thread, so jobs bind only below the thread budget.
+    if (l.max_jobs > 0 and l.max_jobs < l.max_threads and jobs > 0) try bounds.append(a, .{ .kind = .jobs, .work = jobs, .limit = l.max_jobs, .seconds = jobs / l.max_jobs });
+    if (l.wf) |wf| for (wf.groups) |grp| {
+        var units: f64 = 0;
+        for (l.rows) |r| for (r.groups) |u| if (eql(u8, u.name, grp.name)) {
+            units += u.count * r.wall_s;
+        };
+        if (units > 0 and grp.max > 0) try bounds.append(a, .{ .kind = .group, .name = grp.name, .work = units, .limit = @floatFromInt(grp.max), .seconds = units / @as(f64, @floatFromInt(grp.max)) });
+    };
+    l.bounds = bounds.items;
+    for (l.bounds, 0..) |b, i| if (l.binding == null or b.seconds > l.bounds[l.binding.?].seconds) {
+        l.binding = i;
+    };
 }
 
 /// Waiting by reason from this launch's attempt records, and for each
