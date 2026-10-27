@@ -230,13 +230,13 @@ pub const Problem = struct {
     }
 };
 
-const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_groups", "shared" };
-const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
-const default_keys = [_][]const u8{ "threads", "memory" };
-const group_keys = [_][]const u8{"max"};
-const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version" };
-const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
+pub const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_groups", "shared" };
+pub const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
+pub const default_keys = [_][]const u8{ "threads", "memory" };
+pub const group_keys = [_][]const u8{"max"};
+pub const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
+pub const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version" };
+pub const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
     gpa: Allocator,

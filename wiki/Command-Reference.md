@@ -16,10 +16,10 @@ WORKFLOW defaults to `workflow.toml` in the current directory, the file `workz i
 ## validate
 
 ```text
-workz validate [WORKFLOW]
+workz validate [WORKFLOW] [--inputs]
 ```
 
-Checks the file, every key and value, and the graph ([what it checks](Workflow-Reference.md#what-validate-checks-and-what-it-does-not)). It reports every problem it finds, up to 50 and a count of the rest, each with its line where it has one ([Troubleshooting](Troubleshooting.md#workflow-errors)). Prints `valid: NAME (R rules, S selected, G groups, H shared)`.
+Checks the file, every key and value, and the graph ([what it checks](Workflow-Reference.md#what-validate-checks-and-what-it-does-not)). It reports every problem it finds, up to 50 and a count of the rest, each with its line where it has one ([Troubleshooting](Troubleshooting.md#workflow-errors)). Prints `valid: NAME (R rules, S selected, G groups, H shared)`, then a `note:` line for a shared input or resource group no selected rule uses, and for a rule without `sample` among rules of its step that have one, which the per-sample views leave out. Notes do not change the exit status. `--inputs` also lists every input that does not exist and that no rule writes, as `run` would refuse it, and exits 1 if there is one.
 
 ## plan
 
@@ -202,7 +202,14 @@ workz clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
 
 Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. `--dry-run` names each launch whose `previous/` directories it would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
 
-## init
+## schema
+
+```text
+workz schema
+```
+
+Prints a JSON Schema of the workflow format: every table and key `validate` accepts, with its type and a line of help, and no other key ([Writing workflows](Writing-Workflows.md#editor-support)).
+
 
 ```text
 workz init [FILE]

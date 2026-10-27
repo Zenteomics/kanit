@@ -5,7 +5,7 @@ _workz() {
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
-    local commands="init validate plan explain graph run control watch status logs report verify clean completion help version"
+    local commands="init schema validate plan explain graph run control watch status logs report verify clean completion help version"
     if [ "$COMP_CWORD" = 1 ]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return

@@ -560,6 +560,13 @@ printf '[workflow]\nname = "m"\n\n[resource_groups.disk]\nmax = 0\n\n[[rules]]\n
 "$workz" validate many.toml > /dev/null 2> many.txt
 rc=$?
 check "validate reports every problem at once, each with its line" '[ $rc = 2 ] && grep -q "many.toml: 3 problems" many.txt && grep -q "^  line 5: resource_groups.disk.max" many.txt && grep -q "^  line 9: unknown key .outputs." many.txt && grep -q "^  line 14: rule b: invalid memory" many.txt'
+printf '[workflow]\nname = "lint"\n\n[resource_groups.disk]\nmax = 1\n\n[[rules]]\nname = "align_s1"\ninput = ["reads/s1.fq"]\noutput = ["a1"]\nshell = "true"\nmemory = "1M"\nsample = "s1"\n\n[[rules]]\nname = "align_all"\noutput = ["a2"]\nshell = "true"\nmemory = "1M"\nstep = "align"\n' > lint.toml
+"$workz" validate lint.toml > lint.txt
+lrc=$?
+"$workz" validate lint.toml --inputs > lint-inputs.txt
+irc=$?
+"$workz" schema > schema.json
+check "validate notes what nothing uses and rules left out of the sample views; --inputs finds missing inputs; schema is JSON" '[ $lrc = 0 ] && grep -q "^note: resource group disk is used by no selected rule$" lint.txt && grep -q "^note: rule align_all has no sample, though other rules of step align do" lint.txt && [ $irc = 1 ] && grep -q "^missing input of rule align_s1: reads/s1.fq$" lint-inputs.txt && jq -e ".properties.rules.items.additionalProperties == false" schema.json > /dev/null'
 
 new methods
 { printf '[workflow]\nname = "methods"\nversion = "2.1"\n\n'

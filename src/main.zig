@@ -47,6 +47,20 @@ const rerun_opts = [_]Opt{
 
 const commands = [_]Command{
     .{
+        .name = "schema",
+        .args = "",
+        .summary = "print a JSON Schema of the workflow format, for editors",
+        .group = .write,
+        .common = .none,
+        .about =
+        \\Prints a JSON Schema of the workflow format: every table and key validate
+        \\accepts, with its type and a line of help, and no other key. Editors that
+        \\check TOML against a schema, such as Taplo and the Even Better TOML
+        \\extension, then complete keys and mark mistakes as you type.
+        ,
+        .examples = "workz schema > workz.schema.json",
+    },
+    .{
         .name = "init",
         .args = "[FILE]",
         .summary = "write a commented starter workflow",
@@ -506,7 +520,7 @@ pub fn main(init: std.process.Init) !u8 {
     const code: Exit = if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
         try out(init.io, "workz {s}\n", .{workz.version});
         break :blk .ok;
-    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
+    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
     return @intFromEnum(code);
 }
 
@@ -684,16 +698,35 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     return .{ .wf = wf, .g = g, .mask = mask };
 }
 
+const ValidateExtra = struct {
+    inputs: *bool,
+    fn option(self: ValidateExtra, arg: []const u8, _: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--inputs")) {
+            self.inputs.* = true;
+            return 1;
+        }
+        return 0;
+    }
+};
+
 fn cmdValidate(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
-    if (try parseArgs(c, args, &common, NoExtra{})) |e| return e;
+    var inputs = false;
+    if (try parseArgs(c, args, &common, ValidateExtra{ .inputs = &inputs })) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     var selected: usize = 0;
     for (l.mask) |m| selected += @intFromBool(m);
-    try out(c.io, "valid: {s} ({d} rules, {d} selected, {d} groups, {d} shared)\n", .{ l.wf.name, l.wf.rules.len, selected, l.wf.groups.len, l.wf.shared.len });
-    return .ok;
+    var text: std.Io.Writer.Allocating = .init(c.gpa);
+    defer text.deinit();
+    const w = &text.writer;
+    try w.print("valid: {s} ({d} rules, {d} selected, {d} groups, {d} shared)\n", .{ l.wf.name, l.wf.rules.len, selected, l.wf.groups.len, l.wf.shared.len });
+    try workz.lint.notes(c.a, w, &l.wf, l.mask);
+    var missing: usize = 0;
+    if (inputs) missing = try workz.lint.missingInputs(c.gpa, w, &l.wf, &l.g, l.mask);
+    try sys.writeAll(1, text.written());
+    return if (missing > 0) .failed else .ok;
 }
 
 const GraphExtra = struct {
@@ -977,6 +1010,16 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     try sys.writeFile(c.gpa, path, starter_workflow);
     try out(c.io, "wrote {s}; its example rules read data/reads.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
+    return .ok;
+}
+
+fn cmdSchema(c: Ctx, args: []const [:0]const u8) !Exit {
+    for (args) |arg| if (arg.len > 1 and arg[0] == '-') return try unknownOption(c, arg);
+    if (args.len > 0) return fail("schema takes no arguments", .{});
+    var text: std.Io.Writer.Allocating = .init(c.gpa);
+    defer text.deinit();
+    try workz.schema.write(&text.writer);
+    try sys.writeAll(1, text.written());
     return .ok;
 }
 

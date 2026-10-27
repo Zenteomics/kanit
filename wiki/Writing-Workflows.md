@@ -237,7 +237,19 @@ Paths in `input`, `output`, `log` and `benchmark` stay relative to the working d
 
 A rule with `container = "IMAGE"` runs its command inside a local image through rootless Podman, and container rules can share one loaded index through a service. [Containers and services](Containers-and-Services.md) covers both.
 
-## Seeing the graph
+## Editor support
+
+`workz schema` prints a JSON Schema of the format, made from the same key lists `validate` checks. An editor that validates TOML against a schema then completes keys, shows each key's help, and marks a misspelled key as you type. With the Even Better TOML extension, or any editor using the Taplo language server, put this in `.taplo.toml` at the top of your project:
+
+```toml
+[[rule]]
+include = ["**/workflow.toml"]
+[rule.schema]
+path = "./workz.schema.json"
+```
+
+and write the schema next to it with `workz schema > workz.schema.json`. `workz validate --inputs` then catches paths that exist nowhere before a launch does.
+
 
 `workz graph` shows what the file declares, in layers, so you can check a generated workflow before running it. On a small pipeline with two samples, an index built by a rule and loaded once by a service, and a disk group, the resources layer by step:
 

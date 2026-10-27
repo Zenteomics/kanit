@@ -472,3 +472,18 @@ test "[unit] - [workflow]: a bad output does not hide a conflict with the rule's
     try testing.expect(std.mem.indexOf(u8, problem.message, "rule a lists diagnostics './log.txt' twice") != null);
     try testing.expect(std.mem.indexOf(u8, problem.message, "rules a and b both produce 'shared.txt'") != null);
 }
+
+test "[unit] - [schema]: every key the parser accepts has a type in the schema" {
+    for (workz.schema.tables) |t| for (t.keys) |name| {
+        if (workz.schema.find(t.types, name) == null) {
+            std.debug.print("no schema type for key '{s}'\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+    };
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    try workz.schema.write(&text.writer);
+    var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text.written(), .{});
+    defer parsed.deinit();
+    try testing.expect(parsed.value.object.get("properties").?.object.get("rules") != null);
+}
