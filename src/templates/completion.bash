@@ -18,7 +18,7 @@ _workz() {
             -d | --workdir) wd=${COMP_WORDS[i+1]}; ((i++)) ;;
             -t | --target | --rerun-rule | --pass-env | -j | --jobs | --max-threads | --max-memory | -r | --retry | \
                 --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | \
-                --compare | --keep | --interval) ((i++)) ;;
+                --compare | --keep | --interval | --threads | --layer | --by | --focus | --why | --users) ((i++)) ;;
             *.toml) wf=${COMP_WORDS[i]} ;;
             -*) ;;
             *) words+=("${COMP_WORDS[i]}") ;;
@@ -33,7 +33,12 @@ _workz() {
             return ;;
         -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
         --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
-        --format) COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); return ;;
+        --format)
+            if [ "$cmd" = graph ]; then COMPREPLY=($(compgen -W "text dot json" -- "$cur"))
+            else COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); fi
+            return ;;
+        --layer) COMPREPLY=($(compgen -W "rules files resources all" -- "$cur")); return ;;
+        --by) COMPREPLY=($(compgen -W "step" -- "$cur")); return ;;
         --launch) COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur")); return ;;
         --compare)
             compopt -o filenames 2> /dev/null
@@ -47,7 +52,8 @@ _workz() {
         explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
         validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
-        prepare) opts="-o --output --check" ;;
+        prepare) opts="-h --help -o --output --check" ;;
+        schema | version) opts="-h --help" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
         status) opts="$opts --history --json --launch --no-color" ;;

@@ -983,7 +983,7 @@ rc1=$?
 rc2=$?
 check "help shows a command's options, also through --help" '[ $rc1 = 0 ] && [ $rc2 = 0 ] && cmp -s help-run.txt run-help.txt && grep -q "^  --max-threads N" help-run.txt'
 widest=0
-for c in "" init validate plan explain graph run control watch status logs report verify clean completion; do
+for c in "" init prepare schema validate plan explain graph run control watch status logs report verify clean completion; do
   w=$("$workz" help $c | awk '{ if (length > m) m = length } END { print m + 0 }'); [ "$w" -gt "$widest" ] && widest=$w
 done
 check "every help text fits in 80 columns ($widest)" '[ "$widest" -le 80 ]'

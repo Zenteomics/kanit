@@ -47,6 +47,25 @@ const rerun_opts = [_]Opt{
 
 const commands = [_]Command{
     .{
+        .name = "init",
+        .args = "[FILE] [--template]",
+        .summary = "write a commented starter workflow or pipeline template",
+        .group = .write,
+        .common = .none,
+        .about =
+        \\Writes a commented starter workflow to FILE (default: workflow.toml) in the
+        \\current directory. With --template, writes a pipeline template instead
+        \\(default: pipeline.toml) and a samples.tsv beside it, for workz prepare. It
+        \\never overwrites a file that exists.
+        ,
+        .options = &.{.{ .flag = "--template", .desc = "write a pipeline template and samples.tsv instead" }},
+        .examples =
+        \\workz init
+        \\workz init rnaseq.toml
+        \\workz init --template
+        ,
+    },
+    .{
         .name = "prepare",
         .args = "[TEMPLATE] [-o WORKFLOW] [--check]",
         .summary = "write the workflow a pipeline template describes",
@@ -88,34 +107,22 @@ const commands = [_]Command{
         .examples = "workz schema > workz.schema.json",
     },
     .{
-        .name = "init",
-        .args = "[FILE] [--template]",
-        .summary = "write a commented starter workflow or pipeline template",
-        .group = .write,
-        .common = .none,
-        .about =
-        \\Writes a commented starter workflow to FILE (default: workflow.toml) in the
-        \\current directory. With --template, writes a pipeline template instead
-        \\(default: pipeline.toml) and a samples.tsv beside it, for workz prepare. It
-        \\never overwrites a file that exists.
-        ,
-        .examples =
-        \\workz init
-        \\workz init rnaseq.toml
-        \\workz init --template
-        ,
-    },
-    .{
         .name = "validate",
         .args = "[WORKFLOW]",
         .summary = "check a workflow: every key, every value and the graph",
         .group = .write,
         .about =
         \\Checks every key and value of WORKFLOW, the rule names, the declared outputs
-        \\and the graph, and prints a one-line summary. Whether inputs exist and
-        \\requests fit the budget is checked when a launch starts.
+        \\and the graph, lists every problem at once, and prints a one-line summary
+        \\with notes on what is valid but likely a mistake. With --inputs it also lists
+        \\the inputs that no rule writes and that do not exist; plan --budget checks
+        \\the requests against the budget.
         ,
-        .examples = "workz validate workflow.toml",
+        .options = &.{.{ .flag = "--inputs", .desc = "also list inputs that exist nowhere; exit 1 if any" }},
+        .examples =
+        \\workz validate workflow.toml
+        \\workz validate --inputs
+        ,
     },
     .{
         .name = "plan",
@@ -126,7 +133,7 @@ const commands = [_]Command{
         \\Prints, for every selected rule, whether a run would run it or reuse it and
         \\why, then how many of each. Nothing runs. 'dry-run' is another name for it.
         ,
-        .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
+        .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
         \\workz plan workflow.toml
         \\workz plan workflow.toml --summary
@@ -150,7 +157,7 @@ const commands = [_]Command{
     .{
         .name = "graph",
         .args = "[WORKFLOW] [options]",
-        .summary = "show the rule graph in layers: rules, files, shared inputs",
+        .summary = "show the rule graph in layers: rules, files, resources",
         .group = .write,
         .about =
         \\Shows the selected rules and what links them: as text on a terminal, as
@@ -162,7 +169,7 @@ const commands = [_]Command{
         .options = &.{
             .{ .flag = "--layer LAYER", .desc = "rules, files, resources or all (default: rules)" },
             .{ .flag = "--by step", .desc = "one node per step instead of per rule" },
-            .{ .flag = "--focus EXPR", .desc = "+RULE upstream, RULE+ downstream, 2+RULE two levels" },
+            .{ .flag = "--focus EXPR", .desc = "+RULE up, RULE+ down, +RULE+ both, 2+RULE two levels" },
             .{ .flag = "--why FROM:TO", .desc = "one path of rules from FROM to TO" },
             .{ .flag = "--users NAME", .desc = "a shared input, what writes it and what uses it" },
             .{ .flag = "--format FORMAT", .desc = "text, dot or json (default: text on a terminal)" },
