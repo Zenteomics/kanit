@@ -155,12 +155,13 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 | ---------------- | --------------------- | ------- | --------------------------------------- |
 | `--launch`       | ID                    | newest  | the launch to report on                 |
 | `--format`       | `tsv`, `json`, `html` | `tsv`   | attempt table, or a self-contained page |
+| `--json`         |                       |         | the same as `--format json`             |
 | `-o`, `--output` | FILE                  | stdout  | write the report to FILE                |
 | `--bottlenecks`  |                       |         | what limited the launch                 |
 | `--suggest`      |                       |         | suggested threads and memory per step   |
 | `--compare`      | OTHER                 |         | compare with another launch             |
 
-`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare` and `--bottlenecks`. `--format` applies to the attempt table and to `--suggest`, which prints `tsv` or `json`; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
+`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare` and `--bottlenecks`. `--format` applies to the attempt table and to `--suggest`, which prints a table on a terminal, and TSV, or JSON with `--format json`, to a file or a pipe; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
 
 ## verify
 

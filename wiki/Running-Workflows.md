@@ -109,7 +109,7 @@ workz control retry align_s3    # run a failed or cancelled rule again, with its
 workz control cancel            # stop the launch, like an interrupt
 ```
 
-Each command prints `sent: ...`, and the launch reports what it did on its standard error, for example `control stop align_s3: stopping`, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
+Each command prints `sent: ...`, and the launch reports what it did on its standard error, for example `control stop align_s3: stopping`, or `cancelled before it started` for a rule that had not started, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
 
 Commands go through the `control` file in the launch directory, which the engine watches; every one is recorded as a `control` event.
 

@@ -72,4 +72,4 @@ printf '[workflow]\nname = "check"\n\n[[rules]]\nname = "hello"\noutput = ["hell
 workz run workflow.toml
 ```
 
-On a terminal the run ends with a short summary that starts with `completed` and names the launch's page; off a terminal it prints `[1/1] completed hello (0.0 s)` and a one-line JSON summary with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.
+On a terminal the run ends with a short summary that starts with `completed` and names the launch's page; off a terminal it prints `[1/1] completed hello (3 ms)` and a one-line JSON summary with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.

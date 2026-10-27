@@ -8,7 +8,7 @@ The errors you are most likely to meet, what each means, and what to do about it
 
 - `cannot create the run's network namespace: ...`: Unprivileged user namespaces are disabled or restricted on this system. Check `sysctl user.max_user_namespaces`, ask your administrator, or use `--no-isolation`.
 
-- `another launch is running in PATH; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse the same way while it runs.
+- `another launch is running in PATH; watch it with workz watch, or run again after it ends`: Only one launch runs in a working directory at a time. Watch it with `workz watch`, stop it with `workz control cancel`, or wait for it to end. `verify` and `clean` refuse while it runs with `a launch is running in PATH; verify after it ends`, or `clean after it ends`.
 
 - `the workflow has container rules but podman is not on PATH`: Install rootless Podman, or put it on the `PATH` of the shell that runs workz.
 

@@ -80,7 +80,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 [0/2] budget 2 threads, 1.0 GiB, 2 jobs
 [0/2] page .workz/launches/.../report.html, drawn again every 5 s while the launch runs
 [0/2] started sort_calls (attempt 1)
-[1/2] completed sort_calls (0.0 s)
+[1/2] completed sort_calls (3 ms)
 ```
 
 `sort_calls` wrote the same sorted file, so `report` was reused without running. Use it on rules whose outputs often repeat byte for byte when their inputs change, such as sorting, filtering or format conversion. A file that embeds the time or the run directory never repeats, so cutoff only costs a hash there.
@@ -111,7 +111,7 @@ If a recorded output was changed outside workz, for example edited by hand, the 
 
 ```text
 workz: output of completed rule make changed since it was recorded: .../edit/out.txt
-workz: a recorded output changed outside workz (.../edit/out.txt); run again with --rerun-rule for the affected rules, or --rerun for all (earlier bytes are kept in previous/)
+workz: a recorded output changed outside workz (.../edit/out.txt); to run the rule that wrote it again, keeping the earlier bytes in previous/, run with --rerun-rule make, or with --rerun for every rule
 ```
 
 If a digest is stored for the output (a cutoff rule, or `verify --content`) and the bytes still match it, workz records the new identity and the rule stays reused. Otherwise run the rule again on purpose with `--rerun-rule RULE`, or restore the file.
