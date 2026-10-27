@@ -65,16 +65,15 @@ align_S5                                       1    14.0 s   203 MiB   402 MiB  
 qc_S6                                          1     1.9 s   1.1 MiB   1.6 MiB  Started analysis of S6.fq
 ```
 
-The second line counts the selected rules in each state; `done` adds the completed and reused ones. Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table. `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest. A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch, and `status --history` marks it `running?`. Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
+The second line counts the selected rules in each state; `done` adds the completed and reused ones. Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table. `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest. A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch, and `status --history` marks it `unfinished`. Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
 
 ## status
 
-`workz status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason and last line of error output, the launch's page, and the commands to look further:
+`workz status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason, which quotes the last line of its error output, the launch's page, and the commands to look further:
 
 ```text
  failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked
- failures  align_S1  exited with status 3
-                     | align: reference index is truncated
+ failures  align_S1  exited with status 3: align: reference index is truncated
  page      .workz/launches/20261026T051434.360-95f2e7d0/report.html
  next      workz logs align_S1   the output of the failed attempt
            run the same command again: rules that completed are reused
@@ -91,13 +90,13 @@ While the launch runs, `status` prints the plain view above once on a terminal. 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 
 ```text
-LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER
-20261026T221057.818-be24883d    completed       48.5 s    25       0      0
-20261026T214107.045-dbca1c53    completed       48.2 s    25       0      0
-20261026T212349.502-401d88e4    completed       45.1 s    25       0      0
+LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
+20261026T221057.818-be24883d    completed       48.5 s    25       0          0
+20261026T214107.045-dbca1c53    completed       48.2 s    25       0          0
+20261026T212349.502-401d88e4    completed       45.1 s    25       0          0
 ```
 
-`DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `OTHER` cancelled and unstarted ones. A launch that ended with an error shows it at the end of its line; one still running, or killed before it wrote its summary, shows `running?`.
+`DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `CANCELLED` the rules it stopped or never started. A launch that ended with an error shows it at the end of its line. The newest launch shows `running` while a run holds the working directory's lock; a launch whose engine ended without recording its end, as when killed, shows `unfinished`.
 
 ## logs
 

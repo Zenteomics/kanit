@@ -111,6 +111,7 @@ workz run workflow.toml --max-threads 4 --max-memory 4G
 ```
 
 ```text
+[0/2] budget 4 threads, 4.0 GiB, 4 jobs
 [0/2] page .workz/launches/.../report.html, drawn again every 5 s while the launch runs
 [0/2] starting shared service genome (1024 MiB)
 [0/2] started align_s1 (attempt 1)

@@ -10,6 +10,7 @@ const fields = @import("fields.zig");
 const Allocator = std.mem.Allocator;
 const str = fields.str;
 const int = fields.int;
+const whole = fields.whole;
 const float = fields.float;
 
 pub const Status = enum {
@@ -146,6 +147,8 @@ pub const Tracker = struct {
     samples: std.ArrayList(Sample) = .empty,
     /// Waits for resource groups; one still open has `to_ns` 0.
     group_waits: std.ArrayList(GroupWait) = .empty,
+    /// The engine that ran the launch, with its digest, from `launch.json`.
+    engine: []const u8 = "",
     /// The open group wait of each rule, by rule index.
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
@@ -159,6 +162,7 @@ pub const Tracker = struct {
             defer gpa.free(text);
             if (std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always })) |v| {
                 if (str(v, "workdir")) |wd| t.workdir_name = std.fs.path.basename(wd);
+                if (str(v, "engine")) |e| t.engine = e;
             } else |_| {}
         } else |_| {}
         return t;
@@ -222,7 +226,8 @@ pub const Tracker = struct {
         if (line.len == 0) return;
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
-        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch return;
+        // A line that does not parse is skipped; running out of memory is not.
+        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| return if (err == error.OutOfMemory) err else {};
         const a = self.arena.allocator();
         const ev = str(v, "event") orelse return;
         const at = parseTime(str(v, "time") orelse "") orelse 0;
@@ -230,10 +235,10 @@ pub const Tracker = struct {
         const eql = std.mem.eql;
         if (eql(u8, ev, "launch_started")) {
             self.launch_ns = at;
-            self.selected = @intCast(int(v, "selected") orelse 0);
-            self.max_threads = @intCast(int(v, "max_threads") orelse 0);
-            self.max_memory_mib = @intCast(int(v, "max_memory_mib") orelse 0);
-            self.max_jobs = @intCast(int(v, "jobs") orelse 0);
+            self.selected = whole(u32, v, "selected") orelse 0;
+            self.max_threads = whole(u32, v, "max_threads") orelse 0;
+            self.max_memory_mib = whole(u64, v, "max_memory_mib") orelse 0;
+            self.max_jobs = whole(u32, v, "jobs") orelse 0;
             self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
             // Every selected rule is listed from the start, as pending.
             if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
@@ -277,7 +282,7 @@ pub const Tracker = struct {
                 s.held_s += @as(f64, @floatFromInt(at - s.held_since)) / 1e9;
                 s.held_since = 0;
             }
-        } else if (str(v, "rule")) |name| {
+        } else if (std.mem.startsWith(u8, ev, "task_")) if (str(v, "rule")) |name| {
             const r = try self.rule(name);
             const ri = self.index.get(name).?;
             // A rule's wait for a resource group ends when it waits for
@@ -296,11 +301,11 @@ pub const Tracker = struct {
             } else if (eql(u8, ev, "task_started")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .running;
-                r.attempt = @intCast(int(v, "attempt") orelse 0);
+                r.attempt = whole(u32, v, "attempt") orelse 0;
                 r.dir = try a.dupe(u8, str(v, "directory") orelse "");
                 r.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-                r.threads = @intCast(int(v, "threads") orelse 0);
-                r.memory_mib = @intCast(int(v, "memory_mib") orelse 0);
+                r.threads = whole(u32, v, "threads") orelse 0;
+                r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
                 r.reason = "";
@@ -328,7 +333,7 @@ pub const Tracker = struct {
             } else if (eql(u8, ev, "task_cancelling")) {
                 r.status = .cancelling;
             }
-        }
+        };
     }
 
     /// Threads and memory reserved by the running attempts (shared inputs

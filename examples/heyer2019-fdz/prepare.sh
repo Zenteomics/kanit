@@ -39,7 +39,7 @@ samples=(03JW 07KM 30RN 03NP)
   calls=$(printf 'fdz:%s ' "${junctions[@]}")
   printf '[[rules]]\nname = "merge"\ninput = %s\noutput = ["merged.events.tsv", "merged.calls.tsv"]\nshell = "%s merge --out merged %s"\n[rules.resources]\nthreads = 1\nmemory = "256M"\n\n' "$inputs" "$fdz" "$calls"
   printf '[[rules]]\nname = "report"\ninput = ["merged.events.tsv", "%s/samples.tsv"]\noutput = ["expected.tsv"]\n' "$heyer"
-  printf 'shell = "for s in %s; do want=$(awk -F\\"\\\\t\\" -v s=$s %s $1 == s {print $3} %s %s/samples.tsv); a=${want%%%%::*}; b=${want##*::}; n=$(grep -c \\"$a.*$b\\\\|$b.*$a\\" merged.events.tsv || true); printf \\"%%s\\\\t%%s\\\\t%%s\\\\n\\" $s $want $n; done > expected.tsv"\n' "${samples[*]}" "'" "'" "$heyer"
+  printf 'shell = "for s in %s; do want=$(awk -F\\"\\\\t\\" -v s=$s %s $1 == s {print $3} %s %s/samples.tsv); a=${want%%%%::*}; b=${want##*::}; n=$(grep -cw -e \\"$a.*$b\\" -e \\"$b.*$a\\" merged.events.tsv || true); printf \\"%%s\\\\t%%s\\\\t%%s\\\\n\\" $s $want $n; done > expected.tsv"\n' "${samples[*]}" "'" "'" "$heyer"
   printf '[rules.resources]\nthreads = 1\nmemory = "64M"\n'
 } > "$out/main.toml"
 echo "$out/main.toml"

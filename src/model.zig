@@ -89,10 +89,10 @@ pub const Attempt = struct {
 
     /// The attempt ran for at least half a second but its own cgroup did
     /// almost nothing: under a tenth of its CPU request and a twentieth of
-    /// its memory request. The command most likely handed the work to
-    /// another supervisor (systemd, a container runtime), whose use workz
-    /// does not see.
-    pub fn delegated(self: Attempt) bool {
+    /// its memory request. The command waited (a sleep, the network, a
+    /// lock) or handed the work to a process outside its cgroup, such as
+    /// another supervisor's; its counters size nothing either way.
+    pub fn idle(self: Attempt) bool {
         if (self.wall_s < 0.5 or !self.completed()) return false;
         const memory = @max(self.peak_mib orelse 0, self.rss_mib);
         return self.cpuEfficiency() < 0.1 and memory < @max(self.request_mib * 0.05, 64);
@@ -168,9 +168,9 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt
 
 /// The attempt in record file `path`, or null when it cannot be read.
 fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
-    const bytes = sys.readFile(gpa, path, 16 << 20) catch return null;
+    const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch return null;
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else null;
     const wall = num(get(v, "wall_s")) orelse 0;
     const req = get(v, "request");
     const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
@@ -193,7 +193,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
     const labels = labelsOf(v);
     return .{
         .rule = str(v, "rule"),
-        .attempt = @intFromFloat(num(get(v, "attempt")) orelse 0),
+        .attempt = std.math.lossyCast(u32, num(get(v, "attempt")) orelse 0),
         .status = str(v, "status"),
         .reason = str(v, "reason"),
         .wall_s = wall,
@@ -286,10 +286,6 @@ pub const State = enum {
     /// The launch ended before it was ready.
     not_run,
 
-    pub fn done(s: State) bool {
-        return s == .completed or s == .reused;
-    }
-
     pub fn active(s: State) bool {
         return s == .running or s == .stopping;
     }
@@ -318,10 +314,13 @@ pub const Rule = struct {
 pub const Sizing = struct {
     threads: f64 = 0,
     memory_mib: f64 = 0,
-    /// Why there is no plain suggestion: the work ran outside workz, or an
+    /// Why there is no plain suggestion: the runs were idle, or an
     /// attempt was killed for exceeding its memory, so the suggestion is a
     /// guess above the request it exceeded.
-    note: enum { none, measured, delegated, out_of_memory } = .none,
+    note: enum { none, measured, idle, out_of_memory } = .none,
+    /// The runs kept nine tenths or more of the threads they requested busy
+    /// over their time: the request capped them, so what they would use is not known, and more threads may help.
+    at_thread_limit: bool = false,
 };
 
 pub const Step = struct {
@@ -355,9 +354,10 @@ pub const Step = struct {
     used_mib: f64 = 0,
     used_is_peak: bool = false,
     peak_mib: f64 = 0,
-    delegated: usize = 0,
+    idle: usize = 0,
     limit_events: f64 = 0,
-    eff_sum: f64 = 0,
+    /// Thread-seconds the runs reserved: wall time times threads.
+    reserved_s: f64 = 0,
     stall_n: usize = 0,
     cpu_stall: f64 = 0,
     memory_stall: f64 = 0,
@@ -377,28 +377,41 @@ pub const Step = struct {
         return self.rules.items.len;
     }
 
-    /// Mean CPU efficiency of the runs.
+    /// CPU use of the runs: their CPU time over the thread-seconds they
+    /// reserved, so a long run weighs more than a short one.
     pub fn efficiency(self: Step) f64 {
-        return if (self.runs == 0) 0 else self.eff_sum / @as(f64, @floatFromInt(self.runs));
+        return if (self.reserved_s > 0) self.cpu_s / self.reserved_s else 0;
     }
 
-    /// What the step spent its time on, judged from its stall shares and
-    /// CPU efficiency; "-" when there is too little to judge.
+    /// The runs add up to a second or more, enough to judge their CPU use.
+    pub fn judged(self: Step) bool {
+        return self.wall_s >= 1;
+    }
+
+    /// What the step spent its time on, judged from its stall shares and CPU
+    /// use; "-" when there is too little to judge: runs under a second in
+    /// all, or no stall shares to tell waiting from work.
     pub fn character(self: Step) []const u8 {
+        if (!self.judged()) return "-";
         const eff = self.efficiency();
-        if (self.stall_n == 0) return if (eff >= 0.7) "CPU-bound" else "-";
-        const n: f64 = @floatFromInt(self.stall_n);
-        if (self.memory_stall / n >= 0.2) return "memory-throttled";
-        if (self.io_stall / n >= 0.3) return "I/O-bound";
-        if (self.cpu_stall / n >= 0.3) return "CPU-starved";
+        const stalls = self.stall_n > 0;
+        if (stalls) {
+            const n: f64 = @floatFromInt(self.stall_n);
+            if (self.memory_stall / n >= 0.2) return "memory-throttled";
+            if (self.io_stall / n >= 0.3) return "I/O-bound";
+            if (self.cpu_stall / n >= 0.3) return "CPU-starved";
+        }
         if (eff >= 0.7) return "CPU-bound";
-        if (eff < 0.3) return "mostly waiting";
-        return "mixed";
+        // Busy, but on fewer cores than it reserved: the program runs
+        // fewer threads than it was given.
+        if (self.threads >= 2 and self.cores >= 0.7 and self.cores < self.threads * 0.6) return "runs fewer threads";
+        if (!stalls) return "-";
+        return if (eff < 0.3) "mostly idle" else "mixed";
     }
 
-    /// Most runs handed their work to another supervisor.
-    pub fn mostlyDelegated(self: Step) bool {
-        return self.runs > 0 and self.delegated * 2 > self.runs;
+    /// Most runs were idle.
+    pub fn mostlyIdle(self: Step) bool {
+        return self.runs > 0 and self.idle * 2 > self.runs;
     }
 };
 
@@ -416,16 +429,29 @@ pub const PathRow = struct {
     /// launch's start, and its becoming ready: it waited for producers off
     /// the path.
     held_s: f64 = 0,
+    /// Time between its attempts that none of them waited or ran, as when
+    /// a stopped attempt was retried later.
+    between_s: f64 = 0,
+    /// When its last attempt ended, seconds from the launch start.
+    end_s: f64 = 0,
 };
 
-/// A lower bound on the elapsed time: the longest chain of work, which no
-/// budget can shorten, or the work one limit of the budget had to carry.
+/// Launches shorter than this are not judged: starting the engine,
+/// checking inputs and recording attempts are then a large part of them,
+/// and a few milliseconds swing any share.
+pub const judge_s: f64 = 2;
+
+/// A lower bound on the elapsed time of the attempts a launch made: the
+/// longest chain of work, which no budget can shorten; the work one limit
+/// of the budget had to carry; the CPU time its rules used, over the
+/// threads; or the engine's own CPU time, as the engine works on one
+/// thread.
 pub const Bound = struct {
-    kind: enum { chain, threads, memory, jobs, group },
+    kind: enum { chain, threads, cpu, memory, jobs, group, engine },
     /// The group, for a group.
     name: []const u8 = "",
-    /// Thread-, MiB-, job- or unit-seconds of work, and the limit that
-    /// carried it; both 0 for the chain.
+    /// Thread-, CPU-, MiB-, job- or unit-seconds of work, and the limit
+    /// that carried it; both 0 for the chain and the engine.
     work: f64 = 0,
     limit: f64 = 0,
     seconds: f64,
@@ -435,9 +461,12 @@ pub const GroupAdvice = struct {
     name: []const u8,
     /// Rule-seconds that ready rules waited for the group.
     seconds: f64,
-    /// Share of run samples, while a rule waited for the group, in which
-    /// the budget had room for it; null without samples.
+    /// Share of the run samples taken while some rule waited for the group
+    /// in which the free threads and memory had room for one of the waiting
+    /// rules; null without samples.
     fit: ?f64,
+    /// Those samples.
+    samples: usize = 0,
 };
 
 pub const Total = struct { name: []const u8, steps: usize = 0, runs: usize = 0, wall_s: f64 = 0, cpu_s: f64 = 0 };
@@ -463,6 +492,10 @@ pub const Launch = struct {
     name: []const u8 = "launch",
     /// "workz X.Y.Z", without the executable's digest.
     engine: []const u8 = "",
+    /// The engine with its executable's digest, and the workflow file's
+    /// digest, as `launch.json` holds them; "" when not recorded.
+    engine_id: []const u8 = "",
+    workflow_sha256: []const u8 = "",
     started_text: []const u8 = "",
     max_threads: f64 = 0,
     max_memory_mib: f64 = 0,
@@ -484,6 +517,8 @@ pub const Launch = struct {
     tracker: tracker.Tracker,
     wf: ?workflow.Workflow = null,
     g: ?graph.Graph = null,
+    /// Why the workflow snapshot gives no graph, when it does not.
+    snapshot_problem: ?[]const u8 = null,
 
     /// This launch's attempts, in rule and attempt order.
     rows: []const Attempt = &.{},
@@ -506,6 +541,11 @@ pub const Launch = struct {
     path_ran_s: f64 = 0,
     path_waited_s: f64 = 0,
     path_held_s: f64 = 0,
+    path_between_s: f64 = 0,
+    /// Seconds from the end of the path's last rule to the end of the
+    /// launch: rules off the path still ran. Held, waited, ran, between and
+    /// after add up to the elapsed time.
+    path_after_s: f64 = 0,
     /// Lower bounds on the elapsed time, and the largest of them: what
     /// limited the launch.
     bounds: []const Bound = &.{},
@@ -520,6 +560,14 @@ pub const Launch = struct {
         if (self.g) |*g| g.deinit();
         if (self.wf) |*wf| wf.deinit();
         self.tracker.deinit();
+    }
+
+    /// How far the launch ran over its largest bound, in percent; null when
+    /// no attempt ran, or the launch is too short to say.
+    pub fn overBound(self: *const Launch) ?f64 {
+        const b = self.bounds[self.binding orelse return null];
+        if (self.elapsed_s < judge_s or b.seconds <= 0) return null;
+        return @max(self.elapsed_s / b.seconds - 1, 0) * 100;
     }
 
     pub fn usage(self: *const Launch) []const tracker.Sample {
@@ -564,7 +612,7 @@ pub const Launch = struct {
             t.runs += 1;
             t.wall_s += run.wall_s;
             t.cpu_s += run.cpu_s;
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ name, r.labels.step });
+            const pair = try pairKey(a, name, r.labels.step);
             if (!seen.contains(pair)) {
                 try seen.put(a, pair, {});
                 t.steps += 1;
@@ -594,7 +642,7 @@ pub const Launch = struct {
             row.wall_s += run.wall_s;
             row.cpu_s += run.cpu_s;
             if (row.slowest == null or run.wall_s > self.rules[row.slowest.?].run.?.wall_s) row.slowest = i;
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ name, r.labels.step });
+            const pair = try pairKey(a, name, r.labels.step);
             if (!seen.contains(pair)) {
                 try seen.put(a, pair, {});
                 row.steps += 1;
@@ -640,10 +688,31 @@ pub const Launch = struct {
     }
 };
 
-fn readJson(gpa: Allocator, a: Allocator, path: []const u8) ?Value {
-    const bytes = sys.readFile(gpa, path, 1 << 20) catch return null;
+/// "workz X.Y.Z" from an engine ID, without the executable's digest.
+fn engineName(id: []const u8) []const u8 {
+    return if (std.mem.indexOf(u8, id, " sha256:")) |i| id[0..i] else id;
+}
+
+/// A key for a pair of names, such as a sample and a step.
+fn pairKey(a: Allocator, x: []const u8, y: []const u8) ![]const u8 {
+    return std.fmt.allocPrint(a, "{s}\x00{s}", .{ x, y });
+}
+
+/// The reason a workflow snapshot gave no graph: the problem's line and
+/// message, or the error's name.
+fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]const u8 {
+    if (err == error.OutOfMemory) return error.OutOfMemory;
+    if (p.message.len == 0) return @errorName(err);
+    if (p.line > 0) return std.fmt.allocPrint(a, "line {d}: {s}", .{ p.line, p.message });
+    return a.dupe(u8, p.message);
+}
+
+/// A JSON record, or null when it is missing or cannot be parsed; running
+/// out of memory is an error, not a missing record.
+fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
+    const bytes = sys.readFile(gpa, path, 1 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch null;
+    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else null;
 }
 
 fn stateOf(s: tracker.Status, finished: bool) State {
@@ -668,11 +737,12 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     _ = try l.tracker.update();
     const tr = &l.tracker;
 
-    if (readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }))) |v| {
+    if (try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }))) |v| {
         l.workdir = str(v, "workdir");
         if (l.workdir.len > 0) l.name = std.fs.path.basename(l.workdir);
-        const engine = str(v, "engine");
-        l.engine = if (std.mem.indexOf(u8, engine, " sha256:")) |i| engine[0..i] else engine;
+        l.engine_id = str(v, "engine");
+        l.engine = engineName(l.engine_id);
+        l.workflow_sha256 = str(v, "workflow_sha256");
         l.started_text = str(v, "started");
         l.max_threads = num(get(v, "max_threads")) orelse 0;
         l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
@@ -684,21 +754,18 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     l.t0_ns = if (tr.launch_ns != 0) tr.launch_ns else tr.started_ns;
     l.selected = tr.selected;
 
-    const summary = readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }));
+    const summary = try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }));
     if (summary) |s| {
         l.finished = true;
         l.status = str(s, "status");
         l.@"error" = optStr(get(s, "error"));
-        l.elapsed_s = num(get(s, "elapsed_s")) orelse 0;
-        if (num(get(s, "selected"))) |n| l.selected = @intFromFloat(n);
+        l.elapsed_s = @max(num(get(s, "elapsed_s")) orelse 0, 0);
+        if (num(get(s, "selected"))) |n| l.selected = std.math.lossyCast(usize, n);
         if (get(s, "engine_cost")) |c| {
             l.engine_cpu_s = num(get(c, "cpu_s"));
             l.engine_rss_mib = num(get(c, "max_rss_mib"));
         }
-        if (l.engine.len == 0) {
-            const engine = str(s, "engine");
-            l.engine = if (std.mem.indexOf(u8, engine, " sha256:")) |i| engine[0..i] else engine;
-        }
+        if (l.engine.len == 0) l.engine = engineName(str(s, "engine"));
     } else if (tr.finished) {
         l.finished = true;
         l.status = tr.final_status;
@@ -720,8 +787,10 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     if (l.workdir.len > 0) {
         if (workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
             l.wf = wf;
-            if (graph.build(gpa, &l.wf.?, &problem)) |g| l.g = g else |_| {}
-        } else |_| {}
+            if (graph.build(gpa, &l.wf.?, &problem)) |g| {
+                l.g = g;
+            } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
+        } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
     }
     if (problem.message.len > 0) gpa.free(problem.message);
 
@@ -829,7 +898,7 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
         if (r.labels.category != null) l.by_category = true;
         if (r.labels.sample) |name| {
             try samples.put(a, name, {});
-            const pair = try std.fmt.allocPrint(a, "{s}\x00{s}", .{ r.labels.step, name });
+            const pair = try pairKey(a, r.labels.step, name);
             if (!pairs.contains(pair)) {
                 try pairs.put(a, pair, {});
                 s.samples += 1;
@@ -852,9 +921,9 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
             s.used_is_peak = run.usedIsPeak();
         }
         s.peak_mib = @max(s.peak_mib, run.peak_mib orelse run.rss_mib);
-        s.delegated += @intFromBool(run.delegated());
+        s.idle += @intFromBool(run.idle());
         s.limit_events += run.limit_events;
-        s.eff_sum += run.cpuEfficiency();
+        s.reserved_s += run.wall_s * run.threads;
         if (run.cpu_stall) |cs| {
             s.cpu_stall += cs;
             s.memory_stall += run.memory_stall orelse 0;
@@ -916,15 +985,15 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
 /// plus a fifth, in 64 MiB steps; threads from the most cores a run used,
 /// rounded up and at most the request. A step whose attempt was killed for
 /// exceeding its memory gets half again the request it exceeded, at least;
-/// a step whose work ran outside workz keeps its request, as nothing
-/// measured it.
+/// an idle step keeps its request, as its counters measured nothing.
 fn size(s: Step) Sizing {
-    if (s.mostlyDelegated()) return .{ .threads = @max(s.threads, 1), .memory_mib = s.request_mib, .note = .delegated };
+    if (s.mostlyIdle()) return .{ .threads = @max(s.threads, 1), .memory_mib = s.request_mib, .note = .idle };
     var out: Sizing = .{};
     if (s.runs > 0) {
         out.note = .measured;
         out.memory_mib = @max(@ceil(s.used_mib * 1.2 / 64.0) * 64.0, 64);
         out.threads = @min(@max(@ceil(s.cores - 0.05), 1), @max(s.threads, 1));
+        out.at_thread_limit = s.judged() and s.efficiency() >= 0.9;
     }
     if (s.oom_kills > 0) {
         out.note = .out_of_memory;
@@ -944,8 +1013,8 @@ fn collectPath(a: Allocator, l: *Launch) !void {
     const work = try a.alloc(f64, n);
     const waited = try a.alloc(f64, n);
     const tries = try a.alloc(i64, n);
-    // When each rule first became ready and when its last attempt ended,
-    // in seconds from the launch's start.
+    // Each rule's first attempt, which tells when the rule became ready,
+    // and when its last attempt ended, in seconds from the launch's start.
     const first = try a.alloc(?Attempt, n);
     const ended = try a.alloc(f64, n);
     @memset(work, 0);
@@ -981,7 +1050,16 @@ fn collectPath(a: Allocator, l: *Launch) !void {
         if (work[i] == 0) continue;
         const start = if (first[i]) |f| l.at(f.started_ns) else 0;
         const ready = if (first[i]) |f| start - f.waited_s else 0;
-        try rows.append(a, .{ .rule = i, .start_s = start, .waited_s = waited[i], .ran_s = work[i], .earlier = tries[i] - 1, .held_s = ready });
+        try rows.append(a, .{
+            .rule = i,
+            .start_s = start,
+            .waited_s = waited[i],
+            .ran_s = work[i],
+            .earlier = tries[i] - 1,
+            .held_s = ready,
+            .between_s = @max(ended[i] - ready - waited[i] - work[i], 0),
+            .end_s = ended[i],
+        });
     }
     std.mem.reverse(PathRow, rows.items);
     // Held: from the end of the rule before on the path, or from the start.
@@ -992,7 +1070,9 @@ fn collectPath(a: Allocator, l: *Launch) !void {
         l.path_ran_s += p.ran_s;
         l.path_waited_s += p.waited_s;
         l.path_held_s += p.held_s;
+        l.path_between_s += p.between_s;
     }
+    l.path_after_s = @max(l.elapsed_s - prev_end, 0);
     l.path = rows.items;
 }
 
@@ -1004,16 +1084,21 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
     var bounds: std.ArrayList(Bound) = .empty;
     if (l.path.len > 0) try bounds.append(a, .{ .kind = .chain, .seconds = l.path_ran_s });
     var threads: f64 = 0;
+    var cpu: f64 = 0;
     var memory: f64 = 0;
     var jobs: f64 = 0;
     for (l.rows) |r| {
         threads += r.threads * r.wall_s;
+        cpu += r.cpu_s;
         memory += r.request_mib * r.wall_s;
         jobs += r.wall_s;
     }
     if (l.max_threads > 0 and threads > 0) try bounds.append(a, .{ .kind = .threads, .work = threads, .limit = l.max_threads, .seconds = threads / l.max_threads });
+    // The CPU time used fits in the threads however rules are ordered; far
+    // below the threads bound, the requests reserved more than was used.
+    if (l.max_threads > 0 and cpu > 0) try bounds.append(a, .{ .kind = .cpu, .work = cpu, .limit = l.max_threads, .seconds = cpu / l.max_threads });
     // A shared input's memory counts against the budget while it is held.
-    const end_ns = l.t0_ns + @as(i128, @intFromFloat(l.elapsed_s * 1e9));
+    const end_ns = l.t0_ns + std.math.lossyCast(i128, l.elapsed_s * 1e9);
     for (l.shared()) |s| {
         const open: f64 = if (s.held_since > 0) @as(f64, @floatFromInt(@max(end_ns - s.held_since, 0))) / 1e9 else 0;
         memory += s.declared_mib * (s.held_s + open);
@@ -1028,6 +1113,7 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
         };
         if (units > 0 and grp.max > 0) try bounds.append(a, .{ .kind = .group, .name = grp.name, .work = units, .limit = @floatFromInt(grp.max), .seconds = units / @as(f64, @floatFromInt(grp.max)) });
     };
+    if (l.engine_cpu_s) |e| if (e > 0) try bounds.append(a, .{ .kind = .engine, .seconds = e });
     l.bounds = bounds.items;
     for (l.bounds, 0..) |b, i| if (l.binding == null or b.seconds > l.bounds[l.binding.?].seconds) {
         l.binding = i;
@@ -1058,18 +1144,22 @@ fn collectWaits(a: Allocator, l: *Launch) !void {
     for (l.waits.keys(), l.waits.values()) |reason, seconds| {
         if (!std.mem.startsWith(u8, reason, "group:") or seconds < 0.05) continue;
         const name = reason["group:".len..];
+        // Each sample counts once, however many rules waited at it.
         var moments: usize = 0;
         var fit: usize = 0;
-        for (tr.group_waits.items) |w| {
-            if (!eql(u8, w.group, name) or w.to_ns == 0) continue;
-            const v = tr.rules.items[w.rule];
-            for (tr.samples.items) |s| {
-                if (s.ns < w.from_ns or s.ns >= w.to_ns) continue;
-                moments += 1;
-                if (l.max_threads - s.threads_reserved >= @as(f64, @floatFromInt(v.threads)) and l.max_memory_mib - s.memory_reserved_mib >= @as(f64, @floatFromInt(v.memory_mib))) fit += 1;
+        for (tr.samples.items) |s| {
+            var waiting = false;
+            var fits = false;
+            for (tr.group_waits.items) |w| {
+                if (!eql(u8, w.group, name) or w.to_ns == 0 or s.ns < w.from_ns or s.ns >= w.to_ns) continue;
+                waiting = true;
+                const v = tr.rules.items[w.rule];
+                if (l.max_threads - s.threads_reserved >= @as(f64, @floatFromInt(v.threads)) and l.max_memory_mib - s.memory_reserved_mib >= @as(f64, @floatFromInt(v.memory_mib))) fits = true;
             }
+            moments += @intFromBool(waiting);
+            fit += @intFromBool(fits);
         }
-        try groups.append(a, .{ .name = name, .seconds = seconds, .fit = if (moments > 0) @as(f64, @floatFromInt(fit)) / @as(f64, @floatFromInt(moments)) else null });
+        try groups.append(a, .{ .name = name, .seconds = seconds, .samples = moments, .fit = if (moments > 0) @as(f64, @floatFromInt(fit)) / @as(f64, @floatFromInt(moments)) else null });
     }
     l.groups = groups.items;
 }

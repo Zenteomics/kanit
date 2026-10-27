@@ -15,19 +15,19 @@ Sizes take `K`, `M`, `G` or `T` (powers of 1024); a plain number is MiB. With is
 A rule whose request alone exceeds the budget can never start, so the launch refuses to begin:
 
 ```text
-workz: rule assemble requests 32 threads; the run allows 8
+workz: rule assemble requests 32 threads; the run allows 8: raise --max-threads, or lower the rule's threads
 ```
 
 ## When a rule starts
 
 A rule is ready when every rule that produces one of its inputs has completed. A ready rule starts when all of these fit, checked in this order:
 
-1. One more job fits under `--jobs`.
-2. Its threads fit in the threads not reserved by running rules.
-3. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+1. Its threads fit in the threads not reserved by running rules.
+2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+3. One more job fits under `--jobs`.
 4. For each resource group it uses, its units fit in the group's free capacity.
 
-The first check that fails is the reason it waits: `jobs`, `threads`, `memory` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared inputs`. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
+The first check that fails is the reason it waits: `threads`, `memory`, `jobs` or `group:NAME`. A rule whose shared inputs are still loading waits with `loading shared inputs`. Once the budget has room, the time until the engine starts the rule counts as `starting`: the engine was recording the attempts that ended and starting the rules before it, which shows when rules take only milliseconds. Each change of reason is recorded as a `task_waiting` event, and each attempt's record keeps the seconds it waited for every reason, which `workz report` and the live view show.
 
 Every ready rule that fits starts at once, so a large rule waiting for room never holds back a small rule behind it, and the machine stays busy. The other side of that choice: nothing is reserved for a waiting rule, so a large rule can keep waiting while smaller ones take the room as it frees. Its waiting time shows in the reports, and a smaller request or a resource group around the small rules lets it in sooner.
 
@@ -113,7 +113,7 @@ waiting for resources (ready rules that waited, on average over the launch, and 
   loading shared inputs              <0.1 rules      0.2 s
 
 resource groups (while their rules waited)
-  disk                              58.2 s waited; in 100% of the samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier
+  disk                              58.2 s waited; 1 run sample while they waited, too few to judge
 ```
 
-Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. And in every sample taken while a rule waited for the `disk` group, that rule would have fitted the free threads and memory, so a larger `max` for `disk` would help too, if the disk can take it. When that share is under 25%, the report says instead that the budget was full and a higher `max` would not help much.
+Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. The waits for the `disk` group held only one run sample, taken every 5 s, so the report does not judge them. From three samples on, it gives the share in which a waiting rule would have fitted the free threads and memory: from 25%, a larger `max` for the group would help, if the disk can take it; below that, the budget was full and a higher `max` would not help much.

@@ -13,7 +13,13 @@ Three changes need action:
 - **Expect every rule to run once.** Recorded file identities no longer include the device number, and a rule that uses a shared file input now counts that file as an input.
 - **Pass `--json` for the JSON summary on a terminal.** On a terminal, `run` and `status` print a short readable summary; standard output that goes to a file or a pipe still gets JSON.
 - **Update scripts that read reports, events or exit statuses.**
-  - `report --suggest` names its first column and JSON field `step` instead of `kind`, counts `runs` instead of `attempts`, and replaces `peak_mib` and `delegated` with `used_mib` (the memory it sizes), `used_basis` (`process` or `cgroup`), `peak_mib` (the cgroup peak) and `note` (`measured`, `delegated` or `out_of_memory`). A delegated step keeps its current request instead of a suggestion from memory it did not use.
+  - `report --suggest` names its first column and JSON field `step` instead of `kind`, counts `runs` instead of `attempts`, and replaces `peak_mib` and `delegated` with `used_mib` (the memory it sizes), `used_basis` (`process` or `cgroup`), `peak_mib` (the cgroup peak) and `note` (`measured`, `idle` or `out_of_memory`). An idle step keeps its current request instead of a suggestion from memory it did not use.
+  - An attempt's `record.json` drops `cgroup.anon` and `cgroup.file_mapped`, which read 0 once its processes had exited, and adds `cgroup.anon_peak`, the largest anonymous memory sampled while it ran.
+  - `report` renames its TSV column and JSON field `delegated` to `idle`: an attempt that used almost none of its request waited, or handed its work outside its cgroup.
+  - `report --suggest` adds a last column and JSON field, `at_thread_limit`.
+  - `summary.json`, and `status` off a terminal, add `failures`, each failed, blocked or cancelled rule with its reason and standard error file, and `changed_outputs` for a launch refused over changed outputs. Their counts add `running`, `waiting` and `pending`, 0 once the launch ended, and a running launch's status has every key of the summary.
+  - `report` writes the ratios `cpu_efficiency` and `peak_per_request` with four decimals instead of two, so a small value no longer reads as 0.00.
+  - A launch in which rules were stopped with `workz control stop` and none failed has status `stopped`, not `completed` or `failed`; a cancelled attempt's reason says why: `stopped on request`, `cancelled: the launch was interrupted`, or `cancelled: the launch stopped after a failure`.
   - `report --format json` uses the TSV's field names (`memory_mib`, `max_rss_mib`, `oom_kills` and so on) and adds `started_ns` and `directory`.
   - `--compare` and `--bottlenecks` group by step, and a step's figures come from the latest run of every rule, this launch's or the one it reused.
   - Commands that find nothing recorded to show or act on exit with status 1, as `status` and `watch` did: `report`, `logs` and `control` without a launch or attempt, `control` on an ended launch, and `verify` or `clean` while a launch holds the lock. Option errors still exit with 2.
@@ -33,18 +39,23 @@ Three changes need action:
   - The engine draws the page again every 5 s while the launch runs, and the page reloads itself, so a browser follows the pipeline rule by rule.
   - On a large launch the page waits longer between updates, so that drawing it takes at most a twentieth of the engine's time.
   - The page is drawn once more when the launch ends and then stops reloading; the summary names it.
+- **`report --suggest` on a terminal** prints a table with units and notes, such as a step that kept its threads busy or a suggestion from one run; to a file or a pipe it prints the TSV.
 - **`report -o FILE`** writes the report to a file; `--format html` refuses to print the page onto a terminal and says to use it.
 - **Fewer words to type.**
+  - `report --json` prints JSON, as `run --json` and `status --json` do; it is the same as `--format json`.
   - A command given no WORKFLOW reads `workflow.toml` in the current directory, the file `workz init` writes.
   - `watch` and `status` take `--launch ID` for an earlier launch, and `--no-color`.
   - `--grace` takes a duration such as `30s` or `1m`, as `--timeout` does.
   - Bash completion offers launch IDs after `--launch` and `--compare`.
 - **Run output on a terminal.**
+  - The first line gives the launch's budget, and says when it is the default, every CPU and three quarters of the memory, which a shared machine should not give one launch.
   - `run` keeps a status line under its progress lines: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the rules running.
   - A failure line shows the last lines of the attempt's standard error, and each rule blocked by a failure gets a line.
   - The launch ends with a summary: the outcome, each failure with its last error line, the slowest rules of a launch that completed, and the commands to look further. `status` prints the same summary.
   - `run --json` prints the JSON summary on a terminal, and `--no-color` turns colors off, as `NO_COLOR=1` does for every command.
 - **Help.**
+  - Long rule names are cut in the middle, `align_sam...ule_name`, in the plain view and the text reports as in the live view, never silently at their end; the live view ends a cut output or reason with `...` and shows its column header only as whole words.
+  - Every help text fits in 80 columns.
   - `workz help COMMAND`, `workz COMMAND --help` and `-h` show a command's usage, its options with their defaults, and examples; `workz help` lists the commands by job.
   - A mistyped command or option names the one probably meant: `unknown option '--max-thread' for run; did you mean '--max-threads'?`.
   - `?` in the live view lists every key.
@@ -58,6 +69,10 @@ Three changes need action:
   - Tables list the failures and every attempt.
   - The pipeline, CPU, samples and steps figures cover the latest run of every rule, so a launch that reused rules still shows the whole pipeline; the rest cover the launch itself.
   - A page written while the launch runs reloads itself every 5 s.
+  - The timeline names its rows up to 250 attempts, and marks the critical path with a heavier edge; FIG. 6's legend shows a running bar in its category's color, the CPU and memory axes label their zero with its unit, and the samples matrix aligns its CPU time header with its figures.
+  - The page prints its colors, on A4 in landscape. On a narrow screen the title block leaves no cell alone on its row, and a figure wider than the screen shades the edge it scrolls past.
+  - Text and marks meet contrast levels in both themes: muted labels 5.2:1 on the light sheet, text on the matrix shades and on failed cells at least 5:1, cancelled and not-ready marks and the dark frames at least 3:1, and the dark sheet stands apart from its paper.
+  - Rule states are drawn in ink, by form: done solid, reused hatched, running outlined and pulsing, waiting dashed, a stopping rule grey. No state takes a category's hue, so a category drawn in blue is never read as running; a slow run is an ink ring and its `!`, and bars of memory and the run dots are a neutral ink.
   - The page follows the reader's color scheme, and a theme tag at its corner picks auto, light or dark without a script. It prints in light and loads nothing from elsewhere.
 - **The live view** shows the launch in gauges.
   - A progress bar is split by state, and the threads and memory reserved against the budget sit beside the cores and memory in use.
@@ -66,10 +81,10 @@ Three changes need action:
   - Long rule names are shortened in the middle, narrow terminals drop the least needed columns first, and colors follow `NO_COLOR` and `TERM=dumb`.
   - `X` cancels the launch only when pressed twice within 3 s, and the selection stays on the top row as rules finish, until a key moves it.
   - The key hints put `?` second, so a narrow terminal still shows it, and the table's hints name `S`, `R` and `X`.
-- **What limited a launch** is answered from lower bounds on its elapsed time: the longest chain of work, and the work each limit of the budget carried, threads, memory, jobs and every resource group.
-  - `report --bottlenecks` and the HTML page name the largest bound and how far the launch ran over it, such as `the thread budget limited this launch: it took 1m 32s, 5% more than its work needs at that limit`.
+- **What limited a launch** is answered from lower bounds on the elapsed time of the attempts it made: the longest chain of work, the work each limit of the budget carried (threads, memory, jobs and every resource group), the CPU time its rules used, and the engine's own CPU time. A launch shorter than 2 s is not judged.
+  - `report --bottlenecks` and the HTML page name the largest bound and how far the launch ran over it, such as `the thread budget limited this launch: it took 1m 32s, 5% more than its rules' thread requests need at that limit; they kept 66% of the threads they reserved busy`.
   - The critical path is the longest chain of work, the chain the scheduler ranks rules by, instead of the chain that ended last, which in a launch held back by its budget followed whichever rule started last.
-  - Each rule on the critical path shows the time it waited for resources once ready and the time it was held for producers off the path, so its work, waits and holds add up to the elapsed time.
+  - Each rule on the critical path shows the time it waited once ready, the time it was held for producers off the path and the time between its attempts; with the time from the end of the path to the end of the launch, these add up to the elapsed time.
   - Waiting for resources is shown as the ready rules that waited on average, beside the rule-seconds.
 - **Plain views and summaries** write durations and sizes as the reports do, such as `1m 27s` and `203 MiB`.
   - The plain view of a launch that has ended drops its empty running table.
@@ -90,46 +105,78 @@ Three changes need action:
   - `explain` describes a change to a list such as `PATH` entry by entry in both directions.
   - `plan --summary` counts the rules that a cutoff producer may leave reused on a line of their own.
   - `verify` says how many selected rules have no record, instead of ending with "all match" after listing them.
+- **A rule that cannot be set up fails alone.** A rule whose `log` or `benchmark` file cannot be written, whose earlier output cannot be moved into `previous/`, or whose attempt cannot be prepared (a full disk, a cgroup limit that cannot be set) fails with that reason and keeps its record, and `--keep-going` runs the rest; the launch used to end with the bare error.
+- **Isolation.** A run started directly by `systemd-run --scope` gets a scope of its own, instead of failing because its scope's name was taken.
+- **Replacing the workz binary during a launch**, as a rebuild does, no longer keeps the launch from starting a shared input's holder or the guard of `--no-isolation` tasks: they start from the running file.
+- **Replacing the workz binary during a launch**, as a rebuild does, no longer keeps the launch from starting a shared input's holder or the guard of `--no-isolation` tasks: they start from the running file.
 - **Shared inputs.** A directory of many files no longer risks failing to start its holder, and a holder that cannot start fails its rules with the reason instead of ending the launch.
 - **Stopping and control.**
   - An attempt being stopped can no longer time out and push its kill back.
+  - A shared input's holder ends with a killed engine under `--no-isolation`, as tasks do, instead of holding its pages until killed by hand; a second interrupt kills holders as well as tasks.
   - Every complete `workz control` line is applied, however many arrive at once; a line too long to be a command is skipped with a notice.
   - The engine says when `workz control` cannot reach a launch, or when the guard of `--no-isolation` tasks cannot start.
 - **Containers.**
   - `plan` and `clean` give Podman the environment `run` gives it.
+  - Removing the container of a failed attempt no longer holds up the engine: `podman rm` runs beside it, and the launch waits for it only at its end.
   - A mount below another mount is left out even when a sibling directory sorts between them.
 - **Start order.** A rule that never completed is estimated by the median wall time of its step, as the reports compute it.
 - **Labels.** A rule named with a trailing `__` keeps its whole name as its step.
 - **Reports agree.** The text reports and the HTML page compute each figure once, from the same records.
   - A step whose attempt was killed for exceeding its memory is suggested half again the request it exceeded, not the memory it reached before the kill.
   - Memory sizing names its basis, process memory or cgroup peak, and the HTML steps table shows page cache apart, so a suggestion no longer sits below the peak printed beside it.
+  - `--bottlenecks` says what limited the launch on its second line, under the launch line, before the bounds it rests on.
   - `--bottlenecks` shows each step's median wall time, as `--compare` and the HTML page do, instead of a total under the same name.
   - The HTML page marks a failure that a later attempt recovered from, and counts blocked rules apart from failed attempts.
+  - The HTML page of a launch that did not complete says why under its status: the reason it was refused or stopped, or its first failure. A launch that ran no attempt no longer reads `Every attempt of this launch completed`.
+  - `report` on a launch without attempts says on standard error why, and for the newest launch which launch last ran some.
   - A launch without a summary takes its elapsed time from its events, and reused rules whose records were cleaned up are counted.
   - CPU shares are left out when all the CPU time adds up to less than a second.
+  - A resource group's advice counts each run sample once, however many rules waited at it, says how many samples it rests on, and calls fewer than three too few to judge.
+  - A step's CPU use is its CPU time over the thread-seconds its runs reserved, so a long run weighs more than a short one; runs adding up to less than a second show no CPU use or character.
+  - A step busy on fewer cores than it reserved is `runs fewer threads`, and one that used little CPU is `mostly idle` only where stall shares show it was not working; without them it reads `-`.
+  - A step whose runs kept nine tenths or more of their threads busy is noted as possibly needing more: its request capped what it could use. The HTML page says when a suggestion rests on fewer than three runs.
+  - A ready rule's wait for threads, memory, jobs or a group ends when the budget last got some of it back; the time until the engine starts the rule counts as `starting`. A launch of rules that take milliseconds no longer shows the engine's own work as a wait for threads.
+  - A rule that waits while its threads and the job count are both full waits for `threads`, not `jobs`, as with one-thread rules under the default `--jobs`.
   - A reused rule whose run took more than four attempts, after `workz control retry`, is found with that run.
   - Reports and the launch page read a launch's records without a stat of every file below them, a fifth faster on 2000 rules.
+- **Damaged records.**
+  - A record or event with a value that cannot be true, such as a number too large for its field, a number that is not finite or a negative count, reads as missing instead of stopping `report`, `watch` or the launch page.
+  - An event that is not about a task no longer adds a rule to the views.
+  - The reports say why a launch's workflow snapshot cannot be read, with its line, instead of only that it cannot.
+  - A duration just under a minute prints as `1m 00s`, not `60.0 s`.
+  - A duration under a tenth of a second prints in milliseconds, `42 ms`, instead of `0.0 s`.
 - **Comparisons.**
+  - `--compare` prints both launches' budgets and notes when the budgets, the workflow file or the engine differ, gives no change where a value is under 0.1 s or 8 MiB, and notes a step whose median wall time moved less than its runs differ among themselves.
   - `report --compare` computes each change from the values it prints, so two values that print alike show 0%, not a rounding change such as 16% between two 2 MiB peaks.
   - A step with no completed run on one side shows `-` and says on which side, instead of a change of -100%; a step reused in the launch compares the run it reused.
   - Each metric has its own BASELINE, LAUNCH and CHANGE columns.
 - **Messages.**
   - A cycle error lists the rules on the cycle in order, `sort -> align -> sort`, instead of one rule that may only depend on it.
   - A rule that fails because its shared input could not be loaded prints a failure line with the reason.
+  - A failed command's recorded reason quotes the last line of its standard error, `exited with status 3: align: reference index is truncated`, in its record, the summary, `status` and the reports.
   - A blocked rule's recorded reason reads as its line on the terminal does: `it needs a rule that did not complete`.
   - An option without its value says `--max-threads needs a value`, and a value that does not parse names what is expected, such as `use a size such as 512M or 60G`.
   - A run whose scope cannot create cgroups for its attempts names the controllers to delegate, and other cgroup errors name the error.
   - The refusal for an output changed outside workz gives its advice once.
+  - A launch refused because recorded outputs changed names the `--rerun-rule` options for the rules that wrote them, and `status` prints that command as its next step.
+  - A refusal for a request larger than the budget says which option to raise; one for a missing input names the directory input paths are relative to.
+  - A command with no launch to show, and `control` on a launch that has ended, say that `workz run` starts one.
+  - `plan` and `explain` show `input missing: PATH` for a rule whose input no selected rule makes and does not exist, as documented, instead of `no completed record`; `init` says that its starter reads `data/reads.txt`, which it does not create.
   - A group count below 1 names the count, an output listed twice in one rule says so, and a rule that writes into the path of the service it joins says so.
   - `workz graph` escapes quotes in the workflow name.
 - **`workz init`** rejects options instead of writing a file named after them, and its starter workflow describes a resource group as units that rules take.
-- **`workz completion bash`** completes every option of every command, the `control` commands, and rule names after `control stop` and `control retry`, also after `-d DIR`.
+- **`workz completion bash`** completes every option of every command, the `control` commands, and rule names after `control stop` and `control retry`, also after `-d DIR`; file and directory names complete as bash completes them, a directory with its slash, and the hidden `dry-run` alias of `plan` is no longer offered.
 - **Command line.**
   - `control stop` and `control retry` refuse a rule that the launch does not run.
   - `logs` says when the launch or attempt it was given does not exist, instead of blaming the rule, and refuses `--stdout` with `--stderr`.
   - `status --history 3x` is refused instead of showing 10 launches, and `--history` with `--json` or `--launch` is refused.
+  - `status --history` names its last column `CANCELLED`, the rules a launch stopped or never started, and shows `running` for the newest launch while a run holds the working directory's lock and `unfinished` for a launch whose engine ended without recording its end, where both showed `running?`.
+  - `run`'s status line counts blocked rules apart from failed ones, and it and the event lines give times as the reports do, `1m 05s` or `4 ms`.
+  - A step killed for its memory notes that its suggestion is at least half again the request it exceeded.
   - `status` no longer accepts `watch`'s `--once` and `--interval`, and `watch --interval` under 100 is refused instead of raised.
   - An option is never taken as the value of the one before it: `report --launch --format html` says `--launch needs a value`.
+  - A WORKFLOW that does not exist is refused with status 2 instead of standing for its directory, so `status --history x` says so instead of showing launches.
+  - An unknown `--target` names the rule probably meant.
 
 ## [0.3.0] - 2026-10-25
 

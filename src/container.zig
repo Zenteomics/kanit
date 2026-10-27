@@ -76,11 +76,16 @@ pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []c
     return ids.items;
 }
 
-/// Removes one container, whatever its state; used after an attempt that
-/// did not end by itself.
-pub fn remove(gpa: Allocator, a: Allocator, podman: []const u8, name: []const u8, envp: *const process.Vec, devnull: sys.Fd) void {
-    var status: u32 = 0;
-    _ = process.capture(gpa, a, &.{ podman, "rm", "--force", "--ignore", "--time", "0", name }, envp, devnull, &status) catch {};
+/// Starts removing one container, whatever its state; used after an attempt
+/// that did not end by itself. The engine does not wait for `podman rm`, so
+/// a slow or stuck Podman cannot hold up signals, timeouts or other
+/// attempts; the engine reaps it as it reaps every child, and `workz clean`
+/// removes a container it left.
+pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *const process.Vec, devnull: sys.Fd) ?linux.pid_t {
+    const argv = process.Vec.init(a, &.{ podman, "rm", "--force", "--ignore", "--time", "0", name }) catch return null;
+    const path = a.dupeZ(u8, podman) catch return null;
+    const spec: process.Spec = .{ .path = path.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = devnull, .stdout = devnull, .stderr = devnull };
+    return process.spawn(&spec) catch null;
 }
 
 /// Directory bind mounts for a container rule: the working directory and the
@@ -241,9 +246,9 @@ pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std
 /// Starts `podman stop --time <grace>` without waiting: the container gets
 /// SIGTERM, and SIGKILL for all its processes after the grace period. The
 /// engine's reaper collects the process.
-pub fn stopAsync(a: Allocator, podman: []const u8, name: []const u8, grace_s: u64, envp: *const process.Vec, devnull: sys.Fd) void {
-    const argv = process.Vec.init(a, &.{ podman, "stop", "--ignore", "--time", std.fmt.allocPrint(a, "{d}", .{grace_s}) catch return, name }) catch return;
-    const path = a.dupeZ(u8, podman) catch return;
+pub fn stopAsync(a: Allocator, podman: []const u8, name: []const u8, grace_s: u64, envp: *const process.Vec, devnull: sys.Fd) ?linux.pid_t {
+    const argv = process.Vec.init(a, &.{ podman, "stop", "--ignore", "--time", std.fmt.allocPrint(a, "{d}", .{grace_s}) catch return null, name }) catch return null;
+    const path = a.dupeZ(u8, podman) catch return null;
     const spec: process.Spec = .{ .path = path.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = devnull, .stdout = devnull, .stderr = devnull };
-    _ = process.spawn(&spec) catch {};
+    return process.spawn(&spec) catch null;
 }

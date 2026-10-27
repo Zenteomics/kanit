@@ -7,10 +7,6 @@ const units = @import("units.zig");
 const Allocator = std.mem.Allocator;
 const Attempt = model.Attempt;
 
-fn cut(name: []const u8, n: usize) []const u8 {
-    return name[0..@min(name.len, n)];
-}
-
 // ---- one row per attempt ----
 
 /// One attempt as TSV and JSON show it. The JSON form keeps unrounded
@@ -34,7 +30,7 @@ const Row = struct {
     cpu_stall: ?f64,
     memory_stall: ?f64,
     io_stall: ?f64,
-    delegated: bool,
+    idle: bool,
     reason: ?[]const u8,
     step: []const u8,
     sample: ?[]const u8,
@@ -63,7 +59,7 @@ const Row = struct {
             .cpu_stall = r.cpu_stall,
             .memory_stall = r.memory_stall,
             .io_stall = r.io_stall,
-            .delegated = r.delegated(),
+            .idle = r.idle(),
             .reason = if (r.reason.len > 0) r.reason else null,
             .step = r.step,
             .sample = r.sample,
@@ -84,13 +80,13 @@ fn opt(w: *std.Io.Writer, v: anytype, comptime fmt: []const u8) !void {
 /// One row per attempt, tab-separated, with a header; NA for no number and
 /// `-` for no text.
 pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
-    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tdelegated\treason\tstep\tsample\tcategory\ttool\n");
+    try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tidle\treason\tstep\tsample\tcategory\ttool\n");
     for (rows) |a| {
         const r = Row.of(a);
-        try w.print("{s}\t{d}\t{s}\t{d:.3}\t{d:.3}\t{d:.2}\t{d:.0}\t{d:.0}\t", .{ r.rule, r.attempt, r.status, r.wall_s, r.cpu_s, r.cpu_efficiency, r.threads, r.memory_mib });
+        try w.print("{s}\t{d}\t{s}\t{d:.3}\t{d:.3}\t{d:.4}\t{d:.0}\t{d:.0}\t", .{ r.rule, r.attempt, r.status, r.wall_s, r.cpu_s, r.cpu_efficiency, r.threads, r.memory_mib });
         try opt(w, r.peak_mib, "{d:.1}");
         try w.print("\t{d:.1}\t", .{r.max_rss_mib});
-        try opt(w, r.peak_per_request, "{d:.2}");
+        try opt(w, r.peak_per_request, "{d:.4}");
         try w.print("\t{d:.0}\t{d:.0}\t{d:.3}\t", .{ r.oom_kills, r.limit_events, r.waited_s });
         try opt(w, r.wait_reason, "{s}");
         try w.writeAll("\t");
@@ -99,7 +95,7 @@ pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
         try opt(w, r.memory_stall, "{d:.3}");
         try w.writeAll("\t");
         try opt(w, r.io_stall, "{d:.3}");
-        try w.print("\t{}\t", .{r.delegated});
+        try w.print("\t{}\t", .{r.idle});
         try opt(w, r.reason, "{s}");
         try w.print("\t{s}\t", .{r.step});
         try opt(w, r.sample, "{s}");
@@ -121,7 +117,11 @@ pub fn writeJson(a: Allocator, w: *std.Io.Writer, rows: []const Attempt) !void {
 // ---- request suggestions ----
 
 /// The suggested request of every step that has one, as TSV or JSON.
-pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, json: bool) !void {
+/// How `writeSuggestions` prints: a TSV for scripts, JSON, or an aligned
+/// table with units for a terminal.
+pub const SuggestionFormat = enum { tsv, json, table };
+
+pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: SuggestionFormat) !void {
     const Suggestion = struct {
         step: []const u8,
         runs: usize,
@@ -134,6 +134,7 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, json: bool) !
         peak_mib: f64,
         suggest_mib: f64,
         note: []const u8,
+        at_thread_limit: bool,
     };
     var list: std.ArrayList(Suggestion) = .empty;
     defer list.deinit(l.gpa);
@@ -151,24 +152,50 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, json: bool) !
             .peak_mib = s.peak_mib,
             .suggest_mib = s.sizing.memory_mib,
             .note = @tagName(s.sizing.note),
+            .at_thread_limit = s.sizing.at_thread_limit,
         });
     }
-    if (json) return w.print("{f}\n", .{std.json.fmt(list.items, .{})});
-    try w.writeAll("step\truns\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tused_mib\tused_basis\tpeak_mib\tsuggest_mib\tnote\n");
-    for (list.items) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{s}\t{d:.0}\t{d:.0}\t{s}\n", .{ s.step, s.runs, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.used_mib, s.used_basis, s.peak_mib, s.suggest_mib, s.note });
+    if (format == .json) return w.print("{f}\n", .{std.json.fmt(list.items, .{})});
+    if (format == .table) {
+        try w.writeAll("  STEP                            RUNS  THREADS  SUGGEST     MEMORY       USED    SUGGEST  NOTE\n");
+        for (list.items) |s| {
+            try w.print("  {f} {d:>5} {d:>8.0} {d:>8.0} ", .{ units.field(s.step, 30), s.runs, s.threads, s.suggest_threads });
+            try units.right(w, 10, units.size, .{s.memory_mib});
+            try w.writeAll(" ");
+            try units.right(w, 10, units.size, .{s.used_mib});
+            try w.writeAll(" ");
+            try units.right(w, 10, units.size, .{s.suggest_mib});
+            try w.print("  {s}", .{s.note});
+            if (s.at_thread_limit) try w.writeAll("; kept its threads busy, may use more");
+            if (s.runs < 3) try w.print("; from {d} {s}", .{ s.runs, if (s.runs == 1) "run" else "runs" });
+            try w.writeAll("\n");
+        }
+        return;
+    }
+    try w.writeAll("step\truns\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tused_mib\tused_basis\tpeak_mib\tsuggest_mib\tnote\tat_thread_limit\n");
+    for (list.items) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{s}\t{d:.0}\t{d:.0}\t{s}\t{}\n", .{ s.step, s.runs, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.used_mib, s.used_basis, s.peak_mib, s.suggest_mib, s.note, s.at_thread_limit });
 }
 
 // ---- comparing two launches ----
 
 /// The change from `was` to `now` as printed with `decimals` places, so two
-/// values that print alike show no change; `-` where either prints as zero.
-fn change(w: *std.Io.Writer, was: f64, now: f64, decimals: u8) !void {
+/// values that print alike show no change; `-` where either is below
+/// `floor`, too small for a share to mean anything.
+fn change(w: *std.Io.Writer, was: f64, now: f64, decimals: u8, floor: f64) !void {
     const scale = std.math.pow(f64, 10, @floatFromInt(decimals));
     const x = @round(was * scale) / scale;
     const y = @round(now * scale) / scale;
-    if (x <= 0 or y <= 0) return w.writeAll("       -");
+    if (x <= 0 or y <= 0 or x < floor or y < floor) return w.writeAll("       -");
     const pct = (y - x) / x * 100;
     try w.print(" {d:>6.0}%", .{if (@abs(pct) < 0.5) 0 else pct});
+}
+
+/// Half the range of a step's wall times over their median: how much its
+/// runs differ among themselves; null with fewer than three runs.
+fn spread(s: model.Step) ?f64 {
+    const xs = s.walls.items;
+    if (xs.len < 3 or s.median_s <= 0) return null;
+    return (xs[xs.len - 1] - xs[0]) / 2 / s.median_s;
 }
 
 /// Thread-seconds that a launch's attempts reserved: wall time times threads.
@@ -178,21 +205,40 @@ fn reserved(rows: []const Attempt) f64 {
     return total;
 }
 
-/// Compares launch `now_dir` with the baseline `was_dir`: the launches'
-/// elapsed time, attempts and reserved thread-seconds, then each step's
-/// latest runs, this launch's or reused: median wall time, largest peak
-/// and total CPU time.
+fn budget(w: *std.Io.Writer, l: *const model.Launch) !void {
+    try w.print("{d:.0} threads, ", .{l.max_threads});
+    try units.size(w, l.max_memory_mib);
+    try w.print(", {d:.0} jobs", .{l.max_jobs});
+}
+
+/// Compares launch `now_dir` with the baseline `was_dir`: their budgets,
+/// engines and workflows, the launches' elapsed time, attempts and reserved
+/// thread-seconds, then each step's latest runs, this launch's or reused:
+/// median wall time, largest peak and total CPU time. One run of each is
+/// all there is, so a change inside the runs' own spread is marked.
 pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8) !void {
     var was = try model.load(gpa, a, was_dir);
     defer was.deinit();
     var now = try model.load(gpa, a, now_dir);
     defer now.deinit();
-    try w.print("baseline {s}\nlaunch   {s}\n\n", .{ was_dir, now_dir });
-    try w.writeAll("                            BASELINE     LAUNCH   CHANGE\n");
+    try w.print("baseline {s}\nlaunch   {s}\n", .{ was_dir, now_dir });
+    try w.writeAll("budget   ");
+    try budget(w, &was);
+    try w.writeAll(" against ");
+    try budget(w, &now);
+    try w.writeAll("\n");
+    const budgets_differ = was.max_threads != now.max_threads or was.max_memory_mib != now.max_memory_mib or was.max_jobs != now.max_jobs;
+    if (budgets_differ) try w.writeAll("note: the budgets differ, so the elapsed time compares the budgets as well as the work\n");
+    if (was.workflow_sha256.len > 0 and now.workflow_sha256.len > 0 and !std.mem.eql(u8, was.workflow_sha256, now.workflow_sha256))
+        try w.writeAll("note: the workflow file differs\n");
+    if (was.engine_id.len > 0 and now.engine_id.len > 0 and !std.mem.eql(u8, was.engine_id, now.engine_id))
+        try w.print("note: the engine differs: {s} against {s}\n", .{ was.engine_id, now.engine_id });
+    try w.writeAll("\n                            BASELINE     LAUNCH   CHANGE\n");
     try w.print("  elapsed s               {d:>10.1} {d:>10.1}", .{ was.elapsed_s, now.elapsed_s });
-    try change(w, was.elapsed_s, now.elapsed_s, 1);
+    try change(w, was.elapsed_s, now.elapsed_s, 1, 0.1);
+    if (budgets_differ) try w.writeAll("  budgets differ");
     try w.print("\n  attempts                {d:>10} {d:>10}\n  thread-seconds reserved {d:>10.0} {d:>10.0}", .{ was.rows.len, now.rows.len, reserved(was.rows), reserved(now.rows) });
-    try change(w, reserved(was.rows), reserved(now.rows), 0);
+    try change(w, reserved(was.rows), reserved(now.rows), 0, 1);
     try w.writeAll("\n\nper step (latest run of every rule)\n");
     try w.writeAll("                                       WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL\n");
     try w.writeAll("  STEP                           RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE\n");
@@ -206,7 +252,7 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
         const y = for (now.steps) |s| {
             if (std.mem.eql(u8, s.name, name)) break s;
         } else model.Step{ .name = name };
-        try w.print("  {s:<30} {d:>4}", .{ cut(name, 30), y.runs });
+        try w.print("  {f} {d:>4}", .{ units.field(name, 30), y.runs });
         if (x.runs == 0 or y.runs == 0) {
             const ran = if (x.runs == 0) y else x;
             if (x.runs == 0) {
@@ -215,15 +261,19 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
             try w.print("  no completed run in the {s}\n", .{if (x.runs == 0) "baseline" else "launch"});
             continue;
         }
-        // Use measured outside workz's cgroups does not compare.
-        const outside = x.mostlyDelegated() or y.mostlyDelegated();
+        // Counters of idle runs size nothing, so they do not compare.
+        const outside = x.mostlyIdle() or y.mostlyIdle();
         try w.print("  {d:>8.2} {d:>7.2}", .{ x.median_s, y.median_s });
-        try change(w, x.median_s, y.median_s, 2);
+        try change(w, x.median_s, y.median_s, 2, 0.1);
         try w.print("  {d:>8.0} {d:>7.0}", .{ x.peak_mib, y.peak_mib });
-        if (outside) try w.writeAll("       -") else try change(w, x.peak_mib, y.peak_mib, 0);
+        if (outside) try w.writeAll("       -") else try change(w, x.peak_mib, y.peak_mib, 0, 8);
         try w.print("  {d:>8.1} {d:>7.1}", .{ x.cpu_s, y.cpu_s });
-        if (outside) try w.writeAll("       -") else try change(w, x.cpu_s, y.cpu_s, 1);
-        if (outside) try w.print("  delegated in the {s}", .{if (x.mostlyDelegated()) "baseline" else "launch"});
+        if (outside) try w.writeAll("       -") else try change(w, x.cpu_s, y.cpu_s, 1, 0.1);
+        if (outside) try w.print("  idle in the {s}", .{if (x.mostlyIdle()) "baseline" else "launch"});
+        // A median that moved less than the runs differ among themselves
+        // has not shown a change.
+        const noise = @max(spread(x) orelse 0, spread(y) orelse 0);
+        if (noise > 0 and x.median_s >= 0.1 and @abs(y.median_s / x.median_s - 1) < noise) try w.writeAll("  wall time within its runs' spread");
         if (y.reused == y.runs) try w.writeAll("  reused in the launch") else if (y.reused > 0) try w.print("  {d} reused in the launch", .{y.reused});
         try w.writeAll("\n");
     }
@@ -241,14 +291,19 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     try w.print("launch {s}: ", .{l.id});
     try units.duration(w, l.elapsed_s);
     try w.print(" elapsed; {d} {s} in this launch, {d:.0} thread-seconds reserved\n", .{ l.rows.len, if (l.rows.len == 1) "attempt" else "attempts", reserved(l.rows) });
+    // The answer first: what limited the launch, from the bounds below.
+    if (l.binding != null) {
+        try writeVerdict(w, &l);
+        try w.writeAll("\n");
+    }
     if (l.rows.len == 0) {
         try w.writeAll("no rule started in this launch");
         if (l.@"error") |e| try w.print(": {s}", .{e});
         try w.writeAll("\n");
     }
-    var delegated: usize = 0;
-    for (l.rows) |r| delegated += @intFromBool(r.delegated());
-    if (delegated > 0) try w.print("note: {d} {s} used almost none of {s} requests while running; the commands most likely handed the work to another supervisor (delegated), so workz's counters do not describe it\n", .{ delegated, if (delegated == 1) "attempt" else "attempts", if (delegated == 1) "its" else "their" });
+    var idle: usize = 0;
+    for (l.rows) |r| idle += @intFromBool(r.idle());
+    if (idle > 0) try w.print("note: {d} {s} used almost none of {s} requests while running (idle): such an attempt waited, or handed its work to a process outside its cgroup, so its counters size nothing\n", .{ idle, if (idle == 1) "attempt" else "attempts", if (idle == 1) "its" else "their" });
 
     try writeLimits(w, &l);
     try writePath(w, &l);
@@ -264,6 +319,8 @@ pub fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
     switch (b.kind) {
         .chain => try w.writeAll("critical path"),
         .threads, .memory, .jobs => try w.writeAll(@tagName(b.kind)),
+        .cpu => try w.writeAll("CPU time"),
+        .engine => try w.writeAll("engine"),
         .group => try w.print("group {s}", .{b.name}),
     }
 }
@@ -278,6 +335,7 @@ pub fn boundUse(w: *std.Io.Writer, l: *const model.Launch, b: model.Bound) !void
             try w.writeAll(" in a chain of work");
         },
         .threads => try w.print("{d:.1} of {d:.0} threads reserved on average", .{ avg, b.limit }),
+        .cpu => try w.print("{d:.1} of {d:.0} cores busy on average", .{ avg, b.limit }),
         .jobs => try w.print("{d:.1} of {d:.0} jobs running on average", .{ avg, b.limit }),
         .group => try w.print("{d:.1} of {d:.0} units held on average", .{ avg, b.limit }),
         .memory => {
@@ -286,73 +344,111 @@ pub fn boundUse(w: *std.Io.Writer, l: *const model.Launch, b: model.Bound) !void
             try units.size(w, b.limit);
             try w.writeAll(" reserved on average");
         },
+        .engine => try w.writeAll("the engine's own CPU time: checks, scheduling and records"),
     }
+}
+
+/// The step whose rules reserved the most thread-seconds they did not use,
+/// and those seconds; null when none reserved more than one thread.
+fn idlestStep(l: *const model.Launch) ?struct { step: *const model.Step, unused: f64 } {
+    var best: ?*const model.Step = null;
+    var most: f64 = 0;
+    for (l.steps) |*s| {
+        if (s.runs == 0 or s.threads < 2) continue;
+        const unused = s.threads * s.wall_s - s.cpu_s;
+        if (unused > most) {
+            most = unused;
+            best = s;
+        }
+    }
+    return .{ .step = best orelse return null, .unused = most };
 }
 
 /// One sentence on what limited the launch, from the largest bound.
 pub fn writeVerdict(w: *std.Io.Writer, l: *const model.Launch) !void {
     const b = l.bounds[l.binding orelse return];
-    const over = if (b.seconds > 0) @max(l.elapsed_s / b.seconds - 1, 0) * 100 else 0;
+    const over = l.overBound() orelse {
+        try w.writeAll(if (l.finished) "too short to say what limited it: it took " else "too early to say what limits it: it has taken ");
+        try units.duration(w, l.elapsed_s);
+        return w.writeAll(", and starting and recording rules weigh too much in so short a time");
+    };
     switch (b.kind) {
         .chain => try w.writeAll("the critical path"),
         .threads => try w.writeAll("the thread budget"),
+        .cpu => try w.writeAll("the CPU work"),
         .memory => try w.writeAll("the memory budget"),
         .jobs => try w.writeAll("the jobs limit"),
         .group => try w.print("resource group {s}", .{b.name}),
+        .engine => try w.writeAll("the engine's own work"),
     }
     try w.writeAll(if (l.finished) " limited this launch: it took " else " limits this launch so far: it has taken ");
     try units.duration(w, l.elapsed_s);
     try w.print(", {d:.0}% more than ", .{over});
-    if (b.kind == .chain) {
-        try w.writeAll("the work on its critical path");
-        // Each delay names what would cut it: the path's own waits yield to
-        // a higher priority; a hold means producers off the path started
-        // late, which only more room in the budget changes.
-        const notable = struct {
-            fn f(s: f64, work: f64) bool {
-                return s >= 0.5 and s >= 0.05 * work;
+    switch (b.kind) {
+        .chain => {
+            try w.writeAll("the work on its critical path");
+            // Each delay names what would cut it: the path's own waits yield
+            // to a higher priority; a hold means producers off the path
+            // started late, which only more room in the budget changes.
+            const notable = struct {
+                fn f(s: f64, work: f64) bool {
+                    return s >= 0.5 and s >= 0.05 * work;
+                }
+            }.f;
+            if (notable(l.path_waited_s, l.path_ran_s)) {
+                try w.writeAll("; its rules waited ");
+                try units.duration(w, l.path_waited_s);
+                try w.writeAll(" once ready, which a higher priority for them would cut");
             }
-        }.f;
-        if (notable(l.path_waited_s, l.path_ran_s)) {
-            try w.writeAll("; its rules waited ");
-            try units.duration(w, l.path_waited_s);
-            try w.writeAll(" for resources once ready, which a higher priority for them would cut");
-        }
-        if (notable(l.path_held_s, l.path_ran_s)) {
-            try w.writeAll("; its rules were held ");
-            try units.duration(w, l.path_held_s);
-            try w.writeAll(" for producers off the path, which started late for want of resources");
-        }
-    } else {
-        try w.writeAll("its work needs at that limit");
+            if (notable(l.path_held_s, l.path_ran_s)) {
+                try w.writeAll("; its rules were held ");
+                try units.duration(w, l.path_held_s);
+                try w.writeAll(" for producers off the path, which started late for want of resources");
+            }
+        },
+        .threads => {
+            try w.writeAll("its rules' thread requests need at that limit");
+            // Requests, not use, fill the thread budget: say how much of
+            // what they reserved the rules kept busy, and where most went
+            // unused.
+            const cpu = for (l.bounds) |x| {
+                if (x.kind == .cpu) break x.work;
+            } else 0;
+            if (cpu > 0 and cpu < 0.8 * b.work) {
+                try w.print("; they kept {d:.0}% of the threads they reserved busy", .{cpu / b.work * 100});
+                if (idlestStep(l)) |x| if (x.unused >= 0.1 * b.work) {
+                    try w.print(", least of all step {s}, which used {d:.1} of its {d:.0} threads at most", .{ x.step.name, x.step.cores, x.step.threads });
+                };
+            }
+        },
+        .engine => try w.writeAll("the engine's own CPU time; its rules are so short that recording and starting them takes about as long as running them"),
+        .cpu, .memory, .jobs, .group => try w.writeAll("its work needs at that limit"),
     }
 }
 
 fn writeLimits(w: *std.Io.Writer, l: *const model.Launch) !void {
-    try w.writeAll("\nwhat limited the launch (it could not take less than any of these)\n");
+    try w.writeAll("\nwhat limited the launch (the attempts it made could not take less than any of these)\n");
     if (l.bounds.len == 0) return w.writeAll("  nothing: no attempt ran in this launch\n");
     for (l.bounds, 0..) |b, i| {
         var name_buf: [64]u8 = undefined;
         var nw: std.Io.Writer = .fixed(&name_buf);
         try boundName(&nw, b);
-        try w.print("  {s} {s:<28} ", .{ if (l.binding == i) ">" else " ", cut(nw.buffered(), 28) });
+        try w.print("  {s} {f} ", .{ if (l.binding == i) ">" else " ", units.field(nw.buffered(), 28) });
         try units.right(w, 9, units.duration, .{b.seconds});
         try w.writeAll("  ");
         try boundUse(w, l, b);
         try w.writeAll("\n");
     }
-    try w.writeAll("  ");
-    try writeVerdict(w, l);
-    try w.writeAll("\n");
 }
 
 fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll("\ncritical path (the longest chain of work in this launch, and when each rule waited once ready)\n");
-    if (l.path.len == 0) return w.writeAll("  none: no attempt ran, or the workflow snapshot cannot be read\n");
+    if (l.snapshot_problem) |why| return w.print("  none: the workflow snapshot cannot be read: {s}\n", .{why});
+    if (l.path.len == 0) return w.writeAll("  none: no attempt ran\n");
     for (l.path) |p| {
         try w.writeAll("  at ");
         try units.right(w, 8, units.duration, .{p.start_s});
-        try w.print("  {s:<40} ran ", .{cut(l.rules[p.rule].name, 40)});
+        try w.print("  {f} ran ", .{units.field(l.rules[p.rule].name, 40)});
         try units.right(w, 8, units.duration, .{p.ran_s});
         try w.writeAll(", waited ");
         try units.right(w, 8, units.duration, .{p.waited_s});
@@ -362,15 +458,32 @@ fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
             try w.writeAll(" for producers off the path");
         }
         if (p.earlier > 0) try w.print(", over {d} attempts", .{p.earlier + 1});
+        if (p.between_s >= 0.05) {
+            try w.writeAll(", ");
+            try units.duration(w, p.between_s);
+            try w.writeAll(" between them");
+        }
         try w.writeAll("\n");
     }
+    // Together these terms make up the elapsed time.
     try w.print("  {d} {s}: ", .{ l.path.len, if (l.path.len == 1) "rule" else "rules" });
     try units.duration(w, l.path_ran_s);
     try w.writeAll(" of work, ");
     try units.duration(w, l.path_waited_s);
-    try w.writeAll(" waiting for resources, ");
+    try w.writeAll(" waiting once ready, ");
     try units.duration(w, l.path_held_s);
-    try w.writeAll(" held for producers off the path\n");
+    try w.writeAll(" held for producers off the path");
+    if (l.path_between_s >= 0.05) {
+        try w.writeAll(", ");
+        try units.duration(w, l.path_between_s);
+        try w.writeAll(" between attempts");
+    }
+    if (l.path_after_s >= 0.05) {
+        try w.writeAll("; the launch ended ");
+        try units.duration(w, l.path_after_s);
+        try w.writeAll(" after the path did");
+    }
+    try w.writeAll("\n");
 }
 
 fn writeWaits(w: *std.Io.Writer, l: *const model.Launch) !void {
@@ -382,25 +495,28 @@ fn writeWaits(w: *std.Io.Writer, l: *const model.Launch) !void {
         for (l.waits.keys(), l.waits.values()) |k, s| if (s >= 0.05) {
             any = true;
             const avg = if (l.elapsed_s > 0) s / l.elapsed_s else 0;
-            if (avg < 0.05) try w.print("  {s:<32}   <0.1 rules  ", .{cut(k, 32)}) else try w.print("  {s:<32} {d:>6.1} rules  ", .{ cut(k, 32), avg });
+            if (avg < 0.05) try w.print("  {f}   <0.1 rules  ", .{units.field(k, 32)}) else try w.print("  {f} {d:>6.1} rules  ", .{ units.field(k, 32), avg });
             try units.right(w, 9, units.duration, .{s});
             try w.writeAll("\n");
         };
         if (!any) try w.writeAll("  none\n");
+        if (l.waits.get("starting")) |s| if (s >= 0.05) try w.writeAll("  starting: the budget had room; the engine was recording ended attempts and starting other rules\n");
     }
     if (l.groups.len == 0) return;
     try w.writeAll("\nresource groups (while their rules waited)\n");
     for (l.groups) |g| {
-        try w.print("  {s:<30} ", .{cut(g.name, 30)});
+        try w.print("  {f} ", .{units.field(g.name, 30)});
         try units.right(w, 9, units.duration, .{g.seconds});
         try w.writeAll(" waited; ");
         const fit = g.fit orelse {
             try w.writeAll("no run samples while they waited\n");
             continue;
         };
-        if (fit >= 0.25) {
-            try w.print("in {d:.0}% of the samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier\n", .{fit * 100});
-        } else try w.print("the budget was full in {d:.0}% of the samples: a higher max would not help much\n", .{(1 - fit) * 100});
+        if (g.samples < 3) {
+            try w.print("{d} run {s} while they waited, too few to judge\n", .{ g.samples, if (g.samples == 1) "sample" else "samples" });
+        } else if (fit >= 0.25) {
+            try w.print("in {d:.0}% of {d} samples a waiting rule fitted the free threads and memory: a higher max would have started it earlier\n", .{ fit * 100, g.samples });
+        } else try w.print("the budget was full in {d:.0}% of {d} samples: a higher max would not help much\n", .{ (1 - fit) * 100, g.samples });
     }
 }
 
@@ -412,7 +528,7 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll(")\n");
     try w.writeAll("  STEP                            RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER\n");
     for (l.steps) |s| {
-        try w.print("  {s:<30} {d:>5} ", .{ cut(s.name, 30), s.runs });
+        try w.print("  {f} {d:>5} ", .{ units.field(s.name, 30), s.runs });
         if (s.runs == 0) {
             try w.print("{s:>10} {s:>8} {d:>8.0} ", .{ "-", "-", s.threads });
             try units.right(w, 10, units.size, .{s.request_mib});
@@ -420,22 +536,22 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
         } else {
             try units.right(w, 10, units.duration, .{s.median_s});
             // Counters of very short runs can add up past the threads.
-            try w.print(" {d:>7.0}% {d:>8.0} ", .{ @min(s.efficiency() * 100, 100), s.threads });
+            if (s.judged()) try w.print(" {d:>7.0}% {d:>8.0} ", .{ @min(s.efficiency() * 100, 100), s.threads }) else try w.print(" {s:>8} {d:>8.0} ", .{ "-", s.threads });
             try units.right(w, 10, units.size, .{s.request_mib});
             try w.writeAll(" ");
-            if (s.mostlyDelegated()) try w.print("{s:>10} {s:>10}", .{ "-", "-" }) else {
+            if (s.mostlyIdle()) try w.print("{s:>10} {s:>10}", .{ "-", "-" }) else {
                 try units.right(w, 10, units.size, .{s.used_mib});
                 try w.writeAll(" ");
                 try units.right(w, 10, units.size, .{s.peak_mib});
             }
         }
         try w.writeAll(" ");
-        if (s.sizing.note == .none or s.sizing.note == .delegated) try w.print("{s:>10}", .{"-"}) else try units.right(w, 10, units.size, .{s.sizing.memory_mib});
+        if (s.sizing.note == .none or s.sizing.note == .idle) try w.print("{s:>10}", .{"-"}) else try units.right(w, 10, units.size, .{s.sizing.memory_mib});
         try w.writeAll("  ");
         switch (s.sizing.note) {
-            .delegated => try w.print("delegated: work ran outside workz ({d} of {d} runs); no sizing", .{ s.delegated, s.runs }),
+            .idle => try w.print("idle: used almost none of its request ({d} of {d} runs); no sizing", .{ s.idle, s.runs }),
             .none => try w.writeAll(if (s.failed_attempts > 0) "no completed run" else "not run"),
-            .out_of_memory => try w.print("{d:.0} out-of-memory {s}: the suggestion is half again the request it exceeded", .{ s.oom_kills, if (s.oom_kills == 1) "kill" else "kills" }),
+            .out_of_memory => try w.print("{d:.0} out-of-memory {s}: the suggestion is at least half again the request it exceeded", .{ s.oom_kills, if (s.oom_kills == 1) "kill" else "kills" }),
             .measured => {
                 try w.writeAll(s.character());
                 if (s.request_mib > 2 * s.sizing.memory_mib and s.request_mib - s.sizing.memory_mib >= 256) {
@@ -445,6 +561,10 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
                 }
                 if (s.limit_events > 0 and s.peak_mib >= s.request_mib * 0.99 and s.used_mib < s.request_mib) try w.writeAll("; reached its request through page cache (reclaimed, not killed)");
                 if (s.threads > 1 and s.cores < s.threads * 0.5) try w.print("; uses about {d:.1} of {d:.0} threads", .{ s.cores, s.threads });
+                if (s.sizing.at_thread_limit) {
+                    if (s.threads <= 1) try w.writeAll("; kept its thread busy") else try w.print("; kept all {d:.0} of its threads busy", .{s.threads});
+                    try w.writeAll(": it may use more if given them");
+                }
             },
         }
         if (s.reused > 0) try w.print("; {d} reused", .{s.reused});
@@ -466,7 +586,7 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
             try w.print("\ntime per {s} (the latest run of every rule)\n", .{@tagName(by)});
             try w.print("  {s:<30} STEPS  RUNS       WALL        CPU  CPU SHARE\n", .{if (by == .category) "CATEGORY" else "TOOL"});
             for (list) |t| {
-                try w.print("  {s:<30} {d:>5} {d:>5} ", .{ cut(t.name, 30), t.steps, t.runs });
+                try w.print("  {f} {d:>5} {d:>5} ", .{ units.field(t.name, 30), t.steps, t.runs });
                 try units.right(w, 10, units.duration, .{t.wall_s});
                 try w.writeAll(" ");
                 try units.right(w, 10, units.duration, .{t.cpu_s});
@@ -480,7 +600,7 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll("\nsamples (the latest run of every rule), most CPU time first\n");
     try w.writeAll("  SAMPLE                         STEPS  RUNS       WALL        CPU  SLOWEST STEP\n");
     for (samples) |row| {
-        try w.print("  {s:<30} {d:>5} {d:>5} ", .{ cut(row.name, 30), row.steps, row.runs });
+        try w.print("  {f} {d:>5} {d:>5} ", .{ units.field(row.name, 30), row.steps, row.runs });
         try units.right(w, 10, units.duration, .{row.wall_s});
         try w.writeAll(" ");
         try units.right(w, 10, units.duration, .{row.cpu_s});
@@ -500,7 +620,7 @@ fn writeShared(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll("  NAME                           TYPE     STARTS       LOAD     MEMORY       PEAK    SUGGEST\n");
     for (l.shared()) |s| {
         const peak: f64 = if (s.memory_peak) |p| @as(f64, @floatFromInt(p)) / 1048576.0 else 0;
-        try w.print("  {s:<30} {s:<8} {d:>6} ", .{ cut(s.name, 30), if (s.service) "service" else "mapped", s.starts });
+        try w.print("  {f} {s:<8} {d:>6} ", .{ units.field(s.name, 30), if (s.service) "service" else "mapped", s.starts });
         try units.right(w, 10, units.duration, .{s.load_s});
         try w.writeAll(" ");
         try units.right(w, 10, units.size, .{s.declared_mib});

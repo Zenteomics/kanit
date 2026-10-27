@@ -117,12 +117,14 @@ category = "quantification"
 tool = "featureCounts"
 input = ["ref/genes.gtf", ${quoted%, }]
 output = ["counts.tsv"]
-shell = "featureCounts -T \$WORKZ_THREADS -p -a ref/genes.gtf -o counts.tsv ${bams[*]}"
+shell = "featureCounts -T \$WORKZ_THREADS -p --countReadPairs -s 2 -a ref/genes.gtf -o counts.tsv ${bams[*]}"
 threads = 4
 memory = "4G"
 EOF
 } > workflow.toml
 ```
+
+`-s 2` counts reverse-stranded reads, as dUTP library kits produce; set the strandedness your library has, since featureCounts counts unstranded by default.
 
 ```sh
 bash make-workflow.sh

@@ -23,19 +23,19 @@ zig build -Doptimize=ReleaseSafe
 export PATH="$PWD/zig-out/bin:$PATH"
 
 mkdir demo && cd demo
-workz init                          # writes a commented workflow.toml
+workz init                                                # writes a commented workflow.toml
 mkdir data && seq 1000 > data/reads.txt
-workz plan workflow.toml            # what would run, and why
-workz run workflow.toml             # run it
-cat out/report.txt                  # reads: 1000
-workz report --bottlenecks          # what limited the run
+workz plan workflow.toml                                  # what would run, and why
+workz run workflow.toml --max-threads 2 --max-memory 1G   # run it on 2 threads and 1 GiB
+cat out/report.txt                                        # reads: 1000
+workz report --bottlenecks                                # what limited the run
 ```
 
 Then follow [Getting started](wiki/Getting-Started.md), which builds, runs and changes a small workflow step by step.
 
 ## Documentation
 
-The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, containers, running, watching and reports, with a [workflow reference](wiki/Workflow-Reference.md), a [command reference](wiki/Command-Reference.md) and [troubleshooting](wiki/Troubleshooting.md). [CHANGELOG.md](CHANGELOG.md) lists the changes in every version.
+The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, containers, running, watching and reports, with a [workflow reference](wiki/Workflow-Reference.md), a [command reference](wiki/Command-Reference.md) and [troubleshooting](wiki/Troubleshooting.md). [examples/](examples/) holds a preparer for a real fusion-calling run. [CHANGELOG.md](CHANGELOG.md) lists the changes in every version.
 
 ## Status
 

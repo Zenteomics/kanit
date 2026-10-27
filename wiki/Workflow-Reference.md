@@ -178,7 +178,7 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 
 `workz validate` checks everything above and the graph: every key, every value, every name, unique outputs, and the absence of cycles. Some things are checked only when a launch starts, because they depend on the machine and the files, and only for the selected rules:
 
-- An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, and `workz plan` shows `input missing: PATH`.
+- An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `workz plan` shows `input missing: PATH`.
 - The path of every shared file input must exist and be readable; otherwise `workz run` refuses with `shared input NAME (PATH): ...`.
 - Every container image must be available locally; otherwise `workz run` refuses with `container image NAME is not available locally; workz does not pull images`.
 - Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB with its shared inputs; the run allows M MiB`.

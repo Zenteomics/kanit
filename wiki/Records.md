@@ -51,24 +51,29 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 
 ```json
 {
-  "engine": "workz 0.3.0 sha256:85d277095e9e014cb55b3a60c6cc8767e10bf763c3b78e9b78b8a68b2809fac8",
+  "engine": "workz 0.3.0 sha256:ef60a4197a46f99979fafbe8e00a286d4ab431e06e9751aff7ccd686b9065bfd",
   "engine_key": 2,
-  "launch": "20261026T033653.780-bb9b10ee",
+  "launch": "20261027T025023.762-56876086",
   "status": "completed",
-  "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0 },
+  "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },
   "selected": 25,
-  "elapsed_s": 48.578034531,
-  "finished": "2026-10-26T03:37:42.358Z",
+  "elapsed_s": 48.127714058,
+  "finished": "2026-10-27T02:51:11.890Z",
   "error": null,
-  "engine_cost": { "cpu_s": 0.085095, "max_rss_mib": 6.28515625 },
-  "launch_dir": ".../.workz/launches/20261026T033653.780-bb9b10ee"
+  "engine_cost": { "cpu_s": 0.106239, "max_rss_mib": 6.30078125 },
+  "launch_dir": ".../.workz/launches/20261027T025023.762-56876086",
+  "failures": [],
+  "changed_outputs": []
 }
 ```
 
-- `status` is `completed`, `failed`, `interrupted` or `refused`.
+- `status` is `completed`, `failed`, `stopped` (rules were stopped with `workz control stop` and none failed), `interrupted` or `refused`.
 - `error` holds the reason a launch was refused or stopped, or `null`.
 - `engine_cost` is the CPU time and peak memory of the engine itself.
 - A refused launch counts every selected rule as `not_started`.
+- `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal; then `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
+- `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started.
+- `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
 
 ## Attempt files
 
@@ -96,7 +101,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |
 
-The `cgroup` object holds `memory_peak`, `memory_current`, `oom`, `oom_kill` and `memory_max_events`, `cpu_usage_usec`, the `anon`, `file` and `file_mapped` memory, and the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
+The `cgroup` object holds `memory_peak`, `memory_current`, `oom`, `oom_kill` and `memory_max_events`, `cpu_usage_usec`, `file` (page cache still charged when the attempt ended), `anon_peak` (the largest anonymous memory, heap and stacks, that the run's samples every 5 s saw while the attempt ran; null for an attempt shorter than one sample), and the pressure totals in microseconds: `cpu_some_us`, `memory_some_us`, `memory_full_us`, `io_some_us` and `io_full_us`.
 
 ## Events
 
@@ -159,7 +164,21 @@ would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) t
 
 - Without options, `workz clean` removes only the containers earlier launches left behind.
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to.
+- A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--dry-run` lists what would go.
 - It takes the run lock, so it never removes anything while a launch runs.
 
 Removing `.workz/` entirely is safe when no launch runs; the next launch then runs every rule.
+
+## Recording a run
+
+To cite a run, in a lab notebook or a methods section, note its launch ID and keep its launch directory, or these files of it:
+
+- `workflow`, the workflow file exactly as it ran.
+- `launch.json`, the engine with the digest of its executable, the workflow file's digest, the budget and the options.
+- `summary.json`, the outcome and the counts.
+- `report.html`, the launch as one page.
+- `attempts/RULE/NNN/`, each attempt's command, request, record, standard output and standard error.
+
+`workz report --format json` lists every attempt's measures in one file. The tools a rule ran are those its command names: label them with `tool` ([Concepts](Concepts.md#steps-samples-categories-and-tools)), and print their versions from the command, so each attempt's output records them.
+

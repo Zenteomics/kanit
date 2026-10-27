@@ -39,6 +39,18 @@ pub fn lock(gpa: Allocator, records: []const u8) !sys.Fd {
     return fd;
 }
 
+/// Whether a run holds the run lock now. It only tests the lock: a shared
+/// lock that is free is let go at once.
+pub fn running(gpa: Allocator, records: []const u8) bool {
+    const p = std.fs.path.join(gpa, &.{ records, "lock" }) catch return false;
+    defer gpa.free(p);
+    const fd = sys.openRead(gpa, p) catch return false;
+    defer sys.close(fd);
+    const LOCK_SH = 1;
+    const LOCK_NB = 4;
+    return linux.errno(linux.flock(fd, LOCK_SH | LOCK_NB)) == .AGAIN;
+}
+
 /// A new launch directory named by UTC time and a random suffix.
 pub fn newLaunch(gpa: Allocator, a: Allocator, records: []const u8) !struct { id: []const u8, dir: []const u8 } {
     var tbuf: [32]u8 = undefined;

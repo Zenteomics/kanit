@@ -434,6 +434,15 @@ const Line = struct {
         for (cut) |c| self.used += @intFromBool(c & 0xc0 != 0x80);
     }
 
+    /// Text that ends with "..." where the rest of the line cannot hold it,
+    /// so a cut is never read as the whole text.
+    fn clipped(self: *Line, s: []const u8) void {
+        const room = self.cols -| self.used;
+        if (fit(s, room) == s.len or room < 4) return self.text(s);
+        self.text(s[0..fit(s, room - 3)]);
+        self.text("...");
+    }
+
     fn print(self: *Line, comptime fmt: []const u8, args: anytype) void {
         var tmp: [1024]u8 = undefined;
         var w: std.Io.Writer = .fixed(&tmp);
@@ -500,7 +509,7 @@ const Line = struct {
         var taken: usize = 0;
         if (total > 0) for (parts, 0..) |p, i| {
             const share = @max(p.value, 0) / total * @as(f64, @floatFromInt(width));
-            var n: usize = @intFromFloat(@floor(share));
+            var n: usize = std.math.lossyCast(usize, @floor(share));
             if (n == 0 and p.value > 0) n = 1;
             n = @min(n, width - taken);
             cells_of[i] = n;
@@ -656,7 +665,7 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     const right = state.len + elapsed.len + 5;
     if (f.cols > l.used + right) l.spaces(f.cols - l.used - right);
     l.sgr(reset);
-    l.sgr(if (std.mem.eql(u8, state, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, state, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, state, "interrupted")) "\x1b[45;30;1m" else "\x1b[41;97;1m");
+    l.sgr(if (std.mem.eql(u8, state, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, state, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, state, "interrupted") or std.mem.eql(u8, state, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m");
     l.print(" {s} ", .{state});
     l.sgr(reset ++ reverse);
     l.print(" {s} ", .{elapsed});
@@ -816,7 +825,9 @@ fn drawTable(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui
         l.field("MEMORY", Columns.bar_w - 2, false);
     }
     if (c.mem) l.field(if (c.bar) "" else "MEMORY", Columns.mem_w, true);
-    l.text("  LAST OUTPUT / REASON");
+    // The label that fits whole.
+    const room = l.cols -| l.used;
+    l.text(if (room >= 22) "  LAST OUTPUT / REASON" else if (room >= 13) "  LAST OUTPUT" else "");
     try f.put(&l);
     const end = @min(ui.top + page, list.len);
     for (list[ui.top..end]) |ri| {
@@ -904,14 +915,14 @@ fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected:
 
     l.text("  ");
     if (r.status.active() and live) {
-        l.text(monitor.lastOutput(gpa, a, r.dir, l.cols));
+        l.clipped(monitor.lastOutput(gpa, a, r.dir, l.cols));
     } else if (r.reason.len > 0) {
         l.sgr(switch (r.status) {
             .failed => red,
             .waiting, .retrying => yellow,
             else => dim,
         });
-        l.text(r.reason);
+        l.clipped(r.reason);
         l.sgr(reset);
     }
 }
@@ -1233,7 +1244,7 @@ fn drawHelp(f: *Frame, space: usize) !void {
             l.sgr(cyan);
             l.field(h[0], 16, false);
             l.sgr(reset);
-            l.text(h[1]);
+            l.clipped(h[1]);
         }
         try f.put(&l);
     }
