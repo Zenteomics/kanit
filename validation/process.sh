@@ -1046,7 +1046,7 @@ tm kill-server 2> /dev/null
 rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"
 else skip "interactive watch (needs tmux)"; fi
 
-# ---------------------------------------------------------------- cases from the oxo-local acceptance programs
+# ---------------------------------------------------------------- retries, branches, targets, limits, logs, environment, network, termination, locking
 new retry-evidence
 { header retry-evidence
   rule fail_once '[]' '["out.txt"]' '"echo partial > out.txt; if test ! -f attempted; then touch attempted; echo intentional >&2; exit 23; fi; echo recovered > out.txt"'
