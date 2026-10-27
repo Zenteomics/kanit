@@ -721,15 +721,22 @@ const Engine = struct {
             const r = self.rule(i);
             var waiting = false;
             var failure: ?[]const u8 = null;
+            // Every holder is taken before any starts: a holder that fails to
+            // start fails this rule, which releases all of them.
             for (r.shared_index) |hi| {
                 const h = &self.holders[hi];
                 if (!h.held) self.memory_used += h.reserve_mib;
                 h.held = true;
                 h.users += 1;
+            }
+            for (r.shared_index) |hi| {
+                const h = &self.holders[hi];
                 if (h.st == .failed and h.failure != null) failure = h.failure;
                 if (h.st == .idle) try self.startHolderOrFail(hi);
+                if (self.tasks[i].status != .staging) break;
                 if (h.st != .ready) waiting = true;
             }
+            if (self.tasks[i].status != .staging) continue;
             if (failure) |why| {
                 // A shared input that failed in this launch is not retried.
                 try self.setWait(i, null);
