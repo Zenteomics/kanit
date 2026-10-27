@@ -136,6 +136,24 @@ pub fn readFile(gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     return list.toOwnedSlice(gpa);
 }
 
+/// Returns at most the first `max` bytes of a file, or an empty slice if it is missing.
+pub fn readHead(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
+    const fd = openRead(gpa, path) catch |err| switch (err) {
+        error.FileNotFound => return gpa.alloc(u8, 0),
+        else => return err,
+    };
+    defer close(fd);
+    const out = try gpa.alloc(u8, max);
+    errdefer gpa.free(out);
+    var done: usize = 0;
+    while (done < max) {
+        const n = try check(linux.pread(fd, out[done..].ptr, max - done, @intCast(done)));
+        if (n == 0) break;
+        done += n;
+    }
+    return gpa.realloc(out, done);
+}
+
 /// Returns at most the last `max` bytes of a file, or an empty slice if it is missing.
 pub fn readTail(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = openRead(gpa, path) catch |err| switch (err) {

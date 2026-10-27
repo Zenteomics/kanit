@@ -187,6 +187,24 @@ shell = "STAR --outFileNamePrefix aligned/s1/ ..."
 - When standard error is empty, the failure reason quotes the last line of the first diagnostics file that has one.
 - Only regular files that resolve inside the working directory and outside `.workz/` are read; a missing file is skipped, and listing one file twice is an error. Diagnostics are not outputs and not part of the rule key: adding one reruns nothing.
 
+## Tool versions
+
+A methods section names each tool's version. Give a rule `version`, a command that prints it, and workz records what it prints:
+
+```toml
+[[rules]]
+name = "align_s1"
+container = "community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4"
+version = "STAR --version"
+shell = "STAR --runThreadN 8 ..."
+```
+
+- The command runs once per launch for each image and command, when the first rule that names it starts: in the rule's image, with no network and nothing of the working directory mounted, or on the host for a host rule. Version commands run one at a time beside the rules, outside the budget, so keep them short; when the rules have ended, workz waits at most 10 s for those still queued or running, and stops the rest.
+- What it prints, the first 4 KiB of its standard output and error, goes to the launch's `versions.json`, with whether it completed; a command that failed records no version. Each attempt's `record.json` names its `version` command and its `image` ID.
+- A launch that reuses every rule runs none: the launch that ran them recorded their versions.
+- `version` is not part of the rule key: adding one reruns nothing, and the next launch that runs the rule records it.
+- `workz report --methods` lists each tool with its version and image ([Reports](Reports.md#methods)).
+
 ## Order, retries and time limits
 
 - `priority` (default 0) orders ready rules; higher starts first. Among equal priorities, the rule heading the longest chain of remaining work starts first ([Resources and scheduling](Resources-and-Scheduling.md#which-rule-starts-first)).

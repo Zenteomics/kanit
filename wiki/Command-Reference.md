@@ -160,8 +160,9 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 | `--bottlenecks`  |                       |         | what limited the launch                 |
 | `--suggest`      |                       |         | suggested threads and memory per step   |
 | `--compare`      | OTHER                 |         | compare with another launch             |
+| `--methods`      |                       |         | what produced the recorded results      |
 
-`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare` and `--bottlenecks`. `--format` applies to the attempt table and to `--suggest`, which prints a table on a terminal, and TSV, or JSON with `--format json`, to a file or a pipe; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
+`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare`, `--bottlenecks` and `--methods`. `--methods` describes the results recorded in the working directory, whatever launches made them, so it takes no `--launch`; it prints text, or JSON with `--format json` ([Reports](Reports.md#methods)). `--format` applies to the attempt table and to `--suggest`, which prints a table on a terminal, and TSV, or JSON with `--format json`, to a file or a pipe; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
 
 ## verify
 

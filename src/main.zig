@@ -253,12 +253,16 @@ const commands = [_]Command{
         \\prints one row per attempt: TSV by default, JSON with --format json, or the
         \\launch as one self-contained HTML page with --format html. --suggest prints
         \\a table on a terminal, TSV to a file or a pipe, or JSON; --bottlenecks and
-        \\--compare print text.
+        \\--compare print text. --methods describes the results recorded in the
+        \\working directory, across the launches that made them: workflow, engine,
+        \\each tool with its version and image, and each step's request and command;
+        \\text, or JSON with --format json.
         ,
         .options = &.{
             .{ .flag = "--bottlenecks", .desc = "critical path, waiting, request sizing, utilization" },
             .{ .flag = "--suggest", .desc = "suggested threads and memory per step" },
             .{ .flag = "--compare OTHER", .desc = "compare with a launch ID, launch directory or workdir" },
+            .{ .flag = "--methods", .desc = "tools, versions, images and commands of the results" },
             .{ .flag = "--format FORMAT", .desc = "tsv, json or html, a self-contained page (default: tsv)" },
             .{ .flag = "--json", .desc = "the same as --format json" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
@@ -268,6 +272,7 @@ const commands = [_]Command{
         \\workz report --bottlenecks
         \\workz report --format html -o report.html
         \\workz report --compare 20261026T033653.780-bb9b10ee
+        \\workz report --methods -o methods.txt
         ,
     },
     .{
@@ -1050,6 +1055,7 @@ const ReportExtra = struct {
     bottlenecks: *bool,
     compare: *?[]const u8,
     suggest: *bool,
+    methods: *bool,
     output: *?[]const u8,
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
@@ -1058,6 +1064,10 @@ const ReportExtra = struct {
         }
         if (std.mem.eql(u8, arg, "--suggest")) {
             self.suggest.* = true;
+            return 1;
+        }
+        if (std.mem.eql(u8, arg, "--methods")) {
+            self.methods.* = true;
             return 1;
         }
         if (std.mem.eql(u8, arg, "--compare")) {
@@ -1105,12 +1115,17 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var bottlenecks = false;
     var compare: ?[]const u8 = null;
     var suggest = false;
+    var methods = false;
     var output: ?[]const u8 = null;
-    if (try parseArgs(c, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest, .output = &output })) |e| return e;
+    if (try parseArgs(c, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest, .methods = &methods, .output = &output })) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     // One report at a time, in a format it has.
-    if (@as(u8, @intFromBool(suggest)) + @intFromBool(compare != null) + @intFromBool(bottlenecks) > 1)
-        return fail("choose one of --suggest, --compare and --bottlenecks", .{});
+    if (@as(u8, @intFromBool(suggest)) + @intFromBool(compare != null) + @intFromBool(bottlenecks) + @intFromBool(methods) > 1)
+        return fail("choose one of --suggest, --compare, --bottlenecks and --methods", .{});
+    if (methods) {
+        if (launch != null) return fail("--methods describes the results recorded in the working directory, whatever launch made them; drop --launch", .{});
+        if (format != null and format.? != .json) return fail("--methods prints text, or JSON with --format json", .{});
+    }
     if (format) |f| {
         if (bottlenecks or compare != null) return fail("--bottlenecks and --compare print text; --format applies to the attempt table and --suggest", .{});
         if (suggest and f == .html) return fail("--suggest prints tsv or json, not html", .{});
@@ -1120,6 +1135,21 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         return fail("the HTML page is for a browser: write it with -o report.html, or redirect standard output", .{});
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
+    if (methods) {
+        if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; workz run starts one", .{rec});
+        const m = workz.methods.collect(c.gpa, c.a, root) catch |err| switch (err) {
+            error.CorruptState, error.UnsupportedState => return failed("{s}/state.json cannot be read ({s})", .{ rec, @errorName(err) }),
+            else => return err,
+        };
+        if (m.rules == 0) return failed("no rule has completed in {s}; there are no results to describe", .{root});
+        var text: std.Io.Writer.Allocating = .init(c.gpa);
+        defer text.deinit();
+        if (format != null and format.? == .json) try workz.methods.writeJson(&text.writer, m) else try workz.methods.writeText(&text.writer, m);
+        if (output) |path| {
+            sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, @errorName(err) });
+        } else try sys.writeAll(1, text.written());
+        return .ok;
+    }
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
     var text: std.Io.Writer.Allocating = .init(c.gpa);

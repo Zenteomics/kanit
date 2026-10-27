@@ -76,6 +76,7 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
         \\log = "logs/a.log"
         \\benchmark = "bench/a.json"
         \\diagnostics = ["out/a/Log.out"]
+        \\version = "tool --version"
         \\retries = 2
         \\timeout = "1h30m"
         \\cutoff = true
@@ -105,6 +106,8 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
     try testing.expectEqualStrings("/abs/in.txt", r.input_abs[1]);
     try testing.expect(std.mem.endsWith(u8, r.output_abs[0], "/out/a.txt"));
     try testing.expectEqualStrings("out/a/Log.out", r.diagnostics[0]);
+    try testing.expectEqualStrings("tool --version", r.version.?);
+    try testing.expect(wf.rules[1].version == null);
     try testing.expect(std.mem.endsWith(u8, r.diagnostics_abs[0], "/out/a/Log.out"));
     try testing.expectEqual(@as(u32, 2), wf.rules[1].threads);
     try testing.expectEqual(@as(u64, 1024), wf.rules[1].memory_mib);
@@ -175,6 +178,7 @@ test "format 1 rejects unknown keys, bad values and unsafe paths" {
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"/tmp/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "relative path inside the working directory");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\".workz/x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "engine record directory");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\ndiagnostics = [\"/var/log/x\"]\n", "diagnostics '/var/log/x' must be a relative path");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\nversion = \" \"\n", "version must be a command");
     try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\ngroups = { disk = 1 }\n", "undeclared resource group");
     try expectInvalid(head ++ "[resource_groups.disk]\nmax = 1\nwait = \"queue\"\n[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n", "unknown key 'wait' in a resource group");
     try expectInvalid(head ++ "[shared.ref]\npath = \"r\"\n[[rules]]\nname = \"x\"\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"rfe\"]\n", "did you mean 'ref'?");

@@ -127,35 +127,37 @@ An entry with `container` is a service:
 
 ## [[rules]]
 
-| Key           | Type     | Default                | Meaning                             |
-| ------------- | -------- | ---------------------- | ----------------------------------- |
-| `name`        | string   | required               | unique rule name                    |
-| `input`       | paths    | `[]`                   | files and directories it reads      |
-| `output`      | paths    | required               | files it writes, at least one       |
-| `shell`       | string   | required               | the command line                    |
-| `threads`     | integer  | `[defaults]`, else 1   | 1 to 4096                           |
-| `memory`      | size     | `[defaults]`           | required from one of the two        |
-| `priority`    | integer  | 0                      | higher starts first                 |
-| `retries`     | integer  | `--retry`, else 0      | extra attempts, 0 to 3              |
-| `timeout`     | duration | `--timeout`, else none | limit per attempt                   |
-| `log`         | path     | none                   | copy of stdout and stderr           |
-| `benchmark`   | path     | none                   | JSON summary of a completed attempt |
-| `diagnostics` | paths    | `[]`                   | files kept when an attempt fails    |
-| `cutoff`      | boolean  | `false`                | key consumers on output bytes       |
-| `workdir`     | path     | none                   | directory the command starts in     |
-| `links`       | table    | none                   | link name = input, in `workdir`     |
-| `container`   | image    | none                   | run in this local image             |
-| `mounts`      | table    | none                   | host path = path in the image       |
-| `step`        | string   | from `name`            | pipeline step it is an instance of  |
-| `sample`      | string   | from `name`            | data it works on                    |
-| `category`    | string   | none                   | group of steps it belongs to        |
-| `tool`        | string   | from `container`       | program it runs                     |
-| `resources`   | table    | none                   | the request, below                  |
+| Key           | Type     | Default                | Meaning                              |
+| ------------- | -------- | ---------------------- | ------------------------------------ |
+| `name`        | string   | required               | unique rule name                     |
+| `input`       | paths    | `[]`                   | files and directories it reads       |
+| `output`      | paths    | required               | files it writes, at least one        |
+| `shell`       | string   | required               | the command line                     |
+| `threads`     | integer  | `[defaults]`, else 1   | 1 to 4096                            |
+| `memory`      | size     | `[defaults]`           | required from one of the two         |
+| `priority`    | integer  | 0                      | higher starts first                  |
+| `retries`     | integer  | `--retry`, else 0      | extra attempts, 0 to 3               |
+| `timeout`     | duration | `--timeout`, else none | limit per attempt                    |
+| `log`         | path     | none                   | copy of stdout and stderr            |
+| `benchmark`   | path     | none                   | JSON summary of a completed attempt  |
+| `diagnostics` | paths    | `[]`                   | files kept when an attempt fails     |
+| `version`     | string   | none                   | command that prints the tool version |
+| `cutoff`      | boolean  | `false`                | key consumers on output bytes        |
+| `workdir`     | path     | none                   | directory the command starts in      |
+| `links`       | table    | none                   | link name = input, in `workdir`      |
+| `container`   | image    | none                   | run in this local image              |
+| `mounts`      | table    | none                   | host path = path in the image        |
+| `step`        | string   | from `name`            | pipeline step it is an instance of   |
+| `sample`      | string   | from `name`            | data it works on                     |
+| `category`    | string   | none                   | group of steps it belongs to         |
+| `tool`        | string   | from `container`       | program it runs                      |
+| `resources`   | table    | none                   | the request, below                   |
 
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
 - A rule may not read its own output, two rules may not write the same file, and no rule may read another rule's log or benchmark.
 - `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
+- `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
 - An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
 - `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.

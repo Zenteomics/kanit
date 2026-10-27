@@ -1,4 +1,4 @@
-`workz report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, and how two launches differ. Every report reads `.workz/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 10 threads and 6 GiB, with a 600 MiB shared index. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
+`workz report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, how two launches differ, and what produced the results, for a methods section. Every report reads `.workz/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 10 threads and 6 GiB, with a 600 MiB shared index. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
 
 Reports look at a launch in two scopes:
 
@@ -200,6 +200,42 @@ The lines above the table give both budgets, and notes say when the budgets, the
 - A step whose runs were mostly idle in either launch shows `-` for its memory and CPU changes and says in which launch.
 - A step with no completed run on one side shows `-` for that side and says which.
 - A step reused in the launch compares the run it reused, and says so.
+
+## Methods
+
+`workz report --methods` describes what produced the results in the working directory, for the methods section of a paper or a lab notebook. It reads `state.json` and the records of the attempts it points to, so it covers every recorded rule, whichever launch ran it, including a rule since removed from the workflow whose record remains. A small workflow whose `join` step was rerun in a second launch:
+
+```text
+Results in .../methods: 3 rules, finished from 2026-10-27T20:14:21.381Z to 2026-10-27T20:14:21.901Z
+
+workflow
+  methods 2.1, file sha256:1be2e1f6139347df64d925a3a4451d8b6976539d80ee0f048ba91d3cfc7552f6
+engine
+  workz 0.4.0 sha256:f3da38838f99441c32b645f45126b630cafe18df910cd94117351cb51dd9ec56
+launches
+  20261027T201420.914-802f8c78 (2 rules)
+  20261027T201421.453-004013d9 (1 rule)
+
+tools
+  upper: upper 1.4.2
+    host
+    version  echo upper 1.4.2
+    steps    up (2 rules)
+  (no tool label)
+    host
+    steps    join (1 rule)
+
+steps
+  up: 2 rules, 1 thread and 64 MiB each
+    up_s1: echo one > s1.txt
+  join: 1 rule, 1 thread and 64 MiB
+    join: cat s1.txt s2.txt > all.txt
+```
+
+- **workflow**, **engine** and **launches** list each workflow file (its `[workflow]` name and version, and the digest of its bytes), engine and launch that made the results, with their rules when there are several.
+- **tools** groups rules by their `tool` label, image and version command. A container rule's tool names its image reference and the image ID it ran; a host rule's says `host`. The version is the first line its rule's `version` command printed when it exited 0 ([Writing workflows](Writing-Workflows.md#tool-versions)); `(no version recorded)` follows a command that failed, did not run, or ran in a launch since removed.
+- **steps** lists each step in the order its rules first finished, with its requests and the command of its first rule by name; `request not recorded` marks a step whose attempt records are gone.
+- `--format json` gives the same as one JSON object, and `-o FILE` writes it to a file.
 
 ## The HTML report
 

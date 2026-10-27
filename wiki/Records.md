@@ -15,6 +15,8 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
       control                       commands from workz control
       summary.json                  the result, written at the end
       report.html                   the launch as one page, drawn again while it runs
+      versions.json                 the output of each tool's version command
+      versions/                     each version command's full output
       shared/                       service scripts and their standard error
       attempts/
         align_S1/
@@ -44,7 +46,11 @@ workz 0.4.0 reads the state of earlier versions. Deleting `state.json` makes the
 
 ### launch.json
 
-Written when the launch starts: `engine` (version and the executable's SHA-256), `engine_key`, `launch`, `workflow` and `workflow_sha256`, `workdir`, `started`, the budget (`max_threads`, `max_memory_mib`, `jobs`), and the options `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env` and `slice`, and the number of `selected` rules.
+Written when the launch starts: `engine` (version and the executable's SHA-256), `engine_key`, `launch`, `workflow` and `workflow_sha256`, `workflow_name` and `workflow_version` from its `[workflow]` table, `workdir`, `started`, the budget (`max_threads`, `max_memory_mib`, `jobs`), and the options `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env` and `slice`, and the number of `selected` rules.
+
+### versions.json
+
+Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
 
 ### summary.json
 
@@ -102,6 +108,8 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `labels`               | `step`, `sample`, `category`, `tool`; `declared` for each  |
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
 | `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
+| `image`                | the image ID a container rule ran, else `null`             |
+| `version`              | the rule's version command, else `null`                    |
 | `queue`                | `waited_s`, and seconds per wait reason                    |
 | `key`                  | the rule key the attempt ran under                         |
 
@@ -185,5 +193,5 @@ To cite a run, in a lab notebook or a methods section, note its launch ID and ke
 - `report.html`, the launch as one page.
 - `attempts/RULE/NNN/`, each attempt's command, request, record, standard output and standard error.
 
-`workz report --format json` lists every attempt's measures in one file. The tools a rule ran are those its command names: label them with `tool` ([Concepts](Concepts.md#steps-samples-categories-and-tools)), and print their versions from the command, so each attempt's output records them.
+`workz report --methods` describes what produced the results: the workflow file, the engine, each tool with its version and image, and each step's request and command ([Reports](Reports.md#methods)). Give each rule a `tool` label ([Concepts](Concepts.md#steps-samples-categories-and-tools)) and a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)) so it can name them; `versions.json` holds what the version commands printed, and `workz report --format json` lists every attempt's measures in one file.
 

@@ -109,6 +109,23 @@ const Task = struct {
 /// Time a ready attempt spent waiting for one reason.
 const Wait = struct { reason: []const u8, seconds: f64 };
 
+/// A tool's version command, run once per launch beside the rules: in the
+/// rule's image for a container rule, else on the host.
+const Version = struct {
+    command: []const u8,
+    /// Image reference and ID, or null for a host rule.
+    container: ?[]const u8,
+    image: ?[]const u8,
+    /// Its standard output and error.
+    file: []const u8,
+    pid: linux.pid_t = 0,
+    started: bool = false,
+    /// Exit status, 128 + N for signal N; null until it ends.
+    exit_code: ?u32 = null,
+    /// Killed when the launch ended before it did.
+    stopped: bool = false,
+};
+
 /// The keys this launch gives its rules, for `state.ruleKey`.
 const TaskKeys = struct {
     tasks: []const Task,
@@ -340,6 +357,9 @@ const Engine = struct {
     selected: usize = 0,
     /// Bytes of earlier outputs moved into attempts' `previous/`.
     previous_bytes: u64 = 0,
+    /// The version commands of this launch, and the one running.
+    versions: std.ArrayList(Version) = .empty,
+    version_running: ?usize = null,
     console: Console = .{},
     /// Monotonic time the launch opened, for the elapsed time on the console.
     start_mono: i128 = 0,
@@ -902,6 +922,7 @@ const Engine = struct {
         };
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
+        self.queueVersion(r) catch {};
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
@@ -1437,6 +1458,8 @@ const Engine = struct {
             },
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
+            .image = if (r.container) |img| self.images.get(img) else null,
+            .version = r.version,
             .labels = r.labels,
             .outputs = outputs.items,
             .diagnostics = t.diagnostics,
@@ -1877,12 +1900,146 @@ const Engine = struct {
         return n;
     }
 
+    // ---- tool versions ----
+
+    /// Queues the version command of rule `r`, once per launch for each
+    /// image and command, and starts it when no other one runs. They are
+    /// not counted in the budget: one at a time keeps the memory they take
+    /// beside it to one short command and, for an image, its Podman client.
+    fn queueVersion(self: *Engine, r: *const workflow.Rule) !void {
+        const command = r.version orelse return;
+        const image: ?[]const u8 = if (r.container) |img| self.images.get(img) else null;
+        for (self.versions.items) |v| {
+            const same_image = if (v.image) |x| (image != null and std.mem.eql(u8, x, image.?)) else image == null;
+            if (same_image and std.mem.eql(u8, v.command, command)) return;
+        }
+        const dir = try std.fs.path.join(self.a, &.{ self.launch_dir, "versions" });
+        try sys.mkdirAll(self.gpa, dir);
+        try self.versions.append(self.a, .{
+            .command = command,
+            .container = r.container,
+            .image = image,
+            .file = try std.fmt.allocPrint(self.a, "{s}/{d}.log", .{ dir, self.versions.items.len + 1 }),
+        });
+        self.startVersion();
+    }
+
+    /// Starts the next queued version command unless one runs or the
+    /// launch was interrupted.
+    fn startVersion(self: *Engine) void {
+        if (self.version_running != null or self.interrupted) return;
+        for (self.versions.items, 0..) |*v, vi| {
+            if (v.started) continue;
+            v.started = true;
+            v.pid = self.spawnVersion(v) catch |err| {
+                const text = std.fmt.allocPrint(self.a, "workz: cannot start the version command: {s}\n", .{@errorName(err)}) catch continue;
+                sys.writeFile(self.gpa, v.file, text) catch {};
+                continue;
+            };
+            self.version_running = vi;
+            return;
+        }
+    }
+
+    fn spawnVersion(self: *Engine, v: *const Version) !linux.pid_t {
+        const fd = try sys.openWrite(self.gpa, v.file, .truncate);
+        defer sys.close(fd);
+        var spec: process.Spec = undefined;
+        if (v.image) |id| {
+            // The isolation of a container rule, without its mounts: a
+            // version command reads nothing of the working directory.
+            const argv = try process.Vec.init(self.a, &.{
+                self.podman.?,                      "run",
+                "--rm",                             "--pull=never",
+                "--label",                          try std.fmt.allocPrint(self.a, "workz.workdir={s}", .{self.wf.root}),
+                "--label",                          try std.fmt.allocPrint(self.a, "workz.launch={s}", .{self.launch_id}),
+                "--network=none",                   "--cap-drop=ALL",
+                "--security-opt=no-new-privileges", "--security-opt=label=disable",
+                "--read-only",                      "--log-driver=none",
+                "--entrypoint",                     "/bin/sh",
+                id,                                 "-c",
+                v.command,
+            });
+            spec = .{ .path = (try self.a.dupeZ(u8, self.podman.?)).ptr, .argv = argv.items.ptr, .envp = self.envp.items.ptr, .cwd = "/", .stdin = self.devnull, .stdout = fd, .stderr = fd };
+        } else {
+            const argv = try process.Vec.init(self.a, &.{ "bash", "-c", v.command });
+            spec = .{
+                .path = self.bash.ptr,
+                .argv = argv.items.ptr,
+                .envp = self.envp.items.ptr,
+                .cwd = (try self.a.dupeZ(u8, self.wf.root)).ptr,
+                .stdin = self.devnull,
+                .stdout = fd,
+                .stderr = fd,
+                .userns = if (self.network) |n| n.userns else -1,
+                .netns = if (self.network) |n| n.netns else -1,
+            };
+        }
+        const pid = try process.spawn(&spec);
+        if (self.guard) |gd| gd.note('+', pid);
+        return pid;
+    }
+
+    /// The process of the running version command, or 0.
+    fn versionPid(self: *const Engine) linux.pid_t {
+        const vi = self.version_running orelse return 0;
+        return self.versions.items[vi].pid;
+    }
+
+    fn versionExited(self: *Engine, rp: process.Reaped) void {
+        const v = &self.versions.items[self.version_running.?];
+        if (self.guard) |gd| gd.note('-', v.pid);
+        v.exit_code = rp.exitCode() orelse if (rp.signal()) |s| 128 + @as(u32, @intCast(s)) else null;
+        self.version_running = null;
+        self.startVersion();
+    }
+
+    /// Writes `versions.json`: each version command with the start of its
+    /// output. A command still running is killed first.
+    fn writeVersions(self: *Engine) !void {
+        if (self.versions.items.len == 0) return;
+        if (self.version_running) |vi| {
+            // Its whole process group, as for an attempt.
+            process.signalGroup(self.versions.items[vi].pid, .KILL);
+            self.versions.items[vi].stopped = true;
+        }
+        const Entry = struct { command: []const u8, container: ?[]const u8, image: ?[]const u8, status: []const u8, exit_code: ?u32, output: []const u8 };
+        var entries: std.ArrayList(Entry) = .empty;
+        for (self.versions.items) |v| {
+            const head = try sys.readHead(self.gpa, v.file, version_output_max);
+            defer self.gpa.free(head);
+            try entries.append(self.a, .{
+                .command = v.command,
+                .container = v.container,
+                .image = v.image,
+                .status = if (!v.started) "not run" else if (v.stopped) "stopped" else if (v.exit_code == 0) "completed" else "failed",
+                .exit_code = v.exit_code,
+                .output = try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n")),
+            });
+        }
+        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), entries.items);
+    }
+
     fn helper(self: *Engine, pid: ?linux.pid_t) void {
         if (pid) |p| self.helpers.append(self.gpa, p) catch {};
     }
 
     /// Waits up to `limit_s` for the Podman commands still running, so a
     /// launch ends with the containers it removed gone.
+    /// Lets the version commands still queued or running finish, for at most
+    /// `limit_s` seconds in all. An interrupted launch, or a signal while
+    /// waiting, ends the wait: they must not hold the launch open.
+    fn awaitVersions(self: *Engine, limit_s: u64) void {
+        const until = sys.monoNs() + @as(i128, limit_s) * std.time.ns_per_s;
+        while (self.version_running != null and !self.interrupted and sys.monoNs() < until) {
+            var fds = [_]linux.pollfd{.{ .fd = self.sigfd, .events = linux.POLL.IN, .revents = 0 }};
+            process.wait(&fds, until);
+            const seen = process.readSignals(self.sigfd);
+            if (process.has(seen, .INT) or process.has(seen, .TERM) or process.has(seen, .HUP)) break;
+            self.reapAll() catch {};
+        }
+    }
+
     fn awaitHelpers(self: *Engine, limit_s: u64) void {
         const until = sys.monoNs() + @as(i128, limit_s) * std.time.ns_per_s;
         while (self.helpers.items.len > 0 and sys.monoNs() < until) {
@@ -1905,6 +2062,8 @@ const Engine = struct {
                     try self.holderExited(hi, rp);
                     break;
                 }
+            } else if (rp.pid == self.versionPid()) {
+                self.versionExited(rp);
             } else for (self.helpers.items, 0..) |pid, k| {
                 if (pid == rp.pid) {
                     _ = self.helpers.swapRemove(k);
@@ -1997,9 +2156,13 @@ fn budgetReason(reason: []const u8) bool {
     return std.mem.startsWith(u8, reason, "group:");
 }
 
-/// Interval between run samples.
+/// How much of the start of a version command's output `versions.json` keeps.
+const version_output_max = 4096;
+
 /// How much of the end of each diagnostics file a failed attempt keeps.
 const diagnostics_max = 64 * 1024;
+
+/// Interval between run samples.
 const sample_interval_ns: i128 = 5 * std.time.ns_per_s;
 
 fn groupIndex(wf: *const workflow.Workflow, name: []const u8) usize {
@@ -2172,6 +2335,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .launch = launch.id,
         .workflow = wf.path,
         .workflow_sha256 = &sys.sha256Bytes(wf.source),
+        .workflow_name = wf.name,
+        .workflow_version = wf.version,
         .workdir = wf.root,
         .started = try records.timeText(a, sys.realNs()),
         .max_threads = max_threads,
@@ -2474,7 +2639,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             engine.checkTimers();
         }
     };
+    engine.awaitVersions(10);
     engine.awaitHelpers(engine.opts.grace_s + 10);
+    engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{@errorName(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
     // their outputs would not match the inputs recorded in their key. A

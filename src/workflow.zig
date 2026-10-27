@@ -31,6 +31,9 @@ pub const Rule = struct {
     /// log; their tails are kept with a failed attempt. Not part of the key.
     diagnostics: []const []const u8 = &.{},
     diagnostics_abs: []const []const u8 = &.{},
+    /// A command that prints the version of the rule's tool, run once per
+    /// launch in the rule's image or on the host; not part of the key.
+    version: ?[]const u8 = null,
     retries: ?u32,
     timeout_s: ?u64,
     /// Hash outputs after success so consumers are reused when they repeat.
@@ -184,7 +187,7 @@ const workflow_keys = [_][]const u8{ "name", "version", "description", "author",
 const default_keys = [_][]const u8{ "threads", "memory" };
 const group_keys = [_][]const u8{"max"};
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics" };
+const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -608,6 +611,8 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         var input = try p.strings(r, "input", &at, name);
         const output = try p.strings(r, "output", &at, name);
         const diagnostics = try p.strings(r, "diagnostics", &at, name);
+        const version = try p.str(r, "version", &at, name);
+        if (version) |v| if (std.mem.trim(u8, v, " \t\n").len == 0) return p.failKey(&at, "version", "rule {s}: version must be a command, such as \"STAR --version\"", .{name});
         const mounts = try p.imageMounts(r, &at, "rule", name, root);
         if (mounts.len > 0) {
             // Each mount source is also an input of the rule.
@@ -749,6 +754,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
             .diagnostics = diagnostics,
             .diagnostics_abs = try absAll(arena, root, diagnostics),
+            .version = version,
             .retries = retries,
             .timeout_s = timeout_s,
             .cutoff = (try p.boolean(r, "cutoff", &at, name)) orelse false,

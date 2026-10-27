@@ -21,3 +21,4 @@ pub const report = @import("report.zig");
 pub const model = @import("model.zig");
 pub const units = @import("units.zig");
 pub const container = @import("container.zig");
+pub const methods = @import("methods.zig");

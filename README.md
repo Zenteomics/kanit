@@ -11,6 +11,7 @@ workz runs a prepared graph of file-producing rules on one Linux workstation. It
 - **Shared indexes.** A large index is loaded once and counted once in memory, as mapped files or as a container service such as a STAR genome in shared memory.
 - **Containers.** Rules can run in local images through rootless Podman, inside the same limits and records.
 - **Answers, not logs.** A live terminal view, per-attempt reports, the critical path, waiting by reason, time per step, sample, category and tool, request suggestions, launch comparisons and a self-contained HTML report.
+- **Citable results.** `workz report --methods` names the workflow, engine, each tool with its version and image, and each step's request and command behind the results in a working directory.
 
 ## Requirements
 
