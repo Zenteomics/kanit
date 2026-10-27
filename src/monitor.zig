@@ -403,6 +403,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
     defer arena.deinit();
     const a = arena.allocator();
     const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+    const ChangedOutput = struct { rule: []const u8, path: []const u8 };
     var failures: std.ArrayList(Failure) = .empty;
     for (tr.rules.items) |r| switch (r.status) {
         .failed, .blocked, .cancelled => try failures.append(a, .{
@@ -417,6 +418,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
     const pending = tr.count(.pending);
     const doc = .{
         .engine = tr.engine,
+        .engine_key = tr.engine_key,
         .launch = std.fs.path.basename(dir),
         .status = "running",
         .counts = .{
@@ -437,7 +439,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
         .engine_cost = @as(?u8, null),
         .launch_dir = dir,
         .failures = failures.items,
-        .changed_outputs = &[_]u8{},
+        .changed_outputs = @as([]const ChangedOutput, &.{}),
     };
     var w: std.Io.Writer.Allocating = .init(gpa);
     defer w.deinit();

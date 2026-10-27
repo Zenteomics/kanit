@@ -149,6 +149,7 @@ pub const Tracker = struct {
     group_waits: std.ArrayList(GroupWait) = .empty,
     /// The engine that ran the launch, with its digest, from `launch.json`.
     engine: []const u8 = "",
+    engine_key: ?i64 = null,
     /// The open group wait of each rule, by rule index.
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
@@ -163,6 +164,7 @@ pub const Tracker = struct {
             if (std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always })) |v| {
                 if (str(v, "workdir")) |wd| t.workdir_name = std.fs.path.basename(wd);
                 if (str(v, "engine")) |e| t.engine = e;
+                t.engine_key = int(v, "engine_key");
             } else |_| {}
         } else |_| {}
         return t;
