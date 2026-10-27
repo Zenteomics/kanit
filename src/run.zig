@@ -208,7 +208,11 @@ const HolderState = enum { idle, loading, ready, stopping, failed };
 
 const Holder = struct {
     bytes: u64,
+    /// What it holds: a service's declared memory, its limit, or the pages
+    /// of mapped files.
     mib: u64,
+    /// What it takes from the budget: `mib`, and a service's Podman client.
+    reserve_mib: u64,
     users: u32 = 0,
     st: HolderState = .idle,
     pid: linux.pid_t = 0,
@@ -599,10 +603,10 @@ const Engine = struct {
         // together, as with one-thread rules and the default --jobs, the
         // reason names the resource.
         if (self.threads_used + r.threads > self.max_threads) return "threads";
-        var mem = r.memory_mib;
+        var mem = reservedMib(r);
         for (r.shared_index) |hi| {
             const h = &self.holders[hi];
-            if (!h.held) mem += h.mib;
+            if (!h.held) mem += h.reserve_mib;
         }
         if (self.memory_used - freed_mib + mem > self.max_memory) return "memory";
         if (self.jobs_used + 1 > self.max_jobs) return "jobs";
@@ -657,11 +661,11 @@ const Engine = struct {
         if (take) {
             self.jobs_used += 1;
             self.threads_used += r.threads;
-            self.memory_used += r.memory_mib;
+            self.memory_used += reservedMib(r);
         } else {
             self.jobs_used -= 1;
             self.threads_used -= r.threads;
-            self.memory_used -= r.memory_mib;
+            self.memory_used -= reservedMib(r);
             self.freed_ns = sys.monoNs();
         }
         for (r.groups) |gu| {
@@ -697,7 +701,7 @@ const Engine = struct {
             var failure: ?[]const u8 = null;
             for (r.shared_index) |hi| {
                 const h = &self.holders[hi];
-                if (!h.held) self.memory_used += h.mib;
+                if (!h.held) self.memory_used += h.reserve_mib;
                 h.held = true;
                 h.users += 1;
                 if (h.st == .failed and h.failure != null) failure = h.failure;
@@ -1189,7 +1193,7 @@ const Engine = struct {
         if (h.pid > 0 and (h.st == .loading or h.st == .ready)) {
             self.stopHolder(h);
         } else if (h.pid == 0 and h.held) {
-            self.memory_used -= h.mib;
+            self.memory_used -= h.reserve_mib;
             self.freed_ns = sys.monoNs();
             h.held = false;
         }
@@ -1201,7 +1205,7 @@ const Engine = struct {
         for (self.holders, 0..) |h, hi| {
             if (h.users > 0 or !h.held or h.st == .stopping) continue;
             const uses = std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null;
-            if (!uses) mib += h.mib;
+            if (!uses) mib += h.reserve_mib;
         }
         return mib;
     }
@@ -1247,7 +1251,7 @@ const Engine = struct {
         }
         const peak = if (counters) |c| c.memory_peak else null;
         if (h.held and h.users == 0) {
-            self.memory_used -= h.mib;
+            self.memory_used -= h.reserve_mib;
             self.freed_ns = sys.monoNs();
             h.held = false;
         }
@@ -1976,6 +1980,17 @@ const Engine = struct {
     }
 };
 
+/// Memory a container rule or service needs beside its request: its
+/// `podman run` client and conmon, which run in the launch's shared
+/// containers cgroup and take about 20 MiB together.
+pub const container_client_mib: u64 = 32;
+
+/// What admission reserves for rule `r`: its request, and for a container
+/// rule its Podman client's memory.
+fn reservedMib(r: *const workflow.Rule) u64 {
+    return r.memory_mib + if (r.container != null) container_client_mib else 0;
+}
+
 /// A wait for a part of the budget, which ends when the budget gets it back.
 fn budgetReason(reason: []const u8) bool {
     for ([_][]const u8{ "jobs", "threads", "memory" }) |r| if (std.mem.eql(u8, reason, r)) return true;
@@ -2177,14 +2192,16 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // Budget and input checks.
     var holders = try a.alloc(Holder, wf.shared.len);
     for (wf.shared, 0..) |s, i| {
-        // A service holds its declared memory; mapped files hold their pages.
+        // A service holds its declared memory, and its Podman client takes
+        // more of the budget; mapped files hold their pages.
         if (s.memory_mib) |mib| {
-            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib };
+            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
             continue;
         }
         const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err|
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, @errorName(err) }));
-        holders[i] = .{ .bytes = bytes, .mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable };
+        const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
+        holders[i] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
     }
     var produced: std.StringHashMapUnmanaged(void) = .empty;
     defer produced.deinit(gpa);
@@ -2195,12 +2212,21 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     defer ids.deinit();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
-        var need = r.memory_mib;
-        for (r.shared_index) |hi| need += holders[hi].mib;
+        var need = reservedMib(&r);
+        for (r.shared_index) |hi| need += holders[hi].reserve_mib;
         if (r.threads > max_threads)
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower the rule's threads", .{ r.name, r.threads, max_threads }));
-        if (need > max_memory)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, max_memory }));
+        if (need > max_memory) {
+            const with: []const u8 = if (r.shared_index.len > 0 and r.container != null)
+                " with its shared inputs and its Podman client"
+            else if (r.shared_index.len > 0)
+                " with its shared inputs"
+            else if (r.container != null)
+                " with its Podman client"
+            else
+                "";
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB{s}; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, with, max_memory }));
+        }
         for (r.input_abs, r.input) |in, written| {
             if (produced.contains(in)) continue;
             if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));

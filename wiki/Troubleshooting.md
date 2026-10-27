@@ -45,7 +45,7 @@ workz: typo.toml: line 9: unknown key 'memroy' in a rule; did you mean 'memory'?
 
 A refused launch stops before any rule runs. It still leaves a launch directory and a summary with status `refused` and the reason, which `workz status` shows.
 
-- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB with its shared inputs; the run allows M MiB`: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request. A rule's memory need includes the shared inputs it uses.
+- `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB; the run allows M MiB`, which says `with its shared inputs` or `with its Podman client` where they count: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request. A rule's memory need includes the shared inputs it uses and, for a container rule, 32 MiB for its Podman client.
 
 - `missing input of rule NAME: PATH`: An input that no rule produces does not exist. Create it, fix the path, or add the rule that makes it.
 

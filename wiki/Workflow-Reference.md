@@ -182,4 +182,4 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 - An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `workz plan` shows `input missing: PATH`.
 - The path of every shared file input must exist and be readable; otherwise `workz run` refuses with `shared input NAME (PATH): ...`.
 - Every container image must be available locally; otherwise `workz run` refuses with `container image NAME is not available locally; workz does not pull images`.
-- Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB with its shared inputs; the run allows M MiB`.
+- Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.

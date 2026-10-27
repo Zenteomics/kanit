@@ -300,6 +300,20 @@ wait $engine 2>/dev/null
 "$workz" clean -d . > clean.txt
 check "clean removes a container left by a killed engine" 'grep -q "removed 1 container(s)" clean.txt && [ "$(leftovers)" = 0 ]'
 
+# Two 64 MiB container rules need 2 x (64 + 32) MiB with their Podman clients.
+new container-budget
+{ header container-budget
+  crule c1 '[]' '["c1.txt"]' '"sleep 1; touch c1.txt"'
+  crule c2 '[]' '["c2.txt"]' '"sleep 1; touch c2.txt"'
+} > wf.toml
+"$workz" run wf.toml --max-threads 2 --max-memory 191M -q > s1.json
+waits1=$(grep -c '"reason":"memory"' "$(last_launch)/events.jsonl")
+"$workz" run wf.toml --max-threads 2 --max-memory 192M --rerun -q > s2.json
+waits2=$(grep -c '"reason":"memory"' "$(last_launch)/events.jsonl")
+"$workz" run wf.toml --max-threads 2 --max-memory 95M --rerun -q > s3.json 2> err3.txt
+rc=$?
+check "admission counts each container rule's Podman client in the memory budget" '[ "$(status_of s1.json completed)" = 2 ] && [ "$waits1" = 1 ] && [ "$(status_of s2.json completed)" = 2 ] && [ "$waits2" = 0 ] && [ $rc = 2 ] && grep -q "rule c1 needs 96 MiB with its Podman client; the run allows 95 MiB" err3.txt'
+
 # ---------------------------------------------------------------- shared services
 # srule NAME INPUTS OUTPUTS SHELL SERVICE: a container rule that joins SERVICE.
 srule() { crule "$1" "$2" "$3" "$4"; printf 'shared = ["%s"]\n\n' "$5"; }
@@ -315,7 +329,7 @@ new service
   srule u2 '[]' '["u2.txt"]' '"ipcs -m > u2.txt"' seg
   srule u3 '["u1.txt", "u2.txt"]' '["u3.txt"]' '"ipcs -m > u3.txt"' seg
 } > wf.toml
-"$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s1.json
+"$workz" run wf.toml --max-threads 4 --max-memory 360M -q > s1.json
 log=$(ls "$(last_launch)"/shared/seg-1.stderr.log)
 check "rules joining a service see the System V segment it created" '[ "$(status_of s1.json completed)" = 3 ] && grep -q " 67108864 " u1.txt && grep -q " 67108864 " u2.txt && grep -q " 67108864 " u3.txt'
 check "a service is loaded once for users that start at different times" '[ "$(loads)" = 1 ]'
@@ -324,7 +338,7 @@ check "the service command's output goes to its log, not the readiness line" 'gr
 check "a released service leaves no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && no_cgroups'
 "$workz" report -d . --bottlenecks > report.txt
 check "the report sizes a service by what it held" 'awk '"'"'$1 == "seg" && $2 == "service" && $3 == 1 { found = 1 } END { exit !found }'"'"' report.txt'
-"$workz" run wf.toml --max-threads 4 --max-memory 300M -q > s2.json
+"$workz" run wf.toml --max-threads 4 --max-memory 360M -q > s2.json
 check "rules joining a service are reused without starting it" '[ "$(status_of s2.json reused)" = 3 ] && [ "$(loads)" = 0 ]'
 sed -i 's/echo loaded/echo loaded again/' wf.toml
 "$workz" plan wf.toml > plan.txt
@@ -363,7 +377,7 @@ new service-gap
   srule u2 '["big.txt"]' '["u2.txt"]' '"touch u2.txt"' seg
 } > wf.toml
 sed -i '/name = "big"/,/memory/ s/memory = "64M"/memory = "128M"/' wf.toml
-timeout 60 "$workz" run wf.toml --max-threads 4 --max-memory 220M -q > s.json
+timeout 60 "$workz" run wf.toml --max-threads 4 --max-memory 270M -q > s.json
 check "an idle service gives its memory to a rule that needs it, and starts again later" '[ "$(status_of s.json completed)" = 3 ] && [ "$(loads)" = 2 ] && [ "$(leftovers)" = 0 ]'
 
 new service-retry

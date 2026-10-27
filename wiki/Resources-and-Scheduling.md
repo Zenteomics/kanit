@@ -23,7 +23,7 @@ workz: rule assemble requests 32 threads; the run allows 8: raise --max-threads,
 A rule is ready when every rule that produces one of its inputs has completed. A ready rule starts when all of these fit, checked in this order:
 
 1. Its threads fit in the threads not reserved by running rules.
-2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory.
+2. Its memory, plus the memory of any of its shared inputs not yet loaded, fits in the free memory. A container rule also reserves 32 MiB for its Podman client ([Containers](Containers-and-Services.md#container-rules)).
 3. One more job fits under `--jobs`.
 4. For each resource group it uses, its units fit in the group's free capacity.
 

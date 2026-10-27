@@ -11,6 +11,10 @@ All notable changes to workz will be documented in this file. The format follows
 - **Failures you can read.** A rule may name `diagnostics`, files such as STAR's `Log.out` where a tool writes why it failed. A failed attempt keeps the last 64 KiB of each in its `diagnostics/` directory; the terminal, `status`, `workz logs` and the HTML page show them, and the failure reason quotes the first one when standard error is empty. `record.json` and the summary's `failures` list them.
 - **Disk you can reclaim.** `workz clean --previous` removes the earlier outputs that reruns moved into attempts' `previous/` directories, often the largest files in `.workz/`, and keeps the rest of each launch. `run` and `status` say how much a launch kept, the summary counts it in `previous_bytes`, and the `output_preserved` event adds `bytes`.
 
+### Changed
+
+- **Containers inside the budget.** Each running container rule and service reserves 32 MiB of the memory budget for its Podman client and conmon, which run beside the container and take about 20 MiB; before, they shared the engine's 256 MiB of headroom, which 16 container rules at once outgrew. A container rule whose request is within 32 MiB of `--max-memory` is now refused before the launch, and fewer container rules may run at once on a tight budget. The refusal names what a rule's memory need includes.
+
 ### Removed
 
 - A resource group no longer takes a `wait` key. Its only accepted value, `"queue"`, described how every group works; delete the line where a workflow has it.
