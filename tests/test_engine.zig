@@ -136,3 +136,62 @@ test "removing a launch directory does not follow symlinks out of it" {
     try testing.expect(!sys.exists(testing.allocator, gone));
     try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "keep/precious" })));
 }
+
+test "[unit] - [views]: focus expressions name a rule and its depths" {
+    const Focus = workz.views.Focus;
+    const up = Focus.parse("+align").?;
+    try testing.expectEqualStrings("align", up.rule);
+    try testing.expectEqual(@as(?u32, Focus.all), up.up);
+    try testing.expectEqual(@as(?u32, null), up.down);
+    const down = Focus.parse("align+2").?;
+    try testing.expectEqual(@as(?u32, 2), down.down);
+    try testing.expectEqual(@as(?u32, null), down.up);
+    const both = Focus.parse("1+align+").?;
+    try testing.expectEqual(@as(?u32, 1), both.up);
+    try testing.expectEqual(@as(?u32, Focus.all), both.down);
+    try testing.expect(Focus.parse("align") == null);
+    try testing.expect(Focus.parse("+") == null);
+}
+
+test "[unit] - [views]: steps collapse samples, and a shared input shows what loads and joins it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[shared.genome]\npath = \"ref\"\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\n\n" ++
+        "[[rules]]\nname = \"index\"\noutput = [\"ref/SA\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S1__align\"\noutput = [\"S1.bam\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"genome\"]\n" ++
+        "[[rules]]\nname = \"S2__align\"\noutput = [\"S2.bam\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"genome\"]\n" ++
+        "[[rules]]\nname = \"report\"\ninput = [\"S1.bam\", \"S2.bam\"]\noutput = [\"r.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+
+    const steps = try workz.views.build(a, &wf, &g, mask, .{ .layer = .resources, .by_step = true });
+    var kinds = [_]usize{0} ** 5;
+    for (steps.nodes) |n| kinds[@intFromEnum(n.kind)] += 1;
+    try testing.expectEqual(@as(usize, 3), kinds[@intFromEnum(workz.views.NodeKind.step)]);
+    try testing.expectEqual(@as(usize, 1), kinds[@intFromEnum(workz.views.NodeKind.shared)]);
+    var loads: usize = 0;
+    var joins: usize = 0;
+    for (steps.edges) |e| switch (e.kind) {
+        .loads => loads += 1,
+        .joins => joins += 1,
+        else => {},
+    };
+    try testing.expectEqual(@as(usize, 1), loads);
+    try testing.expectEqual(@as(usize, 1), joins);
+
+    const users = try workz.views.build(a, &wf, &g, mask, .{ .users = "genome" });
+    try testing.expectEqual(@as(usize, 4), users.nodes.len);
+
+    const path = try workz.views.whyPath(a, &wf, &g, "index", "report");
+    try testing.expectEqual(@as(usize, 3), path.len);
+    try testing.expectEqualStrings("report", wf.rules[path[2]].name);
+    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, "report", "index"));
+}

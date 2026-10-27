@@ -161,6 +161,8 @@ new dir-input
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 check "a rule reading a directory waits for the rules writing inside it" '[ "$(status_of s.json completed)" = 2 ] && [ "$(cat n.txt)" = 1 ]'
+"$workz" graph wf.toml --why write:read --format text > why.txt
+check "graph --why follows one path, naming the file each rule reads" '[ "$(cat why.txt)" = "$(printf "write\n  -> read  (reads d)")" ]'
 
 new workdir
 mkdir data && echo hello > data/in.txt
@@ -428,6 +430,9 @@ check "a rebuilt service index runs the rules that join it again, after the rule
 ev="$(last_launch)/events.jsonl"
 "$workz" report wf.toml --bottlenecks > bottlenecks.txt
 check "records name the shared input each attempt held and the attempts each holder served" 'jq -e "select(.event == \"task_started\" and .rule == \"use\") | .shared == [\"ix\"]" "$ev" > /dev/null && jq -e "select(.event == \"shared_released\") | .users == 1 and .held_s > 0" "$ev" > /dev/null && grep -q "^  ix  *service  *1  *1 " bottlenecks.txt'
+"$workz" graph wf.toml --users ix --format text > users.txt
+"$workz" graph wf.toml --layer all --format json > graph.json
+check "graph shows a shared input with what writes it and what uses it" 'grep -q "^shared ix  service, 64 MiB held once, idx$" users.txt && grep -q "^  loaded from build$" users.txt && grep -q "^  used by use$" users.txt && [ "$(jq -c "[.elements.edges[].data.kind] | unique" graph.json)" = "[\"consumes\",\"joins\",\"loads\",\"produces\",\"within\"]" ]'
 
 new service-retry
 { header service-retry

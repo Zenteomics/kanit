@@ -48,10 +48,24 @@ Shows one rule's decision. For a rule that has a record and whose producers do n
 ## graph
 
 ```text
-workz graph [WORKFLOW]
+workz graph [WORKFLOW] [options]
 ```
 
-Prints the selected rules and their dependencies in Graphviz DOT form, one box per rule and one edge per dependency, for Graphviz or any other DOT viewer to draw.
+Shows the selected rules and what links them, in layers: as text on a terminal, Graphviz DOT when the output goes to a file or a pipe, or JSON ([Writing workflows](Writing-Workflows.md#seeing-the-graph)).
+
+| Option     | Argument | Default | Meaning                                         |
+| ---------- | -------- | ------- | ----------------------------------------------- |
+| `--layer`  | LAYER    | `rules` | `rules`, `files`, `resources` or `all`          |
+| `--by`     | `step`   |         | one node per step instead of per rule           |
+| `--focus`  | EXPR     |         | a rule with its upstream or downstream rules    |
+| `--why`    | FROM:TO  |         | one path of rules from FROM to TO               |
+| `--users`  | NAME     |         | a shared input, its writers and its users       |
+| `--format` | FORMAT   | text    | `text`, `dot` or `json`; `dot` off a terminal   |
+
+- `rules` links each rule to the rules that read its outputs, naming the file; `files` puts the files between them, with each written file inside a directory input linked to it; `resources` adds each shared input, the rules that write what a service loads (`loads`) and the rules that map or join it, and each resource group with the units its rules take; `all` is `files` and `resources`.
+- `--focus +RULE` keeps RULE and every rule it depends on, `RULE+` the rules depending on it, `+RULE+` both, and a number limits the levels: `2+RULE`, `RULE+1`.
+- Give at most one of `--focus`, `--why` and `--users`. `--why` exits 1 when no path leads from FROM to TO.
+- JSON follows the Cytoscape elements shape: `{"elements": {"nodes": [{"data": ...}], "edges": [{"data": ...}]}}`, each node with `id`, `kind` (`rule`, `step`, `file`, `shared`, `group`) and `label`, each edge with `source`, `target` and `kind` (`input`, `produces`, `consumes`, `within`, `maps`, `joins`, `loads`, `takes`).
 
 ## run
 

@@ -105,14 +105,30 @@ const commands = [_]Command{
     },
     .{
         .name = "graph",
-        .args = "[WORKFLOW]",
-        .summary = "print the selected rules and their dependencies as DOT",
+        .args = "[WORKFLOW] [options]",
+        .summary = "show the rule graph in layers: rules, files, shared inputs",
         .group = .write,
         .about =
-        \\Prints the selected rules in Graphviz DOT form: one box per rule and one edge
-        \\from each producer to each rule that reads its output.
+        \\Shows the selected rules and what links them: as text on a terminal, as
+        \\Graphviz DOT otherwise, or as JSON. The rules layer shows which rule feeds
+        \\which and through what file; the files layer puts the files between them; the
+        \\resources layer adds each shared input, held once, with the rules that write
+        \\what it loads and the rules that use it, and the resource groups.
         ,
-        .examples = "workz graph workflow.toml > graph.dot",
+        .options = &.{
+            .{ .flag = "--layer LAYER", .desc = "rules, files, resources or all (default: rules)" },
+            .{ .flag = "--by step", .desc = "one node per step instead of per rule" },
+            .{ .flag = "--focus EXPR", .desc = "+RULE upstream, RULE+ downstream, 2+RULE two levels" },
+            .{ .flag = "--why FROM:TO", .desc = "one path of rules from FROM to TO" },
+            .{ .flag = "--users NAME", .desc = "a shared input, what writes it and what uses it" },
+            .{ .flag = "--format FORMAT", .desc = "text, dot or json (default: text on a terminal)" },
+        },
+        .examples =
+        \\workz graph --layer resources --by step
+        \\workz graph --users genome
+        \\workz graph --why trim_S1:report
+        \\workz graph --focus +report --format dot > report.dot
+        ,
     },
     .{
         .name = "run",
@@ -490,7 +506,7 @@ pub fn main(init: std.process.Init) !u8 {
     const code: Exit = if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
         try out(init.io, "workz {s}\n", .{workz.version});
         break :blk .ok;
-    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest, false) else if (eq(u8, cmd, "graph")) try cmdValidate(ctx, rest, true) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
+    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
     return @intFromEnum(code);
 }
 
@@ -668,22 +684,87 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     return .{ .wf = wf, .g = g, .mask = mask };
 }
 
-fn cmdValidate(c: Ctx, args: []const [:0]const u8, dot: bool) !Exit {
+fn cmdValidate(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     if (try parseArgs(c, args, &common, NoExtra{})) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
-    if (dot) {
-        var buf: [8192]u8 = undefined;
-        var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-        try graph.writeDot(&w.interface, &l.wf, &l.g, l.mask);
-        try w.interface.flush();
-        return .ok;
-    }
     var selected: usize = 0;
     for (l.mask) |m| selected += @intFromBool(m);
     try out(c.io, "valid: {s} ({d} rules, {d} selected, {d} groups, {d} shared)\n", .{ l.wf.name, l.wf.rules.len, selected, l.wf.groups.len, l.wf.shared.len });
+    return .ok;
+}
+
+const GraphExtra = struct {
+    opts: *workz.views.Options,
+    format: *?workz.views.Format,
+    fn option(self: GraphExtra, arg: []const u8, value: ?[]const u8) !usize {
+        const eq = std.mem.eql;
+        if (eq(u8, arg, "--by")) {
+            const v = value orelse return missingValue(arg);
+            if (!eq(u8, v, "step")) return invalidValue(arg, v, "use step");
+            self.opts.by_step = true;
+            return 2;
+        }
+        if (eq(u8, arg, "--layer")) {
+            const v = value orelse return missingValue(arg);
+            self.opts.layer = std.meta.stringToEnum(workz.views.Layer, v) orelse return invalidValue(arg, v, "use rules, files, resources or all");
+            return 2;
+        }
+        if (eq(u8, arg, "--format")) {
+            const v = value orelse return missingValue(arg);
+            self.format.* = std.meta.stringToEnum(workz.views.Format, v) orelse return invalidValue(arg, v, "use dot, json or text");
+            return 2;
+        }
+        if (eq(u8, arg, "--focus")) {
+            const v = value orelse return missingValue(arg);
+            self.opts.focus = workz.views.Focus.parse(v) orelse return invalidValue(arg, v, "use +RULE, RULE+, +RULE+, or a depth such as 2+RULE");
+            return 2;
+        }
+        if (eq(u8, arg, "--why")) {
+            const v = value orelse return missingValue(arg);
+            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return invalidValue(arg, v, "use FROM:TO, two rule names");
+            self.opts.why = .{ v[0..colon], v[colon + 1 ..] };
+            return 2;
+        }
+        if (eq(u8, arg, "--users")) {
+            self.opts.users = value orelse return missingValue(arg);
+            return 2;
+        }
+        return 0;
+    }
+};
+
+fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
+    var common: Common = .{};
+    var opts: workz.views.Options = .{};
+    var format: ?workz.views.Format = null;
+    if (try parseArgs(c, args, &common, GraphExtra{ .opts = &opts, .format = &format })) |e| return e;
+    if (extraArgs(c, &common)) |e| return e;
+    if (@as(u8, @intFromBool(opts.focus != null)) + @intFromBool(opts.why != null) + @intFromBool(opts.users != null) > 1)
+        return fail("choose one of --focus, --why and --users", .{});
+    var l = (try load(c, &common)) orelse return .usage;
+    defer l.deinit();
+    // A terminal gets text; a file or a pipe gets DOT, for Graphviz.
+    const kind = format orelse if (term.isTerminal(1)) workz.views.Format.text else .dot;
+    var text: std.Io.Writer.Allocating = .init(c.gpa);
+    defer text.deinit();
+    const v = workz.views.build(c.a, &l.wf, &l.g, l.mask, opts) catch |err| switch (err) {
+        error.UnknownRule => return fail("no rule named {s} in {s}", .{ if (opts.focus) |f| f.rule else if (opts.why) |p| if (l.wf.ruleIndex(p[0]) == null) p[0] else p[1] else "?", l.wf.path }),
+        error.UnknownShared => return fail("no shared input named {s} in {s}", .{ opts.users.?, l.wf.path }),
+        error.NoPath => return failed("{s} does not lead to {s}: no rule between them reads what the one before writes", .{ opts.why.?[0], opts.why.?[1] }),
+        else => return err,
+    };
+    switch (kind) {
+        .dot => try workz.views.writeDot(c.a, &text.writer, l.wf.name, v),
+        .json => try workz.views.writeJson(&text.writer, v),
+        .text => if (opts.why) |p|
+            try workz.views.writeWhy(&text.writer, &l.wf, &l.g, try workz.views.whyPath(c.a, &l.wf, &l.g, p[0], p[1]))
+        else
+            try workz.views.writeText(c.a, &text.writer, v),
+    }
+    try sys.writeAll(1, text.written());
     return .ok;
 }
 

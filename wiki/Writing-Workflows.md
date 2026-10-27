@@ -237,6 +237,39 @@ Paths in `input`, `output`, `log` and `benchmark` stay relative to the working d
 
 A rule with `container = "IMAGE"` runs its command inside a local image through rootless Podman, and container rules can share one loaded index through a service. [Containers and services](Containers-and-Services.md) covers both.
 
+## Seeing the graph
+
+`workz graph` shows what the file declares, in layers, so you can check a generated workflow before running it. On a small pipeline with two samples, an index built by a rule and loaded once by a service, and a disk group, the resources layer by step:
+
+```text
+$ workz graph --layer resources --by step
+index (1 rule)  8 threads, 32.0 GiB
+  before align
+trim (2 rules)  1 thread, 1.0 GiB
+  before align
+  takes 1 of group disk
+align (2 rules)  1 thread, 2.0 GiB
+  after index, trim
+  before report
+  joins shared genome
+report (1 rule)  1 thread, 1.0 GiB
+  after align
+shared genome  service, 30.0 GiB held once, ref/star
+  loaded from index
+  used by align
+group disk  max 2
+  taken by trim
+```
+
+Questions you can ask it:
+
+- Who writes and who uses a shared input: `workz graph --users genome`.
+- Why one rule waits for another: `workz graph --why S1__trim:report` prints the path and the file each step reads.
+- What a rule needs, or what needs it: `--focus +report`, `--focus index+`, or `--focus 1+report` for one level.
+- Every file between the rules: `--layer files`; everything at once: `--layer all`.
+
+Off a terminal it prints Graphviz DOT, so `workz graph --layer resources --by step > graph.dot` draws with `dot -Tsvg graph.dot > graph.svg`: rules and steps as boxes, files as notes, shared inputs as cylinders with their memory, groups as hexagons. `--format json` gives the same graph to other tools ([Command reference](Command-Reference.md#graph)).
+
 ## Checklist
 
 - Every file the command reads is in `input`; every file it must leave is in `output`.
@@ -244,4 +277,4 @@ A rule with `container = "IMAGE"` runs its command inside a local image through 
 - Multithreaded tools take `$WORKZ_THREADS`.
 - Requests come from a measured run, via `workz report --suggest`.
 - Large read-only indexes are shared inputs, and inputs too.
-- `workz validate` and `workz plan` pass before the first `workz run`.
+- `workz validate` and `workz plan` pass, and `workz graph` shows the links you meant, before the first `workz run`.

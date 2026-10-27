@@ -129,7 +129,7 @@ pub const Output = struct {
 /// The outputs strictly below directory `dir`, from outputs sorted by path:
 /// they start with "dir/", so they are the run that begins at the first
 /// path not sorting before "dir/".
-fn below(outputs: []const Output, dir: []const u8) []const Output {
+pub fn below(outputs: []const Output, dir: []const u8) []const Output {
     var lo: usize = 0;
     var hi: usize = outputs.len;
     while (lo < hi) {
@@ -209,21 +209,4 @@ pub fn select(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, tar
         try stack.appendSlice(gpa, g.parents[i]);
     }
     return mask;
-}
-
-/// Writes the selected graph in Graphviz DOT form.
-pub fn writeDot(w: *std.Io.Writer, wf: *const workflow.Workflow, g: *const Graph, mask: []const bool) !void {
-    // Rule names cannot hold quotes; the workflow name can.
-    try w.writeAll("digraph \"");
-    for (wf.name) |c| {
-        if (c == '"' or c == '\\') try w.writeByte('\\');
-        try w.writeByte(c);
-    }
-    try w.writeAll("\" {\n  rankdir=LR;\n  node [shape=box];\n");
-    for (g.order) |i| {
-        if (!mask[i]) continue;
-        try w.print("  \"{s}\";\n", .{wf.rules[i].name});
-        for (g.parents[i]) |p| try w.print("  \"{s}\" -> \"{s}\";\n", .{ wf.rules[p].name, wf.rules[i].name });
-    }
-    try w.writeAll("}\n");
 }
