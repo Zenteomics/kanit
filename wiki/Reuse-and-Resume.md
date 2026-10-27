@@ -46,7 +46,7 @@ For a colon-separated list such as `PATH` it names the entries added or removed,
 
 No other variable is part of the key. Host rules also receive `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM`, but a change to one of them reruns nothing; name a variable with `--pass-env` to pass it and key it. Everything else stays out of rules ([Running workflows](Running-Workflows.md#what-a-command-sees)).
 
-The engine key is 2 in workz 0.3.0. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; the version after 0.3.0 reruns every rule once, because file identities no longer include the device number.
+The engine key is 2 in workz 0.4.0. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action; 0.4.0 runs every rule once after 0.3.0, because file identities no longer include the device number.
 
 ## File identity
 

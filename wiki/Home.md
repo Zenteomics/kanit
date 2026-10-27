@@ -39,4 +39,4 @@ flowchart LR
 - Linux x86-64 with cgroup v2 and a systemd user manager; rootless Podman for container rules.
 - A rule runs again only when a part of its key changed (its command, environment, request, declared outputs, inputs, producers or the engine key), or when you ask with `--rerun-rule`; a changed output is never silently overwritten.
 - Each attempt's memory request is a hard limit enforced by its cgroup, and its CPU, memory and I/O use is recorded.
-- This guide follows the main branch: workz 0.3.0 and the changes listed under Unreleased in the changelog. Before 1.0, a minor version may change the workflow format, the records and the command line; the changelog in the repository lists every change.
+- This guide follows the main branch: workz 0.4.0 and the changes listed under Unreleased in the changelog. Before 1.0, a minor version may change the workflow format, the records and the command line; the changelog in the repository lists every change.

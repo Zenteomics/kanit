@@ -1,5 +1,5 @@
 //! workz: a local workflow engine for prepared rule graphs.
-pub const version = "0.3.0";
+pub const version = "0.4.0";
 pub const sys = @import("sys.zig");
 pub const workflow = @import("workflow.zig");
 pub const graph = @import("graph.zig");

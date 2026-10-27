@@ -84,7 +84,7 @@ A launch that completed lists its three slowest rules instead of failures. Off a
 While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state:
 
 ```json
-{"engine":"workz 0.3.0 sha256:...","engine_key":2,"launch":"20261026T221057.818-be24883d","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.979420178,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261026T221057.818-be24883d","failures":[],"changed_outputs":[]}
+{"engine":"workz 0.4.0 sha256:...","engine_key":2,"launch":"20261026T221057.818-be24883d","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.979420178,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261026T221057.818-be24883d","failures":[],"changed_outputs":[]}
 ```
 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:

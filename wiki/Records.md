@@ -37,7 +37,7 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 - `manifest`: the digests of input-manifest files, with the identity each was hashed at.
 - `envs`: the keyed environment of each recorded rule, for `explain` to name what changed.
 
-workz 0.3.0 reads the state of earlier versions. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+workz 0.4.0 reads the state of earlier versions. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
 ## Launch files
 
@@ -47,11 +47,11 @@ Written when the launch starts: `engine` (version and the executable's SHA-256),
 
 ### summary.json
 
-Written when the launch ends, and printed by `workz run` as one line. From the demo launch (path shortened, nested objects on one line):
+Written when the launch ends, and printed by `workz run` as one line. From the demo launch (path and digest shortened, nested objects on one line):
 
 ```json
 {
-  "engine": "workz 0.3.0 sha256:ef60a4197a46f99979fafbe8e00a286d4ab431e06e9751aff7ccd686b9065bfd",
+  "engine": "workz 0.4.0 sha256:...",
   "engine_key": 2,
   "launch": "20261027T025023.762-56876086",
   "status": "completed",
