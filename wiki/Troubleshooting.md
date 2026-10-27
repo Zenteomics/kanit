@@ -59,7 +59,7 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 A failure prints the reason and the path of the attempt's standard error. `workz logs NAME` prints the attempt's output, and `workz status` lists every failed rule of the newest launch.
 
-- `exited with status N`: The command failed. Its standard error says why.
+- `exited with status N: LINE`: The command failed, and LINE is the last line of its standard error, which usually says why; `workz logs NAME` prints the rest.
 
 - `out of memory: could not stay within its N MiB request`: The attempt needed more memory than it requested, and the kernel killed all of its processes. Raise `memory`, guided by `workz report --suggest` on attempts that completed.
 

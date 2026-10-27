@@ -128,7 +128,7 @@ const commands = [_]Command{
         .options = &.{
             .{ .flag = "--max-threads N", .desc = "CPU budget in threads (default: every online CPU)" },
             .{ .flag = "--max-memory SIZE", .desc = "memory budget, such as 60G (default: 3/4 of RAM)" },
-            .{ .flag = "-j, --jobs N", .desc = "at most N rules running at once (default: --max-threads)" },
+            .{ .flag = "-j, --jobs N", .desc = "at most N rules at once (default: --max-threads)" },
             .{ .flag = "-k, --keep-going", .desc = "keep running independent rules after a failure" },
             .{ .flag = "-r, --retry N", .desc = "retries of rules that set none, 0 to 3 (default: 0)" },
             .{ .flag = "--timeout DURATION", .desc = "time limit of rules that set none, such as 2h" },
@@ -183,7 +183,7 @@ const commands = [_]Command{
         .options = &.{
             .{ .flag = "--once", .desc = "print one plain view and exit" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
-            .{ .flag = "--interval MS", .desc = "refresh period in milliseconds, 100 or more (default: 1000)" },
+            .{ .flag = "--interval MS", .desc = "refresh period in ms, at least 100 (default: 1000)" },
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
@@ -202,6 +202,11 @@ const commands = [_]Command{
         \\ended. On a terminal the summary is a short readable report; elsewhere,
         \\and with --json, it is the launch's summary.json. While the launch runs, it
         \\prints a plain view, or as JSON the counts so far with status "running".
+        \\
+        \\--history counts, per launch, the rules DONE (completed or reused),
+        \\FAILED (failed or blocked) and CANCELLED (stopped or never started).
+        \\
+        \\status exits 0 whatever the outcome it shows; run exits 1 on a failure.
         ,
         .options = &.{
             .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default: 10)" },
@@ -247,13 +252,15 @@ const commands = [_]Command{
         \\Reports on the newest launch, or on --launch ID. Without a report option it
         \\prints one row per attempt: TSV by default, JSON with --format json, or the
         \\launch as one self-contained HTML page with --format html. --suggest prints
-        \\TSV or JSON; --bottlenecks and --compare print text.
+        \\a table on a terminal, TSV to a file or a pipe, or JSON; --bottlenecks and
+        \\--compare print text.
         ,
         .options = &.{
             .{ .flag = "--bottlenecks", .desc = "critical path, waiting, request sizing, utilization" },
             .{ .flag = "--suggest", .desc = "suggested threads and memory per step" },
-            .{ .flag = "--compare OTHER", .desc = "compare with a launch ID or directory, or a working directory" },
-            .{ .flag = "--format FORMAT", .desc = "tsv, json, or html for one self-contained page (default: tsv)" },
+            .{ .flag = "--compare OTHER", .desc = "compare with a launch ID, launch directory or workdir" },
+            .{ .flag = "--format FORMAT", .desc = "tsv, json or html, a self-contained page (default: tsv)" },
+            .{ .flag = "--json", .desc = "the same as --format json" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
             .{ .flag = "-o, --output FILE", .desc = "write to FILE instead of standard output" },
         },
@@ -363,7 +370,7 @@ fn optionNames(a: std.mem.Allocator, c: *const Command) ![]const []const u8 {
 
 /// The list of commands, grouped by job.
 fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
-    try w.print("{s}workz {s}{s} runs a prepared graph of file-producing rules on one Linux workstation.\n\n", .{ s.bold(), workz.version, s.reset() });
+    try w.print("{s}workz {s}{s} runs a prepared graph of file-producing rules on one Linux\nworkstation.\n\n", .{ s.bold(), workz.version, s.reset() });
     try w.print("{s}usage:{s} workz <command> [options]\n", .{ s.bold(), s.reset() });
     for (group_titles, 0..) |title, gi| {
         try w.print("\n{s}{s}:{s}\n", .{ s.bold(), title, s.reset() });
@@ -372,7 +379,7 @@ fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
             try w.print("  {s}{s:<12}{s}{s}\n", .{ s.cyan(), c.name, s.reset(), c.summary });
         }
     }
-    try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current directory.\n", .{default_workflow});
+    try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current\ndirectory.\n", .{default_workflow});
     try w.print("Run '{s}workz help COMMAND{s}' for a command's usage, options and examples.\n", .{ s.bold(), s.reset() });
 }
 
@@ -565,6 +572,11 @@ const Loaded = struct {
 
 fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
     const here = try sys.cwd(c.a);
+    // A WORKFLOW names its working directory, so it must exist.
+    if (common.workdir == null) if (common.workflow) |w| if (!sys.exists(c.gpa, w)) {
+        std.debug.print("workz: no workflow file {s}; -d DIR names a working directory\n", .{w});
+        return null;
+    };
     const given = if (common.workdir) |d| try sys.absolute(c.a, here, d) else if (common.workflow) |w| std.fs.path.dirname(try sys.absolute(c.a, here, w)) orelse "/" else here;
     return (try sys.realpath(c.a, given)) orelse {
         std.debug.print("workz: working directory does not exist: {s}\n", .{given});
@@ -617,7 +629,11 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     var unknown: ?[]const u8 = null;
     const mask = graph.select(c.a, &wf, &g, common.targets.items, &unknown) catch |err| switch (err) {
         error.UnknownTarget => {
-            std.debug.print("workz: unknown target '{s}'\n", .{unknown.?});
+            var names: std.ArrayList([]const u8) = .empty;
+            for (wf.rules) |r| try names.append(c.a, r.name);
+            if (workflow.closest(names.items, unknown.?)) |hint| {
+                std.debug.print("workz: unknown target '{s}'; did you mean '{s}'?\n", .{ unknown.?, hint });
+            } else std.debug.print("workz: unknown target '{s}': no rule of {s} has that name\n", .{ unknown.?, wpath });
             g.deinit();
             wf.deinit();
             return null;
@@ -789,8 +805,8 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     if (!ok) return fail("control needs: stop RULE, retry RULE, or cancel", .{});
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
-    const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}", .{rec});
-    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}", .{dir});
+    const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
+    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; workz run starts another", .{dir});
     if (words.items.len == 2) {
         var tr = try workz.tracker.Tracker.init(c.gpa, dir);
         defer tr.deinit();
@@ -816,7 +832,7 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
     const path = if (args.len == 1) args[0] else default_workflow;
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     try sys.writeFile(c.gpa, path, starter_workflow);
-    try out(c.io, "wrote {s}; edit it, then: workz validate {s}\n", .{ path, path });
+    try out(c.io, "wrote {s}; its example rules read data/reads.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
     return .ok;
 }
 
@@ -1001,7 +1017,7 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     if (history) |n| {
         const rec = try workz.records.recordsDir(c.a, root);
-        if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}", .{rec});
+        if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}; workz run starts one", .{rec});
         var buf: [16384]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
         try monitor.history(c.gpa, &w.interface, root, n);
@@ -1048,6 +1064,11 @@ const ReportExtra = struct {
             self.format.* = std.meta.stringToEnum(ReportFormat, v) orelse return invalidValue(arg, v, "use tsv, json or html");
             return 2;
         }
+        // As `run --json` and `status --json` print JSON.
+        if (std.mem.eql(u8, arg, "--json")) {
+            self.format.* = .json;
+            return 1;
+        }
         return 0;
     }
 };
@@ -1086,7 +1107,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         return fail("the HTML page is for a browser: write it with -o report.html, or redirect standard output", .{});
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
-    const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}", .{rec});
+    const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
@@ -1094,7 +1115,9 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     if (suggest) {
         var l = try workz.model.load(c.gpa, c.a, dir);
         defer l.deinit();
-        try report.writeSuggestions(w, &l, kind == .json);
+        // A terminal gets a table; a file or a pipe gets the TSV.
+        const table = kind == .tsv and output == null and term.isTerminal(1);
+        try report.writeSuggestions(w, &l, if (kind == .json) .json else if (table) .table else .tsv);
     } else if (compare) |other| {
         const base = (try resolveLaunch(c, rec, other)) orelse return failed("no launch found for {s}", .{other});
         try report.writeCompare(c.gpa, c.a, w, base, dir);
@@ -1102,8 +1125,11 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         try report.writeBottlenecks(c.gpa, c.a, w, dir);
     } else switch (kind) {
         .html => try workz.html.write(c.gpa, c.a, w, dir),
-        .json => try report.writeJson(c.a, w, try workz.model.attempts(c.gpa, c.a, dir)),
-        .tsv => try report.writeTsv(w, try workz.model.attempts(c.gpa, c.a, dir)),
+        .json, .tsv => {
+            const rows = try workz.model.attempts(c.gpa, c.a, dir);
+            if (kind == .json) try report.writeJson(c.a, w, rows) else try report.writeTsv(w, rows);
+            if (rows.len == 0) try noAttempts(c, rec, dir, launch == null);
+        },
     }
     if (output) |path| {
         sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, @errorName(err) });
@@ -1386,4 +1412,29 @@ fn hold(paths: []const [:0]const u8) Exit {
     const line = std.fmt.bufPrint(&buf, "ready {d}\n", .{total}) catch unreachable;
     _ = linux.write(1, line.ptr, line.len);
     while (true) _ = linux.pause();
+}
+
+/// Says on standard error why a launch has no attempts to report, and, for
+/// the newest launch, which launch last ran some.
+fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
+    const id = std.fs.path.basename(dir);
+    var why: []const u8 = "it ran no rule";
+    if (sys.readFile(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }), 1 << 20)) |text| {
+        defer c.gpa.free(text);
+        if (std.json.parseFromSliceLeaky(std.json.Value, c.a, text, .{ .allocate = .alloc_always })) |v| {
+            if (workz.fields.str(v, "error")) |e| why = try std.fmt.allocPrint(c.a, "it was {s}: {s}", .{ workz.fields.str(v, "status") orelse "stopped", e });
+        } else |_| {}
+    } else |_| {}
+    std.debug.print("workz: launch {s} has no attempts; {s}\n", .{ id, why });
+    if (!newest) return;
+    const names = try workz.records.launchNames(c.gpa, c.a, rec);
+    var k = names.len;
+    while (k > 0) {
+        k -= 1;
+        const attempts = try std.fs.path.join(c.a, &.{ rec, "launches", names[k], "attempts" });
+        const inside = (try sys.dirNames(c.gpa, c.a, attempts)) orelse continue;
+        if (inside.len == 0) continue;
+        std.debug.print("workz: the newest launch that ran attempts is {s}: workz report --launch {s}\n", .{ names[k], names[k] });
+        return;
+    }
 }

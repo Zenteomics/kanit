@@ -5,6 +5,17 @@ Reports look at a launch in two scopes:
 - **The pipeline**: the latest completed run of every rule, whether this launch ran it or reused it from an earlier launch. Steps, time per category, tool and sample, request suggestions and comparisons use it, so a launch that reran one script still describes the whole pipeline.
 - **The launch**: the attempts this launch started. The attempt table, the critical path, waiting for resources and the use of the budget use it.
 
+The reports use these terms:
+
+- **Attempt**: one run of a rule's command. A rule that is retried makes several in one launch.
+- **Waiting once ready**: the time from a rule's last producer ending to its start, by what it waited for: `threads`, `memory`, `jobs`, a group, `loading shared inputs`, or `starting` for the engine's own time after the budget had room.
+- **Held**: on the critical path, the time a rule waited after the rule before it on the path ended, for its other producers.
+- **Rule-seconds**: seconds added up over rules, so ten rules waiting for 3 s make 30 rule-seconds; divided by the elapsed time, the number of rules waiting on average.
+- **Bound**: a time the launch could not be shorter than, given the work its attempts did, such as its critical path or its reserved thread-seconds over the thread budget.
+- **CPU use**: CPU time over the thread-seconds reserved: 100% kept every requested thread busy.
+- **Idle**: an attempt that ran for half a second or more on almost none of its request, waiting or handing its work to a process outside its cgroup; its counters size nothing.
+- **Run sample**: what the engine records every 5 s while a launch runs: the threads and memory reserved, and the CPU and memory in use.
+
 ## What each attempt used
 
 `workz report` prints one row per attempt of the newest launch, or of `--launch ID`, as TSV:
@@ -39,6 +50,7 @@ trim_S4	2	completed	3.012	2.976	0.49	2	512	1.4	3.9	0.00	0	0	5.008	threads	0.001	
 | `category`, `tool` | text    | the rule's category and tool, or `-`       |
 
 - Stalls come from the kernel's pressure counters for the attempt's cgroup: the share of time some of its processes waited for CPU, memory or I/O.
+- Times have three decimals, in seconds; ratios four; memory one, in MiB. `--format json` keeps full precision.
 - A missing number is `NA`, which R and pandas read as missing; a missing text is `-`. For launches run with `--no-isolation`, `peak_mib`, `peak_per_request` and the stall columns are `NA`, and `oom_kills` and `limit_events` are 0.
 - `--format json` prints the same attempts as a JSON array with the same field names, numbers unrounded and `null` for no value, and two more fields: `started_ns`, the start in nanoseconds since the Unix epoch, and `directory`, the attempt's record directory.
 - `-o FILE` writes any report to a file instead of standard output.
@@ -118,7 +130,7 @@ use of the budget (run samples every 5 s)
 
 Read it from the top:
 
-- **What limited the launch.** Lower bounds on the elapsed time of the attempts the launch made, failed ones included: it could not be shorter than its critical path, the longest chain of work through the graph; nor than the work a limit of the budget carried divided by that limit, such as reserved thread-seconds over the thread budget, with memory counting shared inputs while they are held; nor than the CPU time its rules used over the threads; nor than the engine's own CPU time, as the engine works on one thread. The use column says how full each limit was on average. `>` marks the largest bound, and the last line says how far the launch ran over it; under the thread budget it also says how much of the reserved threads the rules kept busy, and which step left the most of its threads unused. A launch shorter than 2 s is not judged: starting and recording rules weigh too much in it. A launch close to a budget bound needs a larger budget, or less work, to finish sooner; one close to its critical path needs faster rules on the path; one far over every bound lost time to waits that the order of rules caused, as the critical path then shows.
+- **What limited the launch.** Lower bounds on the elapsed time of the attempts the launch made, failed ones included: it could not be shorter than its critical path, the longest chain of work through the graph; nor than the work a limit of the budget carried divided by that limit, such as reserved thread-seconds over the thread budget, with memory counting shared inputs while they are held; nor than the CPU time its rules used over the threads; nor than the engine's own CPU time, as the engine works on one thread. The use column says how full each limit was on average. `>` marks the largest bound, and the line under the launch line, at the top of the report, says how far the launch ran over it; under the thread budget it also says how much of the reserved threads the rules kept busy, and which step left the most of its threads unused. A launch shorter than 2 s is not judged: starting and recording rules weigh too much in it. A launch close to a budget bound needs a larger budget, or less work, to finish sooner; one close to its critical path needs faster rules on the path; one far over every bound lost time to waits that the order of rules caused, as the critical path then shows.
 - **Critical path.** The rules of the longest chain of work, each weighing every attempt it made, as retries run one after another; this is the chain the scheduler ranks rules by. `at` is when a rule first started, `waited` how long it was ready before it started, and `held` how long it waited, after the rule before it on the path ended, for producers off the path; a rule retried after a pause shows the time between its attempts. The summary line adds the time from the end of the path to the end of the launch, while rules off the path still ran: work, waits, holds, the time between attempts and that last stretch make up the elapsed time.
 - **Waiting for resources.** How many ready rules waited for each resource, on average over the launch, and the rule-seconds they waited added up, which can exceed the elapsed time.
 - **Resource groups.** For each group that held rules back, the share of the run samples, taken every 5 s while some rule waited for the group, in which the free threads and memory had room for one of the waiting rules; each sample counts once. With fewer than three samples it says they are too few to judge. From 25%, the report says a higher `max` would have started them earlier; below that, it says the budget was full and a higher `max` would not help much. Here it was 100%: the group alone held them back.
@@ -134,7 +146,7 @@ An attempt that completed after at least half a second while using under a tenth
 
 ## Request sizing
 
-`workz report --suggest` prints the suggested request for each step, for a workflow generator to apply:
+`workz report --suggest` prints the suggested request for each step: on a terminal as a table with units, and to a file or a pipe as this TSV, for a workflow generator to apply:
 
 ```text
 step	runs	threads	threads_used	suggest_threads	memory_mib	used_mib	used_basis	peak_mib	suggest_mib	note
@@ -193,7 +205,7 @@ The lines above the table give both budgets, and notes say when the budgets, the
 
 The sheet holds, in order:
 
-1. **Title block.** The launch's name, status, ID, start time and engine; the elapsed time and what limited it; the rules done, ran and reused; the pipeline's samples by steps; the CPU cores in use and peak memory against the budget; and the engine's own CPU time and memory. A launch error follows it.
+1. **Title block.** The launch's name, status, ID, start time and engine, with, under the status of a launch that did not complete, the reason it was refused or stopped or its first failure; the elapsed time and what limited it; the rules done, ran and reused; the pipeline's samples by steps; the CPU cores in use and peak memory against the budget; and the engine's own CPU time and memory. A launch error follows it.
 2. **FIG. 1, Pipeline.** A box for each step, in columns by graph depth, wired at right angles to the steps it reads from. Each box gives the step's tool, median wall time and rules done, and a cell for each rule in its state: done, reused, running, waiting for resources, not run, failed, blocked or cancelled. Hovering a cell names the rule.
 3. **FIG. 2, Where the CPU time went.** The CPU time as one bar split by category, or by step when no rule declares a category, then per tool.
 4. **FIG. 3, Samples by step**, when rules have samples. A row per sample and a column per step in pipeline order, with each sample's CPU time. Each cell is shaded by the run's wall time against the median of its step, so a dark cell is a slow sample in any column. `!` marks a run at least 1.5 times its median and 2 s longer, `x` a failed rule and `/` a blocked one. Rules without a sample share the last row.

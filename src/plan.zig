@@ -33,6 +33,8 @@ pub const Context = struct {
     pass_env: []const []const u8 = &.{},
     /// Per rule: key text beyond the command, as the run computes it.
     extras: []const []const u8 = &.{},
+    /// Outputs of the selected rules; any other input must exist already.
+    produced: std.StringHashMapUnmanaged(void) = .empty,
 
     pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8, environ: *const std.process.Environ.Map) !Context {
         return .{
@@ -55,6 +57,7 @@ pub const Context = struct {
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
         self.extras = try self.resolveExtras(mask);
+        for (self.wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try self.produced.put(self.a, o, {});
         const out = try self.a.alloc(Decision, self.wf.rules.len);
         for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
         for (self.g.order) |i| {
@@ -87,6 +90,12 @@ pub const Context = struct {
 
     fn decide(self: *Context, i: usize, prior: []const Decision) !Decision {
         const r = &self.wf.rules[i];
+        // An input that no selected rule produces must exist, or the run
+        // refuses to start.
+        for (r.input_abs, r.input) |in, written| {
+            if (self.produced.contains(in)) continue;
+            if ((try self.ids.get(in)) == null) return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{written}) };
+        }
         for (self.g.parents[i]) |p| if (prior[p].run) {
             const pr = &self.wf.rules[p];
             const reason = if (pr.cutoff)

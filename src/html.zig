@@ -202,7 +202,7 @@ const style =
     \\.strip{width:192px;height:26px;display:block}.strip circle{fill:var(--c1);stroke:var(--sheet);stroke-width:2}
     \\.strip circle.slow{fill:var(--warn)}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
     \\.failure{border:1px solid var(--hair);border-left:3px solid var(--fail);margin:10px 0}
-    \\.failure summary{cursor:pointer;padding:9px 13px}.failure .why{color:var(--ink)}
+    \\.failure summary{cursor:pointer;padding:9px 13px}.failure .why{color:var(--ink)}.cell .why{color:var(--fail);white-space:normal;overflow-wrap:anywhere}
     \\.failure.retried{border-left-color:var(--cancel)}
     \\pre{margin:0;padding:11px 13px;background:var(--wash);font:12px/1.5 var(--mono);overflow:auto;max-height:420px;white-space:pre-wrap;word-break:break-word}
     \\.failure pre{border-top:1px solid var(--hair)}
@@ -323,16 +323,45 @@ const Page = struct {
 
     // ---- title block ----
 
+    /// Under the status stamp of a launch that did not complete, why: the
+    /// reason it was refused or stopped, or its first failure and how many
+    /// more there were.
+    fn whyNotCompleted(self: Page) !void {
+        const w = self.w;
+        const l = self.l;
+        if (!l.finished or eql(u8, l.status, "completed")) return;
+        if (l.@"error") |e| {
+            try w.writeAll("<div class=\"sub why\">");
+            try escape(w, e);
+            return w.writeAll("</div>");
+        }
+        var first: ?model.Attempt = null;
+        var more: usize = 0;
+        for (l.rows) |r| {
+            if (r.completed() or eql(u8, r.status, "cancelled")) continue;
+            if (first == null) first = r else more += 1;
+        }
+        const f = first orelse return;
+        try w.writeAll("<div class=\"sub why\"><span class=\"mono\">");
+        try escape(w, f.rule);
+        try w.writeAll("</span>: ");
+        try escape(w, if (f.reason.len > 0) f.reason else f.status);
+        if (more > 0) try w.print("; {d} more {s}", .{ more, if (more == 1) "failure" else "failures" });
+        try w.writeAll("</div>");
+    }
+
     fn titleBlock(self: Page) !void {
         const w = self.w;
         const l = self.l;
         try w.writeAll("<header class=\"title\"><div class=\"row r1\"><div class=\"cell\"><span class=\"k\">workz &middot; launch report</span><h1>");
         try escape(w, l.name);
         try w.writeAll("</h1></div>\n<div class=\"cell\"><span class=\"k\">status</span>");
-        const tone: []const u8 = if (!l.finished) "s-run live" else if (eql(u8, l.status, "completed")) "s-ok" else if (eql(u8, l.status, "interrupted")) "s-cancel" else "s-fail";
+        const tone: []const u8 = if (!l.finished) "s-run live" else if (eql(u8, l.status, "completed")) "s-ok" else if (eql(u8, l.status, "interrupted") or eql(u8, l.status, "stopped")) "s-cancel" else "s-fail";
         try w.print("<span class=\"stamp {s}\">", .{tone});
         try escape(w, if (l.finished) l.status else "running");
-        try w.writeAll("</span></div>\n<div class=\"cell\"><span class=\"k\">launch</span><span class=\"mono\">");
+        try w.writeAll("</span>");
+        try self.whyNotCompleted();
+        try w.writeAll("</div>\n<div class=\"cell\"><span class=\"k\">launch</span><span class=\"mono\">");
         try escape(w, l.id);
         try w.writeAll("</span></div>\n<div class=\"cell\"><span class=\"k\">started</span>");
         if (l.started_text.len >= 19) {
@@ -367,6 +396,7 @@ const Page = struct {
         if (c.failed > 0) try w.print("; {d} failed", .{c.failed});
         if (c.blocked > 0) try w.print("; {d} blocked", .{c.blocked});
         if (c.cancelled + c.not_run > 0) try w.print("; {d} not run", .{c.cancelled + c.not_run});
+        if (eql(u8, l.status, "refused")) try w.writeAll("; the launch was refused, so none ran");
         try w.writeAll("</div></div>\n");
 
         // The pipeline's shape.
@@ -1212,7 +1242,7 @@ const Page = struct {
             } else try w.writeAll("(no standard error)");
             try w.writeAll("</pre></details>\n");
         }
-        if (shown == 0) try w.writeAll("<p class=\"muted\">Every attempt of this launch completed.</p>\n");
+        if (shown == 0) try w.writeAll(if (l.rows.len == 0) "<p class=\"muted\">No attempt ran in this launch.</p>\n" else "<p class=\"muted\">Every attempt of this launch completed.</p>\n");
         var blocked: usize = 0;
         for (l.rules) |r| blocked += @intFromBool(r.selected and r.state == .blocked);
         if (blocked > 0) try w.print("<p class=\"lead\">{d} {s} did not start because a producer failed.</p>\n", .{ blocked, if (blocked == 1) "rule was blocked: it" else "rules were blocked: they" });

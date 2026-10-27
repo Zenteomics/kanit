@@ -108,6 +108,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
+[0/4] budget 2 threads, 1.0 GiB, 2 jobs
 [0/4] page .workz/launches/20261026T221243.941-80c7a25e/report.html, drawn again every 5 s while the launch runs
 [0/4] started gc_s1 (attempt 1)
 [0/4] started gc_s2 (attempt 1)
@@ -120,7 +121,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 {"engine":"workz 0.3.0 sha256:3ac3...","engine_key":2,"launch":"20261026T221243.941-80c7a25e","status":"completed","counts":{"completed":4,...}
 ```
 
-The first line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here). Without `--max-threads` and `--max-memory`, the budget is every online CPU and three quarters of the machine's memory.
+The first line gives the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. The second line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here). Without `--max-threads` and `--max-memory`, the budget is every online CPU and three quarters of the machine's memory.
 
 ```sh
 cat summary.tsv
@@ -191,10 +192,11 @@ rule gc_s2: runs (inputs changed)
 The `was` and `now` lines are the file's [identity](Reuse-and-Resume.md#file-identity): inode, size, and modification and change times. workz notices a change without reading the file. Run again, and only the two rules run:
 
 ```sh
-workz run workflow.toml
+workz run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
+[0/4] budget 2 threads, 1.0 GiB, 2 jobs
 [0/4] page .workz/launches/20261026T221244.010-e42904d2/report.html, drawn again every 5 s while the launch runs
 [2/4] started gc_s2 (attempt 1)
 [3/4] completed gc_s2 (0.0 s)
@@ -211,10 +213,10 @@ workz status --history
 ```
 
 ```text
-LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER
-20261026T221244.010-e42904d2    completed        0.0 s     4       0      0
-20261026T221243.991-70945caf    completed        0.0 s     4       0      0
-20261026T221243.941-80c7a25e    completed        0.0 s     4       0      0
+LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
+20261026T221244.010-e42904d2    completed        0.0 s     4       0          0
+20261026T221243.991-70945caf    completed        0.0 s     4       0          0
+20261026T221243.941-80c7a25e    completed        0.0 s     4       0          0
 ```
 
 `workz report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `workz report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `workz watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.

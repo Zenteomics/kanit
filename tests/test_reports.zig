@@ -346,7 +346,8 @@ test "[edge] - [report]: values that cannot be true read as missing, never as a 
     try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, dir);
     try testing.expect(std.mem.indexOf(u8, out.written(), "the workflow snapshot cannot be read: line") != null);
     try workz.report.writeTsv(&out.writer, l.rows);
-    try workz.report.writeSuggestions(&out.writer, &l, false);
+    try workz.report.writeSuggestions(&out.writer, &l, .tsv);
+    try workz.report.writeSuggestions(&out.writer, &l, .table);
     try workz.html.write(testing.allocator, a, &out.writer, dir);
 }
 
@@ -411,4 +412,14 @@ test "[unit] - [report]: a group's run samples count once however many rules wai
     try testing.expectEqual(@as(usize, 1), l.groups.len);
     try testing.expectEqual(@as(usize, 3), l.groups[0].samples);
     try testing.expectApproxEqAbs(@as(f64, 1.0), l.groups[0].fit.?, 1e-9);
+}
+
+test "[unit] - [report]: a long name keeps its start and end, cut between characters" {
+    var buf: [64]u8 = undefined;
+    try testing.expectEqualStrings("align_sam...ule_name", workz.units.middle(&buf, "align_sample_with_a_long_rule_name", 20));
+    try testing.expectEqualStrings("short", workz.units.middle(&buf, "short", 20));
+    // "é" is two bytes: no cut falls inside it.
+    const cut = workz.units.middle(&buf, "ééééééééééééé", 9);
+    try testing.expect(std.unicode.utf8ValidateSlice(cut));
+    try testing.expect(cut.len <= 9);
 }

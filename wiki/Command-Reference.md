@@ -104,7 +104,7 @@ Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([key
 workz status [WORKFLOW] [--history [N]] [--json] [--launch ID] [--no-color]
 ```
 
-Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts that include `running`, `waiting` and `pending`.
+Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`.
 
 | Option       | Argument | Default | Meaning                                      |
 | ------------ | -------- | ------- | -------------------------------------------- |

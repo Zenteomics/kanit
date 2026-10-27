@@ -17,6 +17,7 @@ const Tracker = tracker.Tracker;
 const Status = tracker.Status;
 const str = fields.str;
 const int = fields.int;
+const get = fields.get;
 const float = fields.float;
 
 fn seconds(ns: i128) f64 {
@@ -35,6 +36,17 @@ pub fn shownPath(a: Allocator, path: []const u8) []const u8 {
     const here = sys.cwd(a) catch return path;
     const below = here.len > 1 and path.len > here.len + 1 and std.mem.startsWith(u8, path, here) and path[here.len] == '/';
     return if (below) path[here.len + 1 ..] else path;
+}
+
+/// The WORKFLOW argument that names a launch's workflow from here: null for
+/// `workflow.toml` in the current directory, the default.
+fn workflowArg(gpa: Allocator, a: Allocator, launch_dir: []const u8) !?[]const u8 {
+    const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return null;
+    defer gpa.free(text);
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch return null;
+    const path = str(v, "workflow") orelse return null;
+    const shown = shownPath(a, path);
+    return if (std.mem.eql(u8, shown, "workflow.toml")) null else shown;
 }
 
 /// The last non-empty line of a file, with control characters blanked and
@@ -102,7 +114,7 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         for (t.rules.items) |r| {
             if (!r.status.active()) continue;
             shown += 1;
-            try w.print("{s:<44} {d:>3}  ", .{ r.name[0..@min(r.name.len, 44)], r.attempt });
+            try w.print("{f} {d:>3}  ", .{ units.field(r.name, 44), r.attempt });
             try units.right(w, 8, units.duration, .{seconds(now_ns - r.started_ns)});
             try w.writeAll("  ");
             try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null);
@@ -137,7 +149,7 @@ pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]con
         return null;
     }
     return (try records.latestLaunch(gpa, a, rec)) orelse {
-        std.debug.print("workz: no launch recorded in {s}\n", .{rec});
+        std.debug.print("workz: no launch recorded in {s}; workz run starts one\n", .{rec});
         return null;
     };
 }
@@ -171,14 +183,17 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     const a = arena.allocator();
     const rec = try records.recordsDir(a, root);
     const names = try records.launchNames(gpa, a, rec);
-    try w.writeAll("LAUNCH                          STATUS         ELAPSED  DONE  FAILED  OTHER\n");
+    try w.writeAll("LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED\n");
     var shown: usize = 0;
     var i = names.len;
+    const live = records.running(gpa, rec);
     while (i > 0 and shown < n) : (shown += 1) {
         i -= 1;
         const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
         const text = sys.readFile(gpa, path, 1 << 20) catch {
-            try w.print("{s:<31} running?\n", .{names[i]});
+            // No summary: the newest launch while a run holds the lock runs;
+            // any other ended without recording its end, as a killed engine.
+            try w.print("{s:<31} {s}\n", .{ names[i], if (live and i == names.len - 1) "running" else "unfinished" });
             continue;
         };
         defer gpa.free(text);
@@ -195,7 +210,7 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
         const elapsed = float(v, "elapsed_s") orelse 0;
         try w.print("{s:<31} {s:<13} ", .{ names[i], str(v, "status") orelse "?" });
         try units.right(w, 8, units.duration, .{elapsed});
-        try w.print(" {d:>5} {d:>7} {d:>6}", .{ done, bad, other });
+        try w.print(" {d:>5} {d:>7} {d:>10}", .{ done, bad, other });
         if (str(v, "error")) |e| try w.print("  {s}", .{e[0..@min(e.len, 100)]});
         try w.writeAll("\n");
     }
@@ -234,7 +249,7 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         }
     }.put;
 
-    const badge = if (std.mem.eql(u8, outcome, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, outcome, "interrupted")) "\x1b[45;30;1m" else "\x1b[41;97;1m";
+    const badge = if (std.mem.eql(u8, outcome, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, outcome, "interrupted") or std.mem.eql(u8, outcome, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m";
     if (color) {
         try w.print(" {s} {s} \x1b[0m", .{ badge, outcome });
         try w.splatByteAll(' ', col - (outcome.len + 2));
@@ -326,7 +341,20 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             try w.print("{s}workz report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
         }
     } else if (std.mem.eql(u8, outcome, "refused")) {
-        try w.writeAll("fix the cause above and run the same command again\n");
+        // Outputs changed outside workz: the command that reruns their rules.
+        var rules: std.ArrayList([]const u8) = .empty;
+        if (get(v, "changed_outputs")) |cs| if (cs == .array) for (cs.array.items) |c| {
+            const rule = str(c, "rule") orelse continue;
+            for (rules.items) |r| {
+                if (std.mem.eql(u8, r, rule)) break;
+            } else try rules.append(a, rule);
+        };
+        if (rules.items.len > 0) {
+            try w.print("{s}workz run", .{s.cyan()});
+            if (try workflowArg(gpa, a, launch_dir)) |wf| try w.print(" {s}", .{wf});
+            for (rules.items) |r| try w.print(" --rerun-rule {s}", .{r});
+            try w.print("{s}   run {s} again; the changed bytes go to previous/\n", .{ s.reset(), if (rules.items.len == 1) "it" else "them" });
+        } else try w.writeAll("fix the cause above and run the same command again\n");
     } else {
         for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
             try w.print("{s}workz logs {s}{s}   the output of the failed attempt\n", .{ s.cyan(), r.rule, s.reset() });
@@ -364,13 +392,31 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     return true;
 }
 
-/// A launch that is still running, as JSON in the shape of `summary.json`:
-/// status `running`, the counts so far and the time since it started.
+/// A running launch as JSON with the summary's keys, so a script reads one
+/// shape: what has not ended is null, and the counts add the rules running,
+/// waiting once ready and pending; `not_started` counts the last two.
 fn runningJson(gpa: Allocator, dir: []const u8) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
     _ = try tr.update();
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+    var failures: std.ArrayList(Failure) = .empty;
+    for (tr.rules.items) |r| switch (r.status) {
+        .failed, .blocked, .cancelled => try failures.append(a, .{
+            .rule = r.name,
+            .status = @tagName(r.status),
+            .reason = r.reason,
+            .stderr = if (r.dir.len > 0) try std.fs.path.join(a, &.{ r.dir, "stderr.log" }) else null,
+        }),
+        else => {},
+    };
+    const waiting = tr.count(.waiting) + tr.count(.retrying);
+    const pending = tr.count(.pending);
     const doc = .{
+        .engine = tr.engine,
         .launch = std.fs.path.basename(dir),
         .status = "running",
         .counts = .{
@@ -379,13 +425,19 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
             .failed = tr.count(.failed),
             .blocked = tr.count(.blocked),
             .cancelled = tr.count(.cancelled),
+            .not_started = waiting + pending,
             .running = tr.count(.running) + tr.count(.cancelling),
-            .waiting = tr.count(.waiting) + tr.count(.retrying),
-            .pending = tr.count(.pending),
+            .waiting = waiting,
+            .pending = pending,
         },
         .selected = tr.selected,
         .elapsed_s = if (tr.started_ns > 0) seconds(sys.realNs() - tr.started_ns) else 0,
+        .finished = @as(?[]const u8, null),
+        .@"error" = @as(?[]const u8, null),
+        .engine_cost = @as(?u8, null),
         .launch_dir = dir,
+        .failures = failures.items,
+        .changed_outputs = &[_]u8{},
     };
     var w: std.Io.Writer.Allocating = .init(gpa);
     defer w.deinit();

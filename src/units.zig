@@ -44,3 +44,41 @@ pub fn right(w: *std.Io.Writer, width: usize, comptime f: anytype, args: anytype
 pub fn count(w: *std.Io.Writer, n: usize, one: []const u8, many: []const u8) !void {
     try w.print("{d} {s}", .{ n, if (n == 1) one else many });
 }
+
+/// `s` in at most `max` bytes: a longer one keeps its start and end around
+/// "...", since rules of one step differ at the end. Cuts fall between
+/// UTF-8 characters; the result may live in `buf`.
+pub fn middle(buf: []u8, s: []const u8, max: usize) []const u8 {
+    if (s.len <= max) return s;
+    if (max < 7) return s[0..charStart(s, max)];
+    const keep = max - 3;
+    const head = charStart(s, (keep + 1) / 2);
+    var tail = s.len - (keep - (keep + 1) / 2);
+    while (tail < s.len and s[tail] & 0xc0 == 0x80) tail += 1;
+    return std.fmt.bufPrint(buf, "{s}...{s}", .{ s[0..head], s[tail..] }) catch s[0..head];
+}
+
+/// The start of the character at or before byte `n` of `s`.
+fn charStart(s: []const u8, n: usize) usize {
+    var i = @min(n, s.len);
+    while (i > 0 and i < s.len and s[i] & 0xc0 == 0x80) i -= 1;
+    return i;
+}
+
+/// A name in a field of `width` columns, left-aligned, cut by `middle`:
+/// `{f}` with `field(name, 30)`.
+pub fn field(name: []const u8, width: usize) Field {
+    return .{ .name = name, .width = width };
+}
+
+pub const Field = struct {
+    name: []const u8,
+    width: usize,
+
+    pub fn format(self: Field, w: *std.Io.Writer) std.Io.Writer.Error!void {
+        var buf: [256]u8 = undefined;
+        const shown = middle(&buf, self.name, @min(self.width, buf.len));
+        try w.writeAll(shown);
+        try w.splatByteAll(' ', self.width -| shown.len);
+    }
+};

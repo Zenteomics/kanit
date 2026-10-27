@@ -20,6 +20,7 @@ const container = @import("container.zig");
 const model = @import("model.zig");
 const html = @import("html.zig");
 const monitor = @import("monitor.zig");
+const units = @import("units.zig");
 const term = @import("term.zig");
 const Allocator = std.mem.Allocator;
 
@@ -81,6 +82,8 @@ const Task = struct {
     cg: ?[]const u8 = null,
     /// The largest anonymous memory sampled while the attempt runs.
     anon_peak: ?u64 = null,
+    /// Why a cancelled attempt was stopped.
+    stop_why: []const u8 = "cancelled",
     dir: []const u8 = "",
     started_ns: i128 = 0,
     started_real: i128 = 0,
@@ -427,13 +430,15 @@ const Engine = struct {
         var active: usize = 0;
         var waiting: usize = 0;
         var failed: usize = 0;
+        var blocked: usize = 0;
         for (self.tasks, 0..) |t, i| {
             if (!self.mask[i]) continue;
             switch (t.status) {
                 .completed, .reused => done += 1,
                 .running, .staging => active += 1,
                 .ready => waiting += 1,
-                .failed, .blocked => failed += 1,
+                .failed => failed += 1,
+                .blocked => blocked += 1,
                 else => {},
             }
         }
@@ -447,7 +452,7 @@ const Engine = struct {
         const parts = [_]struct { n: usize, bg: []const u8, ch: u8 }{
             .{ .n = done, .bg = "\x1b[42m", .ch = '#' },
             .{ .n = active, .bg = "\x1b[46m", .ch = '>' },
-            .{ .n = failed, .bg = "\x1b[41m", .ch = '!' },
+            .{ .n = failed + blocked, .bg = "\x1b[41m", .ch = '!' },
             .{ .n = waiting, .bg = "\x1b[43m", .ch = '~' },
         };
         if (!s.on) w.writeAll("[") catch {};
@@ -466,9 +471,14 @@ const Engine = struct {
         for (0..width - filled) |_| w.writeByte(if (s.on) ' ' else '.') catch {};
         w.writeAll(if (s.on) "\x1b[0m" else "]") catch {};
         used += width + @as(usize, if (s.on) 0 else 2);
-        const secs: u64 = @intCast(@max(@divFloor(now - self.start_mono, std.time.ns_per_s), 0));
         var text: [160]u8 = undefined;
-        const counts = std.fmt.bufPrint(&text, " {d}/{d}  {d} running  {d} waiting  {d} failed  {d}:{d:0>2}", .{ done, self.selected, active, waiting, failed, secs / 60, secs % 60 }) catch "";
+        var tw: std.Io.Writer = .fixed(&text);
+        tw.print(" {d}/{d}  {d} running  {d} waiting  {d} failed", .{ done, self.selected, active, waiting, failed }) catch {};
+        if (blocked > 0) tw.print("  {d} blocked", .{blocked}) catch {};
+        tw.writeAll("  ") catch {};
+        // Whole seconds, as the line is drawn once a second.
+        units.duration(&tw, @floor(@as(f64, @floatFromInt(now - self.start_mono)) / 1e9)) catch {};
+        const counts = tw.buffered();
         const shown = counts[0..@min(counts.len, cols -| used)];
         w.print("{s}{s}{s}", .{ s.bold(), shown, s.reset() }) catch {};
         used += shown.len;
@@ -758,6 +768,7 @@ const Engine = struct {
         t.attempts += 1;
         t.cg = null;
         t.anon_peak = null;
+        t.stop_why = "cancelled";
         t.dir = try std.fmt.allocPrint(self.a, "{s}/attempts/{s}/{d:0>3}", .{ self.launch_dir, r.name, t.attempts });
         try sys.mkdirAll(self.gpa, t.dir);
         t.timed_out = false;
@@ -1317,10 +1328,12 @@ const Engine = struct {
 
         var ok = false;
         var reason: []const u8 = "";
+        // The last line of standard error, for a command that failed.
+        var said: []const u8 = "";
         const code = reaped.exitCode();
         const sig = reaped.signal();
         if (t.cancelled) {
-            reason = "cancelled";
+            reason = t.stop_why;
         } else if (t.timed_out) {
             reason = try std.fmt.allocPrint(self.a, "timed out after {d} s", .{self.timeoutOf(r).?});
         } else if (counters != null and counters.?.oom_kill > 0) {
@@ -1341,7 +1354,10 @@ const Engine = struct {
                 reason = try std.fmt.allocPrint(self.a, "status 125: the container engine failed, or the command exited 125: {s}", .{try self.lastLine(t.dir)});
             } else if (r.container != null and (c == 126 or c == 127)) {
                 reason = try std.fmt.allocPrint(self.a, "the command could not run in the container (status {d}): {s}", .{ c, try self.lastLine(t.dir) });
-            } else reason = try std.fmt.allocPrint(self.a, "exited with status {d}", .{c});
+            } else {
+                reason = try std.fmt.allocPrint(self.a, "exited with status {d}", .{c});
+                said = try self.errorLine(t.dir);
+            }
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
         }
@@ -1351,6 +1367,10 @@ const Engine = struct {
             ok = false;
             reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{@errorName(err)});
         };
+        // The recorded reason quotes that line; a terminal shows the error
+        // lines themselves under the brief reason.
+        const brief = reason;
+        if (said.len > 0) reason = try std.fmt.allocPrint(self.a, "{s}: {s}", .{ reason, said });
         // `--rm` removes a container that ran to its end; one whose client
         // failed, was stopped or was killed, possibly before the container
         // started, may remain.
@@ -1441,7 +1461,7 @@ const Engine = struct {
             t.waits = .empty;
             t.wait_reason = null;
             self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
-            self.alert("retrying", "{s}: {s}", .{ r.name, reason });
+            self.alert("retrying", "{s}: {s}", .{ r.name, brief });
             self.showTail(t.dir, 1);
             return;
         }
@@ -1451,8 +1471,8 @@ const Engine = struct {
         self.finished += 1;
         // A terminal shows the error lines themselves; `workz logs` has the rest.
         if (self.console.on) {
-            if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, reason }) else {
-                self.alert("failed", "{s}: {s}", .{ r.name, reason });
+            if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, brief }) else {
+                self.alert("failed", "{s}: {s}", .{ r.name, brief });
                 self.showTail(t.dir, 3);
             }
         } else {
@@ -1499,6 +1519,20 @@ const Engine = struct {
     /// The last non-empty line of an attempt's stderr, for failure reasons.
     fn lastLine(self: *Engine, dir: []const u8) ![]const u8 {
         return self.lastLineOf(try std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}));
+    }
+
+    /// The last line of an attempt's standard error for its recorded
+    /// reason: control characters blanked, cut to 200 bytes.
+    fn errorLine(self: *Engine, dir: []const u8) ![]const u8 {
+        const line = try self.lastLine(dir);
+        var end = @min(line.len, 200);
+        // Cut before a UTF-8 continuation byte, never inside a character.
+        while (end < line.len and end > 0 and line[end] & 0xc0 == 0x80) end -= 1;
+        const out = try self.a.dupe(u8, line[0..end]);
+        for (out) |*ch| if (ch.* < 0x20 or ch.* == 0x7f) {
+            ch.* = ' ';
+        };
+        return if (end < line.len) std.fmt.allocPrint(self.a, "{s}...", .{out}) else out;
     }
 
     fn lastLineOf(self: *Engine, path: []const u8) ![]const u8 {
@@ -1579,6 +1613,7 @@ const Engine = struct {
             .running => {
                 if (t.cancelled) return "already stopping";
                 t.cancelled = true;
+                t.stop_why = "stopped on request";
                 self.terminate(t, @as(i128, self.opts.grace_s) * std.time.ns_per_s);
                 self.events.emit("task_cancelling", .{ .rule = name });
                 return "stopping";
@@ -1620,13 +1655,15 @@ const Engine = struct {
         if (self.stopping) return;
         self.stopping = true;
         const grace = @as(i128, self.opts.grace_s) * std.time.ns_per_s;
+        const why = if (self.interrupted) "cancelled: the launch was interrupted" else "cancelled: the launch stopped after a failure";
         for (self.tasks, 0..) |*t, i| switch (t.status) {
             .running => {
                 t.cancelled = true;
+                t.stop_why = why;
                 self.terminate(t, grace);
                 self.events.emit("task_cancelling", .{ .rule = self.rule(i).name });
             },
-            .staging => self.endUnstarted(i, true, null, .cancelled, "cancelled before start"),
+            .staging => self.endUnstarted(i, true, null, .cancelled, why),
             else => {},
         };
         self.releaseIdle(null);
@@ -1924,14 +1961,25 @@ const Summary = struct {
     engine_key: u32 = state.engine_key,
     launch: []const u8,
     status: []const u8,
-    counts: struct { completed: usize = 0, reused: usize = 0, failed: usize = 0, blocked: usize = 0, cancelled: usize = 0, not_started: usize = 0 },
+    /// The rules by outcome; `running`, `waiting` and `pending` stay 0 once
+    /// the launch has ended and count only in a running launch's status.
+    counts: struct { completed: usize = 0, reused: usize = 0, failed: usize = 0, blocked: usize = 0, cancelled: usize = 0, not_started: usize = 0, running: usize = 0, waiting: usize = 0, pending: usize = 0 },
     selected: usize,
     elapsed_s: f64,
     finished: []const u8,
     @"error": ?[]const u8,
     engine_cost: EngineCost,
     launch_dir: []const u8,
+    /// Each rule that failed, was blocked or was cancelled, with its reason
+    /// and the standard error of its last attempt; empty when none did.
+    failures: []const Failure = &.{},
+    /// For a launch refused because recorded outputs changed: each such
+    /// output and the rule that wrote it.
+    changed_outputs: []const ChangedOutput = &.{},
 };
+
+const Failure = struct { rule: []const u8, status: []const u8, reason: []const u8, stderr: ?[]const u8 };
+const ChangedOutput = struct { rule: []const u8, path: []const u8 };
 
 /// Writes a launch's page, replacing the file in one step so a browser
 /// never reads half of it.
@@ -1969,6 +2017,8 @@ const Refusal = struct {
     selected: usize,
     t0: i128,
     json: bool,
+    /// Recorded outputs that changed outside workz, when that refused it.
+    changed: []const ChangedOutput = &.{},
 
     fn refuse(self: Refusal, outcome: Outcome, reason: []const u8) !Outcome {
         std.debug.print("workz: {s}\n", .{reason});
@@ -1984,6 +2034,7 @@ const Refusal = struct {
             .@"error" = reason,
             .engine_cost = engineCost(),
             .launch_dir = self.dir,
+            .changed_outputs = self.changed,
         };
         try writeSummary(self.gpa, self.a, self.events, summary);
         var w: std.Io.Writer.Allocating = .init(self.gpa);
@@ -2077,12 +2128,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         var need = r.memory_mib;
         for (r.shared_index) |hi| need += holders[hi].mib;
         if (r.threads > max_threads)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}", .{ r.name, r.threads, max_threads }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower the rule's threads", .{ r.name, r.threads, max_threads }));
         if (need > max_memory)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB", .{ r.name, need, max_memory }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB with its shared inputs; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, max_memory }));
         for (r.input_abs, r.input) |in, written| {
             if (produced.contains(in)) continue;
-            if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s}", .{ r.name, written }));
+            if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));
         }
     }
 
@@ -2098,6 +2149,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // then its identity is refreshed and it stays reusable.
     var changed: usize = 0;
     var first_changed: []const u8 = "";
+    var changed_outputs: std.ArrayList(ChangedOutput) = .empty;
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
         const e = st.data.rules.map.getPtr(r.name) orelse continue;
@@ -2118,6 +2170,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             if (opts.forced(r.name)) continue;
             changed += 1;
             if (first_changed.len == 0) first_changed = o.path;
+            try changed_outputs.append(a, .{ .rule = r.name, .path = o.path });
             {
                 std.debug.print("workz: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
                 events.emit("output_changed", .{ .rule = r.name, .path = o.path });
@@ -2125,8 +2178,25 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         }
     }
     if (changed > 0) {
+        var refused = refusal;
+        refused.changed = changed_outputs.items;
         const which = if (changed == 1) "a recorded output" else try std.fmt.allocPrint(a, "{d} recorded outputs", .{changed});
-        return refusal.refuse(.failed, try std.fmt.allocPrint(a, "{s} changed outside workz ({s}{s}); run again with --rerun-rule for the affected rules, or --rerun for all (earlier bytes are kept in previous/)", .{ which, if (changed == 1) "" else "first ", first_changed }));
+        // The options that rerun exactly the rules whose outputs changed.
+        var opts_text: std.Io.Writer.Allocating = .init(a);
+        var named: usize = 0;
+        var rules_n: usize = 0;
+        for (changed_outputs.items, 0..) |c, k| {
+            const seen = for (changed_outputs.items[0..k]) |p| {
+                if (std.mem.eql(u8, p.rule, c.rule)) break true;
+            } else false;
+            if (seen) continue;
+            rules_n += 1;
+            if (named == 5) continue;
+            named += 1;
+            try opts_text.writer.print("{s}--rerun-rule {s}", .{ if (named == 1) "" else " ", c.rule });
+        }
+        if (rules_n > named) try opts_text.writer.print(" (and {d} more rules)", .{rules_n - named});
+        return refused.refuse(.failed, try std.fmt.allocPrint(a, "{s} changed outside workz ({s}{s}); to run {s} again, keeping the earlier bytes in previous/, run with {s}, or with --rerun for every rule", .{ which, if (changed == 1) "" else "first ", first_changed, if (changed == 1) "the rule that wrote it" else "the rules that wrote them", opts_text.written() }));
     }
 
     // Input manifest: authoritative digests for external inputs.
@@ -2286,6 +2356,13 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // The launch's page, drawn now, again while the launch runs, and once
     // more when it ends.
     engine.page_path = try std.fs.path.join(a, &.{ launch.dir, "report.html" });
+    {
+        // The budget first: on a shared workstation, what this launch may take.
+        var mem: std.Io.Writer.Allocating = .init(a);
+        try units.size(&mem.writer, @floatFromInt(max_memory));
+        const defaults = opts.max_threads == null and opts.max_memory_mib == null;
+        engine.progress("budget", "{d} threads, {s}, {d} jobs{s}", .{ max_threads, mem.written(), max_jobs, if (defaults) " (the defaults: every CPU and 3/4 of the memory; set --max-threads and --max-memory to share the machine)" else "" });
+    }
     engine.drawPage();
     if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every 5 s while the launch runs", .{monitor.shownPath(a, p)});
 
@@ -2335,12 +2412,26 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var counts: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0);
     for (engine.tasks) |t| counts[@intFromEnum(t.status)] += 1;
     const failed = counts[@intFromEnum(Status.failed)] + counts[@intFromEnum(Status.blocked)] + counts[@intFromEnum(Status.not_started)];
+    // Rules stopped on request, and nothing failed: the launch did not
+    // complete, and says it was stopped; it exits 1 only if the stop left
+    // rules blocked or unstarted.
+    const stopped = !engine.interrupted and engine.fatal == null and counts[@intFromEnum(Status.failed)] == 0 and counts[@intFromEnum(Status.cancelled)] > 0;
     const outcome: Outcome = if (engine.interrupted) .interrupted else if (failed > 0 or engine.fatal != null) .failed else .ok;
+    var failures: std.ArrayList(Failure) = .empty;
+    for (engine.tasks, 0..) |t, i| switch (t.status) {
+        .failed, .blocked, .cancelled => try failures.append(a, .{
+            .rule = engine.rule(i).name,
+            .status = @tagName(t.status),
+            .reason = t.reason,
+            .stderr = if (t.dir.len > 0) try std.fmt.allocPrint(a, "{s}/stderr.log", .{t.dir}) else null,
+        }),
+        else => {},
+    };
     const elapsed = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
     const summary: Summary = .{
         .engine = engine_id,
         .launch = launch.id,
-        .status = switch (outcome) {
+        .status = if (stopped) "stopped" else switch (outcome) {
             .ok => "completed",
             .interrupted => "interrupted",
             else => "failed",
@@ -2359,6 +2450,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .@"error" = engine.fatal,
         .engine_cost = engineCost(),
         .launch_dir = launch.dir,
+        .failures = failures.items,
     };
     try writeSummary(gpa, a, &events, summary);
     engine.drawPage();

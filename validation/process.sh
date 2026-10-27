@@ -68,6 +68,10 @@ echo tampered > a.txt
 "$workz" run wf.toml "${iso[@]}" -q > s5.json 2> err5.txt
 rc=$?
 check "a changed recorded output is refused" '[ $rc = 1 ] && grep -q "changed since it was recorded" err5.txt'
+check "the refused launch's summary names each changed output and its rule" 'jq -e ".status == \"refused\" and .changed_outputs == [{\"rule\": \"a\", \"path\": \"$PWD/a.txt\"}]" s5.json > /dev/null'
+"$workz" report -d . > refused.tsv 2> refused.err
+"$workz" report -d . --format html -o refused.html
+check "a report of a refused launch says why it has no attempts and which launch last ran some" 'grep -q "has no attempts; it was refused: a recorded output changed" refused.err && grep -q "the newest launch that ran attempts is .*: workz report --launch " refused.err && grep -q "class=\"sub why\">a recorded output changed" refused.html && grep -q "No attempt ran in this launch" refused.html'
 "$workz" explain wf.toml b > explain.txt
 check "explain reports the changed input" 'grep -q "input changed: .*a.txt" explain.txt'
 "$workz" run wf.toml "${iso[@]}" -q --rerun -t a > s6.json
@@ -448,8 +452,11 @@ new failure
 rc=$?
 check "a failure stops the run with status 1" '[ $rc = 1 ] && [ "$(status_of s1.json failed)" = 1 ] && [ "$(status_of s1.json blocked)" = 1 ]'
 check "the failure message names the exit status and stderr file" 'grep -q "exited with status 3" err1.txt && grep -q boom "$(last_launch)/attempts/bad/001/stderr.log"'
+check "the summary lists each failed and blocked rule with its reason" 'jq -e "[.failures[] | [.rule, .status, .reason]] == [[\"bad\", \"failed\", \"exited with status 3: boom\"], [\"child\", \"blocked\", \"it needs a rule that did not complete\"]] and (.failures[0].stderr | endswith(\"/attempts/bad/001/stderr.log\"))" s1.json > /dev/null'
 "$workz" run wf.toml "${iso[@]}" -k -q > s2.json
 check "--keep-going completes independent rules" '[ "$(status_of s2.json completed)" = 1 ] && [ -f slow.txt ]'
+"$workz" report -d . --format html -o failed.html
+check "a failed launch's page names its first failure under its status" 'grep -q "class=\"sub why\"><span class=\"mono\">bad</span>: exited with status 3: boom</div>" failed.html'
 
 new missing-output
 { header missing; rule quiet '[]' '["never.txt"]' '"true"'; } > wf.toml
@@ -539,6 +546,8 @@ kill -KILL $engine
 wait $engine 2>/dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
 check "without isolation, a task ends with a killed engine" '[ -s ../crash-task.pid ] && [ ! -d /proc/"$(cat ../crash-task.pid)" ]'
+"$workz" status -d . --history 1 > hist.txt
+check "status --history marks a killed engine's launch unfinished" 'sed -n 2p hist.txt | grep -q " unfinished$"'
 "$workz" plan wf.toml > plan.txt
 check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
 
@@ -632,7 +641,7 @@ new dispatch
 cat "$(last_launch)"/attempts/*/001/record.json | jq -s '[.[] | .queue.reasons | map({(.reason): .seconds}) | add // {}]' > waits.json
 check "a wait for threads ends when a thread is free; the engine's own time after it counts as starting" '[ "$(status_of s.json completed)" = 30 ] && jq -e "map(select(.threads)) | length > 0 and all(.starting > 0)" waits.json > /dev/null'
 "$workz" report -d . --bottlenecks > b.txt
-check "a launch shorter than 2 s is too short to say what limited it" 'grep -q "^  too short to say what limited it: it took" b.txt && grep -q "^  . engine " b.txt'
+check "a launch shorter than 2 s is too short to say what limited it" 'grep -q "^too short to say what limited it: it took" b.txt && grep -q "^  . engine " b.txt'
 
 new shared
 mkdir ref && head -c $((64 * 1024 * 1024)) /dev/urandom > ref/index.bin
@@ -701,6 +710,11 @@ sed -i 's/sleep 0.3; touch c3.txt/exit 1/' wf.toml
 check "report --compare marks a step with no completed run on one side" 'grep -q "^  c3 .*no completed run in the launch" compare-failed.txt && ! grep -q "%.*no completed run" compare-failed.txt'
 
 # ---------------------------------------------------------------- inputs and formats
+new plan-missing
+{ header plan-missing; rule count '["reads/s9.txt"]' '["c.txt"]' '"wc -l reads/s9.txt > c.txt"'; } > wf.toml
+"$workz" plan wf.toml > plan.txt
+check "plan names an input that is missing and that no rule makes" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt'
+
 new manifest
 echo data > ext.txt
 { header manifest; rule m '["ext.txt"]' '["m.txt"]' '"cp ext.txt m.txt"'; } > wf.toml
@@ -799,6 +813,14 @@ rc1=$?
 "$workz" run --help > run-help.txt
 rc2=$?
 check "help shows a command's options, also through --help" '[ $rc1 = 0 ] && [ $rc2 = 0 ] && cmp -s help-run.txt run-help.txt && grep -q "^  --max-threads N" help-run.txt'
+widest=0
+for c in "" init validate plan explain graph run control watch status logs report verify clean completion; do
+  w=$("$workz" help $c | awk '{ if (length > m) m = length } END { print m + 0 }'); [ "$w" -gt "$widest" ] && widest=$w
+done
+check "every help text fits in 80 columns ($widest)" '[ "$widest" -le 80 ]'
+"$workz" status --history x 2> hist-x.txt
+rc=$?
+check "a WORKFLOW that does not exist is refused, as --history x is" '[ $rc = 2 ] && grep -q "no workflow file x; -d DIR names a working directory" hist-x.txt'
 "$workz" run wf.toml --max-thread 4 2> typo.txt
 rc=$?
 check "a mistyped option is named with the one probably meant" '[ $rc = 2 ] && grep -q "did you mean .--max-threads.?" typo.txt'
@@ -833,7 +855,7 @@ cp "$(last_launch)/report.html" live.html
 "$workz" control -d . stop nosuch 2> ctl.txt
 ctl_rc=$?
 wait $runner
-check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
+check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1 and (.counts | has(\"not_started\")) and .finished == null and .failures == [] and (.engine | startswith(\"workz \"))" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
 check "watch shows the running rule with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " [KMG]iB" view.txt'
 check "a launch keeps its page, which reloads while the launch runs and stops once it ends" 'grep -q "http-equiv=\"refresh\"" live.html && grep -q "live\">running</span>" live.html && ! grep -q "http-equiv=\"refresh\"" "$(last_launch)/report.html" && grep -q "s-ok\">completed</span>" "$(last_launch)/report.html"'
 "$workz" status -d . > status.txt
@@ -877,7 +899,7 @@ touch fixed
 for _ in $(seq 50); do [ -f b2.txt ] && break; sleep 0.1; done
 "$workz" control -d . stop slow > /dev/null
 wait $runner
-check "control retries a failed rule with its blocked consumers and stops a running one" '[ -f b2.txt ] && [ "$(status_of s.json completed)" = 2 ] && [ "$(status_of s.json cancelled)" = 1 ] && [ "$(status_of s.json blocked)" = 1 ] && [ "$(jq -r "select(.event == \"control\") | .result" "$(last_launch)/events.jsonl" | tr "\n" " ")" = "retrying stopping " ]'
+check "control retries a failed rule with its blocked consumers, and a rule stopped on request leaves the launch stopped" '[ -f b2.txt ] && [ "$(status_of s.json completed)" = 2 ] && [ "$(status_of s.json cancelled)" = 1 ] && [ "$(status_of s.json blocked)" = 1 ] && jq -e ".status == \"stopped\" and ([.failures[] | select(.status == \"cancelled\") | .reason] == [\"stopped on request\"])" s.json > /dev/null && [ "$(jq -r "select(.event == \"control\") | .result" "$(last_launch)/events.jsonl" | tr "\n" " ")" = "retrying stopping " ]'
 "$workz" control -d . cancel 2> ended.txt
 rc=$?
 check "control refuses a launch that has ended" '[ $rc != 0 ] && grep -q "has ended" ended.txt'
@@ -910,8 +932,11 @@ new report-html
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -k > s.json 2> err.txt
 "$workz" report -d . --format html > r.html
-check "run names the launch's page when it starts" 'grep -q "^\[0/2\] page \.workz/launches/[^/]*/report\.html, drawn again every 5 s" err.txt'
+"$workz" report -d . --json > r.json
+"$workz" report -d . --format json > rf.json
+check "run names its budget, then the launch's page, when it starts" '[ "$(sed -n 1p err.txt)" = "[0/2] budget 4 threads, 2.0 GiB, 4 jobs" ] && grep -q "^\[0/2\] page \.workz/launches/[^/]*/report\.html, drawn again every 5 s" err.txt'
 check "the html report draws the timeline and shows each failure's error output escaped" 'grep -q "<svg" r.html && grep -q "Failures (1)" r.html && grep -q "&lt;boom &amp; stuff&gt;" r.html && ! grep -q "<boom" r.html && grep -q "What limited the launch" r.html && grep -q "<h2>Steps</h2>" r.html && grep -q "stroke:var(--ink);stroke-width:1.5" r.html && grep -Eq "text-anchor=\"end\"( style=\"[^\"]*\")?>bad</text>" r.html && grep -q "id=\"pipeline\"" r.html && grep -q "class=\"st-failed\"" r.html'
+check "report --json prints what --format json prints" '[ -s r.json ] && cmp -s r.json rf.json'
 check "the html report has no scripts or remote assets, a theme switch, and dark and print styles" '! grep -qi "<script" r.html && ! grep -Eq "(src|href)=\"https?:" r.html && grep -q "prefers-color-scheme:dark" r.html && grep -q "@media print" r.html && grep -q "<label for=\"theme-dark\">dark</label>" r.html'
 
 new labels
@@ -1009,7 +1034,7 @@ for _ in $(seq 100); do [ -s exit.txt ] && break; sleep 0.1; done
 check "on a terminal run prints a failure's last error lines, the blocked rules and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "failed  *bad: exited with status 3$" && screen | grep -q "^ *| last-error-line" && screen | grep -q "blocked  *after: it needs a rule that did not complete" && screen | grep -q "^ failed  *after .* 1 completed, 0 reused, 1 failed, 1 blocked" && screen | grep -q "^ next  *workz logs bad" && ! screen | grep -q "{"'
 rm -f exit.txt
 sess=r2; start -s "$sess" -x 120 -y 20 "\"$workz\" status -d .; sleep 30"
-check "on a terminal status prints the readable summary" 'wait_for "^ failures  *bad  *exited with status 3" && screen | grep -q "^ *| last-error-line"'
+check "on a terminal status prints the readable summary, the failure's reason with its last error line" 'wait_for "^ failures  *bad  *exited with status 3: last-error-line"'
 rm -f exit.txt
 # Wide enough that the JSON line does not wrap.
 sess=r3; start -s "$sess" -x 400 -y 20 "\"$workz\" run wf.toml ${iso[*]} -k --json --no-color; echo \$? > exit.txt; sleep 30"
@@ -1050,6 +1075,9 @@ new target
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -t child -q > s.json
 check "a target selects exactly its dependency closure" '[ "$(status_of s.json completed)" = 2 ] && [ ! -e other.txt ]'
+"$workz" plan wf.toml -t chlid 2> typo-target.txt
+rc=$?
+check "an unknown target names the rule probably meant" '[ $rc = 2 ] && grep -q "unknown target .chlid.; did you mean .child.?" typo-target.txt'
 
 new cpu
 { header cpu

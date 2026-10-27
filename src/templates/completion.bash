@@ -5,7 +5,7 @@ _workz() {
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
     cmd=${COMP_WORDS[1]}
-    local commands="init validate plan dry-run explain graph run control watch status logs report verify clean completion help version"
+    local commands="init validate plan explain graph run control watch status logs report verify clean completion help version"
     if [ "$COMP_CWORD" = 1 ]; then
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
@@ -31,11 +31,12 @@ _workz() {
         -t | --target | --rerun-rule)
             COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
             return ;;
-        -d | --workdir) COMPREPLY=($(compgen -d -- "$cur")); return ;;
-        --input-manifest | -o | --output) COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
+        --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --format) COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); return ;;
         --launch) COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur")); return ;;
         --compare)
+            compopt -o filenames 2> /dev/null
             COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur") $(compgen -d -- "$cur"))
             return ;;
     esac
@@ -48,7 +49,7 @@ _workz() {
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
         status) opts="$opts --history --json --launch --no-color" ;;
-        report) opts="$opts --launch --format --bottlenecks --suggest --compare -o --output" ;;
+        report) opts="$opts --launch --format --json --bottlenecks --suggest --compare -o --output" ;;
         logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
         clean) opts="$opts --keep --dry-run" ;;
         control) ;;
@@ -68,10 +69,14 @@ _workz() {
         # The rule, of the workflow named or of workflow.toml; a workflow
         # file may come first.
         COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
-        [ -z "$wf" ] && COMPREPLY+=($(compgen -f -X '!*.toml' -- "$cur"))
+        if [ -z "$wf" ]; then
+            compopt -o filenames 2> /dev/null
+            COMPREPLY+=($(compgen -f -X '!*.toml' -- "$cur"))
+        fi
     elif [ "$cmd" = explain ] || [ "$cmd" = logs ]; then
         COMPREPLY=()
     else
+        compopt -o filenames 2> /dev/null
         COMPREPLY=($(compgen -f -- "$cur"))
     fi
 }

@@ -15,7 +15,7 @@ Sizes take `K`, `M`, `G` or `T` (powers of 1024); a plain number is MiB. With is
 A rule whose request alone exceeds the budget can never start, so the launch refuses to begin:
 
 ```text
-workz: rule assemble requests 32 threads; the run allows 8
+workz: rule assemble requests 32 threads; the run allows 8: raise --max-threads, or lower the rule's threads
 ```
 
 ## When a rule starts
