@@ -939,11 +939,11 @@ check "a newer format version is refused" 'grep -q "format_version 2 is not supp
 
 new init
 "$workz" init > init.txt
-mkdir data && seq 5 > data/reads.txt
+mkdir data && seq 5 > data/S1.txt
 "$workz" init 2> again.txt
 rc=$?
 "$workz" run workflow.toml "${iso[@]}" -q > s.json
-check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 2 ] && grep -q "does not overwrite" again.txt && [ "$(status_of s.json completed)" = 2 ] && [ "$(cat out/report.txt)" = "reads: 5" ]'
+check "init writes a starter workflow that runs, and never overwrites" '[ $rc = 2 ] && grep -q "does not overwrite" again.txt && [ "$(status_of s.json completed)" = 2 ] && [ "$(cat out/report.txt)" = "lines: 5" ]'
 mkdir tpl && cd tpl && mkdir data && seq 3 > data/S1.txt && seq 4 > data/S2.txt
 "$workz" init --template > init.txt
 "$workz" prepare > prep.txt
@@ -952,7 +952,7 @@ check "init --template writes a template and sample sheet that prepare and run" 
 cd ..
 words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run workflow.toml -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
 opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz plan --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
-check "bash completion offers rule names and command options" '[ "$words" = "count report" ] && [ "$opts" = "--summary" ]'
+check "bash completion offers rule names and command options" '[ "$words" = "S1__count report" ] && [ "$opts" = "--summary" ]'
 ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz control ""); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'

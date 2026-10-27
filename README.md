@@ -26,10 +26,10 @@ export PATH="$PWD/zig-out/bin:$PATH"
 
 mkdir demo && cd demo
 workz init                                                # writes a commented workflow.toml
-mkdir data && seq 1000 > data/reads.txt
+mkdir data && seq 1000 > data/S1.txt
 workz plan workflow.toml                                  # what would run, and why
 workz run workflow.toml --max-threads 2 --max-memory 1G   # run it on 2 threads and 1 GiB
-cat out/report.txt                                        # reads: 1000
+cat out/report.txt                                        # lines: 1000
 workz report --bottlenecks                                # what limited the run
 ```
 

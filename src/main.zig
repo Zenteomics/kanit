@@ -1058,7 +1058,7 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
     const path = file orelse default_workflow;
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     try sys.writeFile(c.gpa, path, starter_workflow);
-    try out(c.io, "wrote {s}; its example rules read data/reads.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
+    try out(c.io, "wrote {s}; its example rules read data/S1.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
     return .ok;
 }
 
