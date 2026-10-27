@@ -48,7 +48,7 @@ workz reads the state files of earlier versions, formats 1 to 4, and saves them 
 
 ### launch.json
 
-Written when the launch starts: `engine` (version and the executable's SHA-256), `engine_key`, `launch`, `workflow` and `workflow_sha256`, `workflow_name` and `workflow_version` from its `[workflow]` table, `workdir`, `started`, the budget (`max_threads`, `max_memory_mib`, `jobs`), and the options `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env` and `slice`, and the number of `selected` rules.
+Written when the launch starts: `engine` (version and the executable's SHA-256), `engine_key`, `launch`, `workflow` and `workflow_sha256`, `workflow_name` and `workflow_version` from its `[workflow]` table, `workdir`, `started`, the budget (`max_threads`, `max_memory_mib`, `jobs`), and the options `isolation`, `keep_going`, `rerun`, `retry`, `timeout_s`, `input_manifest`, `pass_env`, `thread_overrides` (each `--threads STEP=N` as given) and `slice`, and the number of `selected` rules.
 
 ### versions.json
 

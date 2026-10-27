@@ -330,3 +330,33 @@ test "service retries and mounts need a service" {
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nretries = 1\n", "retries start a service again");
     try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\nmounts = { \"a\" = \"/b\" }\n", "mounts place host files inside a service's image");
 }
+
+test "[unit] - [workflow]: a thread override sets every rule of its step and no other" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        \\[[rules]]
+        \\name = "align_s1"
+        \\output = ["a1"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "align_s2"
+        \\output = ["a2"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[rules]]
+        \\name = "count"
+        \\output = ["c"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\
+    , &problem);
+    defer wf.deinit();
+    try testing.expectEqual(@as(usize, 2), wf.overrideThreads("align", 16));
+    try testing.expectEqual(@as(u32, 16), wf.rules[0].threads);
+    try testing.expectEqual(@as(u32, 16), wf.rules[1].threads);
+    try testing.expectEqual(@as(u32, 1), wf.rules[2].threads);
+    try testing.expectEqual(@as(usize, 0), wf.overrideThreads("algn", 2));
+}

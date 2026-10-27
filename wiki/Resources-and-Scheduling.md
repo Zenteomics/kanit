@@ -117,3 +117,17 @@ resource groups (while their rules waited)
 ```
 
 Most of the waiting was for threads, three ready rules at a time on average, and the same report says the thread budget limited this launch: more threads would help, if the machine has them. The waits for the `disk` group held only one run sample, taken every 5 s, so the report does not judge them. From three samples on, it gives the share in which a waiting rule would have fitted the free threads and memory: from 25%, a larger `max` for the group would help, if the disk can take it; below that, the budget was full and a higher `max` would not help much.
+
+## Trying another thread count
+
+`workz report --suggest` notes a step whose runs kept all their threads busy: it may run faster with more. To try that without editing a generated workflow, give the step a thread count for one launch, and compare:
+
+```sh
+workz plan --threads align=16          # which rules would run with it
+workz run --threads align=16 --max-threads 32 --max-memory 120G
+workz report --compare PREVIOUS_LAUNCH_ID
+```
+
+- `--threads STEP=N` sets the request of every rule of the step; repeat it for several steps. A misspelled step is refused with the nearest step name.
+- The request is part of the rule key, so the step's rules run again with it, and so do the rules that read their outputs, unless the step sets `cutoff = true` and its outputs come out byte for byte the same; their records keep the request they ran with. A later launch without `--threads` runs them again with the workflow's request.
+- `launch.json` records the overrides, and `report --compare` notes a step whose thread request differs, `threads 8 against 16`, beside its wall and CPU time. When it helped, change the request where the workflow is written.

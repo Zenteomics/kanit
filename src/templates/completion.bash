@@ -42,9 +42,9 @@ _workz() {
     esac
     local opts="-h --help -d --workdir"
     case $cmd in
-        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --grace --slice --no-isolation -q --quiet --json --no-color" ;;
-        plan | dry-run) opts="$opts -t --target --summary --rerun --rerun-rule --pass-env" ;;
-        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env" ;;
+        run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet --json --no-color" ;;
+        plan | dry-run) opts="$opts -t --target --summary --rerun --rerun-rule --pass-env --threads" ;;
+        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
         validate | graph) opts="$opts -t --target" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;

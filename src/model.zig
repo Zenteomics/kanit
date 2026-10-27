@@ -508,6 +508,8 @@ pub const Launch = struct {
     /// digest, as `launch.json` holds them; "" when not recorded.
     engine_id: []const u8 = "",
     workflow_sha256: []const u8 = "",
+    /// The `--threads STEP=N` the launch ran with.
+    thread_overrides: []const []const u8 = &.{},
     started_text: []const u8 = "",
     max_threads: f64 = 0,
     max_memory_mib: f64 = 0,
@@ -755,6 +757,11 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
         l.engine_id = str(v, "engine");
         l.engine = engineName(l.engine_id);
         l.workflow_sha256 = str(v, "workflow_sha256");
+        if (get(v, "thread_overrides")) |list| if (list == .array) {
+            var given: std.ArrayList([]const u8) = .empty;
+            for (list.array.items) |item| if (item == .string) try given.append(a, item.string);
+            l.thread_overrides = given.items;
+        };
         l.started_text = str(v, "started");
         l.max_threads = num(get(v, "max_threads")) orelse 0;
         l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
@@ -799,6 +806,11 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     if (l.workdir.len > 0) {
         if (workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
             l.wf = wf;
+            // The launch ran with its `--threads` overrides.
+            for (l.thread_overrides) |o| if (std.mem.indexOfScalar(u8, o, '=')) |eq| {
+                const n = std.fmt.parseInt(u32, o[eq + 1 ..], 10) catch continue;
+                _ = l.wf.?.overrideThreads(o[0..eq], n);
+            };
             if (graph.build(gpa, &l.wf.?, &problem)) |g| {
                 l.g = g;
             } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);

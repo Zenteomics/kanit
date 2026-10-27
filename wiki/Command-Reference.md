@@ -24,7 +24,7 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 ## plan
 
 ```text
-workz plan [WORKFLOW] [--summary] [--rerun] [--rerun-rule RULE] [--pass-env NAME]
+workz plan [WORKFLOW] [--summary] [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
 ```
 
 Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. `dry-run` is another name for `plan`.
@@ -35,11 +35,12 @@ Prints, for every selected rule, whether a run would run it or reuse it, and why
 | `--rerun`      |          | as `run --rerun` would                          |
 | `--rerun-rule` | RULE     | as `run --rerun-rule` would; repeatable         |
 | `--pass-env`   | NAME     | as `run --pass-env` would; repeatable           |
+| `--threads`    | STEP=N   | as `run --threads` would; repeatable            |
 
 ## explain
 
 ```text
-workz explain [WORKFLOW] RULE [--rerun] [--rerun-rule RULE] [--pass-env NAME]
+workz explain [WORKFLOW] RULE [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
 ```
 
 Shows one rule's decision. For a rule that has a record and whose producers do not run, it also shows each part of its key against the record: `command`, `environment`, `request`, `writes`, `inputs`, `producers` and `engine key`, each `same` or `changed`, then what changed: the environment variables, the request, the inputs with their old and new identities, or the producers that run. It takes the same options as `plan`, except `--summary`.
@@ -72,6 +73,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 | `--rerun-rule`       | RULE     |                   | run RULE even if reusable; repeatable         |
 | `--input-manifest`   | FILE     |                   | check external inputs against digests         |
 | `--pass-env`         | NAME     |                   | pass and key a variable; repeatable           |
+| `--threads`          | STEP=N   |                   | N threads for STEP's rules; repeatable        |
 | `--grace`            | DURATION | 10s               | wait before killing a stopped rule            |
 | `--slice`            | NAME     |                   | put the run's scope in the slice `NAME.slice` |
 | `--no-isolation`     |          | off               | no scope, cgroups or network namespace        |
@@ -81,6 +83,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 
 - Sizes take `K`, `M`, `G` or `T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` kills at once.
 - `--slice` takes the full unit name, ending in `.slice`.
+- `--threads STEP=N` gives every rule of step STEP a request of N threads in this launch, for trying another thread count without editing the workflow. The request is part of each rule's key, so those rules run again with it, and again with the workflow's request in a launch without it ([Resources and scheduling](Resources-and-Scheduling.md#trying-another-thread-count)).
 - The [input manifest](Reuse-and-Resume.md#input-manifests) is a JSON object of absolute paths to `"sha256:<hex>"` digests, or to a digest with a stamp.
 
 ## watch

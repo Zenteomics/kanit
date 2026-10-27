@@ -41,6 +41,8 @@ pub const Options = struct {
     input_manifest: ?[]const u8 = null,
     isolation: bool = true,
     pass_env: []const []const u8 = &.{},
+    /// `--threads STEP=N` as given, applied to the workflow before the run.
+    thread_overrides: []const []const u8 = &.{},
     grace_s: u64 = 10,
     quiet: bool = false,
     /// The summary as JSON even when standard output is a terminal.
@@ -2139,6 +2141,15 @@ const Engine = struct {
     }
 };
 
+/// Whether `--threads` set the request of step `step`.
+fn overridden(overrides: []const []const u8, step: []const u8) bool {
+    for (overrides) |o| {
+        const eq = std.mem.lastIndexOfScalar(u8, o, '=') orelse continue;
+        if (std.mem.eql(u8, o[0..eq], step)) return true;
+    }
+    return false;
+}
+
 /// Memory a container rule or service needs beside its request: its
 /// `podman run` client and conmon, which run in the launch's shared
 /// containers cgroup and take about 20 MiB together.
@@ -2349,6 +2360,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .timeout_s = opts.timeout_s,
         .input_manifest = opts.input_manifest,
         .pass_env = opts.pass_env,
+        .thread_overrides = opts.thread_overrides,
         .slice = opts.slice,
         .selected = selected,
     });
@@ -2380,7 +2392,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         var need = reservedMib(&r);
         for (r.shared_index) |hi| need += holders[hi].reserve_mib;
         if (r.threads > max_threads)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower the rule's threads", .{ r.name, r.threads, max_threads }));
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower {s}", .{ r.name, r.threads, max_threads, if (overridden(opts.thread_overrides, r.labels.step)) try std.fmt.allocPrint(a, "--threads {s}", .{r.labels.step}) else "the rule's threads" }));
         if (need > max_memory) {
             const with: []const u8 = if (r.shared_index.len > 0 and r.container != null)
                 " with its shared inputs and its Podman client"

@@ -42,6 +42,7 @@ const rerun_opts = [_]Opt{
     .{ .flag = "--rerun", .desc = "decide as 'run --rerun' would" },
     .{ .flag = "--rerun-rule RULE", .desc = "decide as 'run --rerun-rule RULE' would (repeatable)" },
     .{ .flag = "--pass-env NAME", .desc = "decide as 'run --pass-env NAME' would (repeatable)" },
+    .{ .flag = "--threads STEP=N", .desc = "decide as 'run --threads STEP=N' would (repeatable)" },
 };
 
 const commands = [_]Command{
@@ -136,6 +137,7 @@ const commands = [_]Command{
             .{ .flag = "--rerun-rule RULE", .desc = "run RULE even when reusable (repeatable)" },
             .{ .flag = "--input-manifest FILE", .desc = "check external inputs against digests first" },
             .{ .flag = "--pass-env NAME", .desc = "pass and key an environment variable (repeatable)" },
+            .{ .flag = "--threads STEP=N", .desc = "N threads for STEP's rules, this launch (repeatable)" },
             .{ .flag = "--grace DURATION", .desc = "wait before killing a stopped rule (default: 10s)" },
             .{ .flag = "--slice NAME.slice", .desc = "place the run's scope in this systemd slice" },
             .{ .flag = "--no-isolation", .desc = "no scope, cgroups or network namespace" },
@@ -677,6 +679,7 @@ const PlanExtra = struct {
     rerun: *bool,
     summary: ?*bool = null,
     pass: *std.ArrayList([]const u8),
+    threads: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
     a: std.mem.Allocator,
     fn option(self: PlanExtra, arg: []const u8, value: ?[]const u8) !usize {
@@ -691,6 +694,10 @@ const PlanExtra = struct {
         if (std.mem.eql(u8, arg, "--rerun")) {
             self.rerun.* = true;
             return 1;
+        }
+        if (std.mem.eql(u8, arg, "--threads")) {
+            try self.threads.append(self.a, value orelse return missingValue(arg));
+            return 2;
         }
         if (std.mem.eql(u8, arg, "--pass-env")) {
             try self.pass.append(self.a, value orelse return missingValue(arg));
@@ -712,10 +719,12 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
     var summary = false;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
+    var threads: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
+    if (applyThreads(&l.wf, threads.items)) |e| return e;
     var st = try plan.loadState(c.gpa, l.wf.root, c.a);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
@@ -736,7 +745,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var rerun = false;
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
+    var threads: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
     // `explain RULE` reads workflow.toml; `explain WORKFLOW RULE` names the file.
     if (common.positional.items.len == 0) if (common.workflow) |name| {
         try common.positional.append(c.a, name);
@@ -745,6 +755,7 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     if (common.positional.items.len != 1) return fail("explain takes one rule name", .{});
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
+    if (applyThreads(&l.wf, threads.items)) |e| return e;
     var st = try plan.loadState(c.gpa, l.wf.root, c.a);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
@@ -1185,6 +1196,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
 const RunExtra = struct {
     opts: *run.Options,
     pass: *std.ArrayList([]const u8),
+    threads: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
     a: std.mem.Allocator,
 
@@ -1219,7 +1231,7 @@ const RunExtra = struct {
             o.color = false;
             return 1;
         }
-        const takes_value = for ([_][]const u8{ "-j", "--jobs", "--max-threads", "--max-memory", "-r", "--retry", "--timeout", "--grace", "--input-manifest", "--slice", "--pass-env" }) |name| {
+        const takes_value = for ([_][]const u8{ "-j", "--jobs", "--max-threads", "--max-memory", "-r", "--retry", "--timeout", "--grace", "--input-manifest", "--slice", "--pass-env", "--threads" }) |name| {
             if (eq(u8, arg, name)) break true;
         } else false;
         if (!takes_value) return 0;
@@ -1246,6 +1258,8 @@ const RunExtra = struct {
             o.slice = v;
         } else if (eq(u8, arg, "--pass-env")) {
             try self.pass.append(self.a, v);
+        } else if (eq(u8, arg, "--threads")) {
+            try self.threads.append(self.a, v);
         } else return 0;
         return 2;
     }
@@ -1256,16 +1270,19 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     var opts: run.Options = .{};
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .reruns = &reruns, .a = c.a })) |e| return e;
+    var threads: std.ArrayList([]const u8) = .empty;
+    if (try parseArgs(c, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     opts.rerun_rules = reruns.items;
     opts.pass_env = pass.items;
+    opts.thread_overrides = threads.items;
     if (opts.input_manifest) |m| opts.input_manifest = try sys.absolute(c.a, try sys.cwd(c.a), m);
     // The launcher only starts the scope; the engine inside reads the workflow.
     const inner = if (c.env.get("WORKZ_STAGE")) |s| std.mem.eql(u8, s, "inner") else false;
     if (opts.isolation and !inner) return isolate(c, opts);
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
+    if (applyThreads(&l.wf, threads.items)) |e| return e;
     if (!try knownRules(&l.wf, opts.rerun_rules)) return .usage;
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
@@ -1274,6 +1291,29 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
         .invalid => .usage,
         .interrupted => .interrupted,
     };
+}
+
+/// Applies each `--threads STEP=N` to the loaded workflow: the rules of STEP
+/// request N threads in this launch, and their keys change with it.
+fn applyThreads(wf: *workflow.Workflow, overrides: []const []const u8) ?Exit {
+    for (overrides) |o| {
+        // The count follows the last '=', so a step name may hold one.
+        const eq = std.mem.lastIndexOfScalar(u8, o, '=') orelse return fail("--threads {s}: give a step and a thread count, such as align=16", .{o});
+        const step = o[0..eq];
+        const count = o[eq + 1 ..];
+        if (step.len == 0) return fail("--threads {s}: give a step and a thread count, such as align=16", .{o});
+        for (count) |ch| if (!std.ascii.isDigit(ch)) return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
+        const n = std.fmt.parseInt(u32, count, 10) catch return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
+        if (n < 1 or n > 4096) return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
+        if (wf.overrideThreads(step, n) == 0) {
+            var steps: std.ArrayList([]const u8) = .empty;
+            defer steps.deinit(std.heap.page_allocator);
+            for (wf.rules) |r| steps.append(std.heap.page_allocator, r.labels.step) catch {};
+            if (workflow.closest(steps.items, step)) |hint| return fail("--threads {s}: no rule has step '{s}'; did you mean '{s}'?", .{ o, step, hint });
+            return fail("--threads {s}: no rule has step '{s}'", .{ o, step });
+        }
+    }
+    return null;
 }
 
 /// Reports a name given to --rerun-rule that is not a rule of the workflow.

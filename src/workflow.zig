@@ -153,6 +153,18 @@ pub const Workflow = struct {
         self.arena.deinit();
     }
 
+    /// Sets the thread request of every rule of step `step` to `threads`, as
+    /// `run --threads` does for one launch; returns how many rules it set.
+    /// The request stays part of each rule's key.
+    pub fn overrideThreads(self: *Workflow, step: []const u8, threads: u32) usize {
+        var n: usize = 0;
+        for (@constCast(self.rules)) |*r| if (std.mem.eql(u8, r.labels.step, step)) {
+            r.threads = threads;
+            n += 1;
+        };
+        return n;
+    }
+
     pub fn ruleIndex(self: *const Workflow, name: []const u8) ?usize {
         for (self.rules, 0..) |r, i| if (std.mem.eql(u8, r.name, name)) return i;
         return null;

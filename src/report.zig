@@ -274,6 +274,7 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
         // has not shown a change.
         const noise = @max(spread(x) orelse 0, spread(y) orelse 0);
         if (noise > 0 and x.median_s >= 0.1 and @abs(y.median_s / x.median_s - 1) < noise) try w.writeAll("  wall time within its runs' spread");
+        if (x.threads != y.threads) try w.print("  threads {d} against {d}", .{ x.threads, y.threads });
         if (y.reused == y.runs) try w.writeAll("  reused in the launch") else if (y.reused > 0) try w.print("  {d} reused in the launch", .{y.reused});
         try w.writeAll("\n");
     }

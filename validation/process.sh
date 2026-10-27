@@ -141,6 +141,19 @@ cd "$out" && mv moved-from moved-to && cd moved-to
 "$workz" run wf.toml "${iso[@]}" -q > s2.json
 check "a moved project reuses every rule; its state names paths inside it relatively" '[ "$(status_of s2.json reused)" = 2 ] && grep -q "^0 to run, 2 to reuse$" plan.txt && jq -e ".rules.a.outputs[0].path == \"out/a.txt\" and (.rules.a.attempt | startswith(\".workz/launches/\"))" .workz/state.json > /dev/null'
 
+new threads-override
+{ header threads-override
+  rule work_s1 '[]' '["s1.txt"]' '"echo one > s1.txt"'
+  rule work_s2 '[]' '["s2.txt"]' '"echo two > s2.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+"$workz" plan wf.toml --threads work=2 > plan.txt
+"$workz" run wf.toml "${iso[@]}" --threads work=2 -q > s2.json
+"$workz" report wf.toml --compare "$(jq -r .launch s1.json)" > compare.txt
+"$workz" plan wf.toml --threads wrk=2 > /dev/null 2> err.txt
+rc=$?
+check "--threads gives a step's rules another thread count for one launch, keyed by that request" 'grep -q "run   work_s1  (resource request changed)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(jq .request.threads "$(last_launch)/attempts/work_s1/001/record.json")" = 2 ] && grep -q "threads 1 against 2" compare.txt && [ $rc = 2 ] && grep -q "did you mean .work." err.txt'
+
 new workdir
 mkdir data && echo hello > data/in.txt
 { header workdir
