@@ -1241,6 +1241,10 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     const exe = try sys.selfExe(c.a);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(c.a, &.{ systemd_run, "--user", "--scope", "--quiet", "--expand-environment=no" });
+    // systemd-run names a scope after its own pid. When workz itself was
+    // started by `systemd-run --scope`, that pid is ours and its scope is still
+    // loaded, so the run's scope gets a name of its own.
+    try argv.append(c.a, try std.fmt.allocPrint(c.a, "--unit=workz-{d}-{x}", .{ linux.getpid(), sys.realNs() }));
     // With --slice the scope becomes a child of the caller's slice, inside its limits.
     if (opts.slice) |slice| try argv.append(c.a, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
     try argv.appendSlice(c.a, &.{

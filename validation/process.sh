@@ -456,6 +456,20 @@ new missing-output
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "exit 0 without the declared output fails" 'grep -q "without output never.txt" err.txt'
 
+new setup-failure
+{ header setup-failure
+  rule logged '[]' '["l.txt"]' '"touch l.txt"' 'log = "logs/l.log"'
+  rule moved '[]' '["ro/m.txt"]' '"touch ro/m.txt"'
+  rule other '[]' '["o.txt"]' '"sleep 0.5; touch o.txt"'
+} > wf.toml
+touch logs
+mkdir ro && touch ro/m.txt && chmod 555 ro
+"$workz" run wf.toml "${iso[@]}" -k -q > s.json 2> err.txt
+chmod 755 ro
+check "a log file that cannot be written fails its rule, which keeps its record" '[ "$(jq -r .reason "$(last_launch)/attempts/logged/001/record.json")" = "cannot write its log or benchmark file: NotDir" ]'
+check "an earlier output that cannot be moved aside fails its rule before it starts" 'grep -q "failed moved: cannot move its earlier output ro/m.txt into previous/: AccessDenied" err.txt'
+check "a rule that cannot be set up does not stop the launch" '[ "$(status_of s.json failed)" = 2 ] && [ "$(status_of s.json completed)" = 1 ] && jq -e ".error == null" s.json > /dev/null'
+
 new retry
 { header retry
   rule flaky '[]' '["f.txt"]' '"n=$(cat ../retry-count 2>/dev/null || echo 0); echo $((n+1)) > ../retry-count; [ $n -ge 1 ]; echo done > f.txt"' 'retries = 2'
@@ -531,6 +545,37 @@ kill -KILL $engine
 wait $engine 2> /dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat pid.txt)" ] || break; sleep 0.1; done
 check "an isolated task ends with a killed engine" '[ -s pid.txt ] && [ ! -d /proc/"$(cat pid.txt)" ]'
+
+new crash-holder
+mkdir ref && head -c $((1024 * 1024)) /dev/urandom > ref/index.bin
+{ header crash-holder
+  printf '[shared.ref]\npath = "ref"\n\n[[rules]]\nname = "use"\ninput = ["ref/index.bin"]\noutput = ["u.txt"]\nshell = "sleep 30; touch u.txt"\n[rules.resources]\nthreads = 1\nmemory = "64M"\nshared = ["ref"]\n'
+} > wf.toml
+"$workz" run wf.toml --no-isolation -q > s.json 2> /dev/null &
+engine=$!
+started=
+for _ in $(seq 50); do started=$(jq -r 'select(.event == "task_started") | .pid' .workz/launches/*/events.jsonl 2> /dev/null) && [ -n "$started" ] && break; sleep 0.1; done
+holder=$(jq -r 'select(.event == "shared_loading") | .pid' .workz/launches/*/events.jsonl)
+kill -KILL $engine
+wait $engine 2> /dev/null
+for _ in $(seq 20); do alive "$holder" || break; sleep 0.1; done
+check "without isolation, a shared input's holder ends with a killed engine" '[ -n "$holder" ] && ! alive "$holder"'
+[ -n "$holder" ] && alive "$holder" && kill -KILL "$holder"
+
+# A rebuild replaces the binary while a launch runs.
+new replaced-binary
+mkdir ref && head -c $((1024 * 1024)) /dev/urandom > ref/index.bin
+{ header replaced-binary
+  rule first '[]' '["w.txt"]' '"sleep 1; touch w.txt"'
+  printf '[shared.ref]\npath = "ref"\n\n[[rules]]\nname = "use"\ninput = ["ref/index.bin", "w.txt"]\noutput = ["u.txt"]\nshell = "touch u.txt"\n[rules.resources]\nthreads = 1\nmemory = "64M"\nshared = ["ref"]\n'
+} > wf.toml
+cp "$workz" ./workz
+./workz run wf.toml --no-isolation --max-threads 1 --max-memory 1G -q > s.json 2> err.txt &
+engine=$!
+sleep 0.3
+cp ./workz ./workz.new && mv ./workz.new ./workz
+wait $engine
+check "a launch whose binary is replaced while it runs still starts its guard and holders" '[ "$(status_of s.json completed)" = 2 ] && [ ! -s err.txt ]'
 
 # ---------------------------------------------------------------- admission
 new groups
@@ -612,6 +657,12 @@ new slice
 { header slice; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" --slice workz-validation.slice -q > s.json
 check "--slice places the run in the named slice and the summary has the engine's cost" 'jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | grep -q "/workz-validation.slice/" && jq -e ".engine_cost.cpu_s > 0 and .engine_cost.max_rss_mib > 0" s.json > /dev/null'
+
+# systemd-run execs workz in its own pid, so workz's scope needs another name.
+new outer-scope
+{ header outer-scope; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
+systemd-run --user --scope -q "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
+check "a run started directly by systemd-run --scope gets a scope of its own" '[ "$(status_of s.json completed)" = 1 ] && [ ! -s err.txt ]'
 
 new critical-path
 { header critical-path

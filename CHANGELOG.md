@@ -90,13 +90,19 @@ Three changes need action:
   - `explain` describes a change to a list such as `PATH` entry by entry in both directions.
   - `plan --summary` counts the rules that a cutoff producer may leave reused on a line of their own.
   - `verify` says how many selected rules have no record, instead of ending with "all match" after listing them.
+- **A rule that cannot be set up fails alone.** A rule whose `log` or `benchmark` file cannot be written, whose earlier output cannot be moved into `previous/`, or whose attempt cannot be prepared (a full disk, a cgroup limit that cannot be set) fails with that reason and keeps its record, and `--keep-going` runs the rest; the launch used to end with the bare error.
+- **Isolation.** A run started directly by `systemd-run --scope` gets a scope of its own, instead of failing because its scope's name was taken.
+- **Replacing the workz binary during a launch**, as a rebuild does, no longer keeps the launch from starting a shared input's holder or the guard of `--no-isolation` tasks: they start from the running file.
+- **Replacing the workz binary during a launch**, as a rebuild does, no longer keeps the launch from starting a shared input's holder or the guard of `--no-isolation` tasks: they start from the running file.
 - **Shared inputs.** A directory of many files no longer risks failing to start its holder, and a holder that cannot start fails its rules with the reason instead of ending the launch.
 - **Stopping and control.**
   - An attempt being stopped can no longer time out and push its kill back.
+  - A shared input's holder ends with a killed engine under `--no-isolation`, as tasks do, instead of holding its pages until killed by hand; a second interrupt kills holders as well as tasks.
   - Every complete `workz control` line is applied, however many arrive at once; a line too long to be a command is skipped with a notice.
   - The engine says when `workz control` cannot reach a launch, or when the guard of `--no-isolation` tasks cannot start.
 - **Containers.**
   - `plan` and `clean` give Podman the environment `run` gives it.
+  - Removing the container of a failed attempt no longer holds up the engine: `podman rm` runs beside it, and the launch waits for it only at its end.
   - A mount below another mount is left out even when a sibling directory sorts between them.
 - **Start order.** A rule that never completed is estimated by the median wall time of its step, as the reports compute it.
 - **Labels.** A rule named with a trailing `__` keeps its whole name as its step.

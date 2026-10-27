@@ -66,6 +66,7 @@ pub const Limits = struct {
 pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits: Limits) ![]const u8 {
     const path = try std.fs.path.join(a, &.{ tree.root, name });
     try sys.mkdir(gpa, path);
+    errdefer remove(gpa, path) catch {};
     if (limits.memory_bytes) |m| {
         var buf: [32]u8 = undefined;
         try set(gpa, path, "memory.max", try std.fmt.bufPrint(&buf, "{d}", .{m}));

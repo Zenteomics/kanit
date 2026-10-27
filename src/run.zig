@@ -121,7 +121,7 @@ const Guard = struct {
         _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
         defer sys.close(pipe[0]);
         errdefer sys.close(pipe[1]);
-        const exe = try a.dupeZ(u8, try sys.selfExe(a));
+        const exe = try sys.childExe(a);
         const argv = try process.Vec.init(a, &.{ "workz", "__guard" });
         const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = pipe[0], .stdout = devnull, .stderr = 2 };
         return .{ .pid = try process.spawn(&spec), .fd = pipe[1] };
@@ -161,7 +161,7 @@ const Network = struct {
         };
         defer sys.close(alive[0]);
         errdefer sys.close(alive[1]);
-        const exe = try a.dupeZ(u8, try sys.selfExe(a));
+        const exe = try sys.childExe(a);
         const argv = try process.Vec.init(a, &.{ "workz", "__netns", try std.fmt.allocPrint(a, "{s}/cgroup.kill", .{run_cgroup}) });
         const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = alive[0], .stdout = pipe[1], .stderr = 2 };
         const pid = process.spawn(&spec) catch |err| {
@@ -319,6 +319,9 @@ const Engine = struct {
     page_path: ?[]const u8 = null,
     next_page_ns: i128 = 0,
     leftover_cgroups: std.ArrayList([]const u8) = .empty,
+    /// Podman commands started without waiting (`stop`, `rm`); reaped like
+    /// every child, and waited for before the launch ends.
+    helpers: std.ArrayList(linux.pid_t) = .empty,
     finished: usize = 0,
     selected: usize = 0,
     console: Console = .{},
@@ -712,10 +715,21 @@ const Engine = struct {
 
     // ---- starting attempts ----
 
+    /// Starts an attempt of rule i. What stops one attempt from being
+    /// prepared, such as a full disk or a cgroup limit that cannot be set,
+    /// fails that attempt with the reason; --keep-going decides the rest.
     fn start(self: *Engine, i: usize) !void {
+        self.prepareAndSpawn(i) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot prepare the attempt: {s}", .{@errorName(err)}));
+        };
+    }
+
+    fn prepareAndSpawn(self: *Engine, i: usize) !void {
         const t = &self.tasks[i];
         const r = self.rule(i);
         t.attempts += 1;
+        t.cg = null;
         t.dir = try std.fmt.allocPrint(self.a, "{s}/attempts/{s}/{d:0>3}", .{ self.launch_dir, r.name, t.attempts });
         try sys.mkdirAll(self.gpa, t.dir);
         t.timed_out = false;
@@ -749,7 +763,8 @@ const Engine = struct {
                 const prev = try std.fmt.allocPrint(self.a, "{s}/previous", .{t.dir});
                 try sys.mkdir(self.gpa, prev);
                 const dest = try std.fmt.allocPrint(self.a, "{s}/{d}-{s}", .{ prev, k, std.fs.path.basename(o) });
-                try sys.rename(self.gpa, o, dest);
+                sys.rename(self.gpa, o, dest) catch |err|
+                    return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot move its earlier output {s} into previous/: {s}", .{ r.output[k], @errorName(err) }));
                 self.events.emit("output_preserved", .{ .rule = r.name, .path = r.output[k], .moved_to = dest });
             }
             self.ids.forget(o);
@@ -934,19 +949,24 @@ const Engine = struct {
         // The holder walks a directory itself, so the command line stays one
         // path long however many files the index has.
         const argv = try process.Vec.init(self.a, &.{ "workz", "__hold", s.path_abs.? });
-        const exe = try sys.selfExe(self.a);
+        const exe = try sys.childExe(self.a);
 
         var pipe: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
         defer sys.close(pipe[1]);
+        errdefer sys.close(pipe[0]);
         var procs: sys.Fd = -1;
+        errdefer if (h.cg) |cg| {
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            h.cg = null;
+        };
         if (self.tree) |tree| {
             h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{});
             procs = try cgroup.openProcs(self.gpa, h.cg.?);
         }
         defer if (procs >= 0) sys.close(procs);
         const spec: process.Spec = .{
-            .path = (try self.a.dupeZ(u8, exe)).ptr,
+            .path = exe.ptr,
             .argv = argv.items.ptr,
             .envp = self.envp.items.ptr,
             .cwd = "/",
@@ -956,6 +976,8 @@ const Engine = struct {
             .cgroup_procs = procs,
         };
         h.pid = try process.spawn(&spec);
+        // Without isolation the guard ends the holder if the engine dies.
+        if (self.guard) |gd| gd.note('+', h.pid);
         h.pipe = pipe[0];
         h.st = .loading;
         self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = h.cg });
@@ -1024,6 +1046,7 @@ const Engine = struct {
             h.cg = null;
             return err;
         };
+        if (self.guard) |gd| gd.note('+', h.pid);
         h.pipe = out[0];
         h.stop_fd = stop_fd;
         h.container_name = name;
@@ -1044,7 +1067,7 @@ const Engine = struct {
             h.stop_fd = -1;
         }
         if (h.container_name) |name| {
-            if (h.pipe >= 0) container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull);
+            if (h.pipe >= 0) self.helper(container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull));
         } else process.signalPid(h.pid, .TERM);
         h.kill_at = sys.monoNs() + (@as(i128, self.opts.grace_s) + 10) * std.time.ns_per_s;
     }
@@ -1147,6 +1170,7 @@ const Engine = struct {
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
         const was = h.st;
+        if (self.guard) |gd| gd.note('-', h.pid);
         h.pid = 0;
         h.kill_at = null;
         for ([_]*sys.Fd{ &h.pipe, &h.stop_fd }) |fd| if (fd.* >= 0) {
@@ -1164,7 +1188,7 @@ const Engine = struct {
         if (h.container_name) |name| {
             // A service ends with status 0 when stopped; otherwise its
             // container may remain.
-            if (code == null or code.? != 0) container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
+            if (code == null or code.? != 0) self.helper(container.removeAsync(self.a, self.podman.?, name, &self.envp, self.devnull));
             h.container_name = null;
         }
         const peak = if (counters) |c| c.memory_peak else null;
@@ -1290,11 +1314,17 @@ const Engine = struct {
         } else if (sig) |s| {
             reason = try std.fmt.allocPrint(self.a, "killed by signal {d}", .{s});
         }
+        // The rule's log and benchmark files are part of what it asked for: one
+        // that cannot be written fails the attempt, not the launch.
+        self.writeSideFiles(r, t, ok, wall_s, reaped, counters) catch |err| {
+            ok = false;
+            reason = try std.fmt.allocPrint(self.a, "cannot write its log or benchmark file: {s}", .{@errorName(err)});
+        };
         // `--rm` removes a container that ran to its end; one whose client
         // failed, was stopped or was killed, possibly before the container
         // started, may remain.
         if (t.container_name) |name| if (!ok)
-            container.remove(self.gpa, self.a, self.podman.?, name, &self.envp, self.devnull);
+            self.helper(container.removeAsync(self.a, self.podman.?, name, &self.envp, self.devnull));
 
         var outputs: std.ArrayList(state.Output) = .empty;
         if (ok) for (r.output_abs) |o| {
@@ -1306,7 +1336,6 @@ const Engine = struct {
         };
         if (ok and r.cutoff) try self.cut.record(self.a, i, outputs.items);
 
-        try self.writeSideFiles(r, t, ok, wall_s, reaped, counters);
         const status: []const u8 = if (ok) "completed" else if (t.cancelled) "cancelled" else "failed";
         const finished_text = try records.timeText(self.a, now_real);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}), .{
@@ -1581,7 +1610,7 @@ const Engine = struct {
         t.deadline_ns = null;
         process.signalGroup(t.pid, .TERM);
         if (t.container_name) |name| {
-            container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull);
+            self.helper(container.stopAsync(self.a, self.podman.?, name, self.opts.grace_s, &self.envp, self.devnull));
             t.kill_at = sys.monoNs() + grace + 10 * std.time.ns_per_s;
         } else t.kill_at = sys.monoNs() + grace;
     }
@@ -1708,6 +1737,22 @@ const Engine = struct {
         return n;
     }
 
+    fn helper(self: *Engine, pid: ?linux.pid_t) void {
+        if (pid) |p| self.helpers.append(self.gpa, p) catch {};
+    }
+
+    /// Waits up to `limit_s` for the Podman commands still running, so a
+    /// launch ends with the containers it removed gone.
+    fn awaitHelpers(self: *Engine, limit_s: u64) void {
+        const until = sys.monoNs() + @as(i128, limit_s) * std.time.ns_per_s;
+        while (self.helpers.items.len > 0 and sys.monoNs() < until) {
+            var fds = [_]linux.pollfd{.{ .fd = self.sigfd, .events = linux.POLL.IN, .revents = 0 }};
+            process.wait(&fds, until);
+            _ = process.readSignals(self.sigfd);
+            self.reapAll() catch {};
+        }
+    }
+
     fn reapAll(self: *Engine) !void {
         while (process.reap()) |rp| {
             for (self.tasks, 0..) |*t, i| {
@@ -1718,6 +1763,11 @@ const Engine = struct {
             } else for (self.holders, 0..) |*h, hi| {
                 if (h.pid == rp.pid) {
                     try self.holderExited(hi, rp);
+                    break;
+                }
+            } else for (self.helpers.items, 0..) |pid, k| {
+                if (pid == rp.pid) {
+                    _ = self.helpers.swapRemove(k);
                     break;
                 }
             }
@@ -1761,9 +1811,14 @@ const Engine = struct {
                 // A repeated interrupt kills at once; one arriving within a second of
                 // the first is the same request delivered twice (terminal and launcher).
                 if (self.interrupted) {
-                    if (sys.monoNs() - self.interrupted_at >= std.time.ns_per_s) for (self.tasks) |*t| if (t.status == .running) {
-                        t.kill_at = sys.monoNs();
-                    };
+                    if (sys.monoNs() - self.interrupted_at >= std.time.ns_per_s) {
+                        for (self.tasks) |*t| if (t.status == .running) {
+                            t.kill_at = sys.monoNs();
+                        };
+                        for (self.holders) |*h| if (h.pid > 0) {
+                            h.kill_at = sys.monoNs();
+                        };
+                    }
                 } else {
                     self.interrupted = true;
                     self.interrupted_at = sys.monoNs();
@@ -1930,7 +1985,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try sys.writeFile(gpa, try std.fs.path.join(a, &.{ launch.dir, "workflow" }), wf.source);
     var events = try records.Events.open(gpa, launch.dir);
     defer events.close();
-    const exe = try sys.selfExe(a);
+    const exe = sys.self_exe;
     const exe_digest = try sys.sha256File(gpa, exe);
     const engine_id = try std.fmt.allocPrint(a, "workz {s} sha256:{s}", .{ version, &exe_digest });
     var selected: usize = 0;
@@ -2206,6 +2261,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             engine.checkTimers();
         }
     };
+    engine.awaitHelpers(engine.opts.grace_s + 10);
 
     // Inputs of rules that ran must not have changed while the run went on:
     // their outputs would not match the inputs recorded in their key. A

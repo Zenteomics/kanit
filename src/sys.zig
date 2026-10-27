@@ -369,7 +369,21 @@ pub fn sha256Bytes(bytes: []const u8) Digest {
     return std.fmt.bytesToHex(out, .lower);
 }
 
-/// Absolute path of the running executable.
+/// The running executable, for reading its bytes: the file that runs, even
+/// after the path it was started from was replaced or deleted.
+pub const self_exe: [:0]const u8 = "/proc/self/exe";
+
+/// The executable for a child of workz to exec: its path, so the child is
+/// named workz, or `/proc/self/exe` once that path was replaced or deleted
+/// (a rebuild during a run); a child resolves the link to the running file
+/// until its execve.
+pub fn childExe(a: Allocator) ![:0]const u8 {
+    const path = try selfExe(a);
+    if (std.mem.endsWith(u8, path, " (deleted)")) return self_exe;
+    return a.dupeZ(u8, path);
+}
+
+/// Absolute path of the running executable, for another program to exec.
 pub fn selfExe(gpa: Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
     const n = try check(linux.readlinkat(linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len));
