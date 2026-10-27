@@ -2387,9 +2387,6 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
         holders[i] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
     }
-    var produced: std.StringHashMapUnmanaged(void) = .empty;
-    defer produced.deinit(gpa);
-    for (wf.rules, 0..) |r, i| if (mask[i]) for (r.output_abs) |o| try produced.put(gpa, o, {});
     // One identity memo for the launch: the input check below fills it for
     // the key computation.
     var ids = state.Identities.init(gpa);
@@ -2412,7 +2409,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB{s}; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, with, max_memory }));
         }
         for (r.input_abs, r.input) |in, written| {
-            if (produced.contains(in)) continue;
+            // A selected rule's producers are selected too.
+            if (g.produces(in)) continue;
             if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));
         }
     }

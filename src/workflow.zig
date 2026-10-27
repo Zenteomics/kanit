@@ -781,14 +781,13 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
             }
         }
     }
-    // A rule reads the files of the mapped shared inputs it uses, so each
-    // is also its input and a rebuilt index reruns it. A service's path
-    // is not: rules of the workflow may produce it during the launch.
+    // A rule reads the files of the shared inputs it uses, a mapped file or
+    // a service's index, so each path is also its input: a rebuilt index
+    // reruns it, and a rule writing the index runs before it.
     for (shared_uses) |used| {
         const sh = for (wf.shared) |s| {
             if (std.mem.eql(u8, s.name, used)) break s;
         } else continue;
-        if (sh.isService()) continue;
         const sp = sh.path orelse continue;
         const sp_abs = sh.path_abs orelse continue;
         const listed = for (input) |in| {

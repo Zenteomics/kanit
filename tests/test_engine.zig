@@ -44,7 +44,7 @@ test "container mounts list each directory once with the access it needs" {
     try testing.expectEqual(@as(usize, 4), nested.len);
 }
 
-test "a service may load produced files only for rules that depend on their producer" {
+test "a rule that joins a service depends on the rules writing what the service loads" {
     const svc = "[shared.idx]\npath = \"idx\"\ncontainer = \"img\"\ncommand = \"load idx\"\nmemory = \"1G\"\n\n" ++
         "[[rules]]\nname = \"build\"\noutput = [\"idx/SA\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     const user = "[[rules]]\nname = \"use\"\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
@@ -53,17 +53,37 @@ test "a service may load produced files only for rules that depend on their prod
     var problem: workflow.Problem = .{};
     var wf = try loadText(&s, head ++ svc ++ user, &problem);
     defer wf.deinit();
-    try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf, &problem));
-    defer testing.allocator.free(problem.message);
-    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule use joins service 'idx', which loads idx/SA from rule build; make an output of build an input of use"));
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    try testing.expectEqualSlices(usize, &.{0}, g.parents[1]);
+    try testing.expect(g.produces(wf.rules[1].input_abs[0]));
 
+    // A rule joining the service cannot write what it loads.
     var s2 = try Scratch.init();
     defer s2.deinit();
-    const ordered = "[[rules]]\nname = \"use\"\ninput = [\"idx/SA\"]\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
-    var wf2 = try loadText(&s2, head ++ svc ++ ordered, &problem);
+    const writes = "[[rules]]\nname = \"use\"\noutput = [\"idx/extra\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
+    var wf2 = try loadText(&s2, head ++ svc ++ writes, &problem);
     defer wf2.deinit();
-    var g = try workz.graph.build(testing.allocator, &wf2, &problem);
-    g.deinit();
+    try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf2, &problem));
+    defer testing.allocator.free(problem.message);
+    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule use joins service 'idx' and writes idx/extra, which the service loads; the service would start before the file exists"));
+}
+
+test "a directory input depends on every rule writing inside it, and not on a sibling" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"w1\"\noutput = [\"d/a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"w2\"\noutput = [\"d/sub/b.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"sib\"\noutput = [\"d-x/c.txt\", \"d.y\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"read\"\ninput = [\"d\"]\noutput = [\"d/n.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    // Its own output inside the directory is no dependency.
+    try testing.expectEqualSlices(usize, &.{ 0, 1 }, g.parents[3]);
+    try testing.expect(g.produces(wf.rules[3].input_abs[0]));
 }
 
 test "a service runs in a shareable IPC namespace in its own /tmp and waits on its stop FIFO" {

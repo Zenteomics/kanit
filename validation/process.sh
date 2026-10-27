@@ -154,6 +154,14 @@ new threads-override
 rc=$?
 check "--threads gives a step's rules another thread count for one launch, keyed by that request" 'grep -q "run   work_s1  (resource request changed)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(jq .request.threads "$(last_launch)/attempts/work_s1/001/record.json")" = 2 ] && grep -q "threads 1 against 2" compare.txt && [ $rc = 2 ] && grep -q "did you mean .work." err.txt'
 
+new dir-input
+{ header dir-input
+  rule write '[]' '["d/x.txt"]' '"sleep 1; echo hi > d/x.txt"'
+  rule read '["d"]' '["n.txt"]' '"ls d | wc -l > n.txt"'
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "a rule reading a directory waits for the rules writing inside it" '[ "$(status_of s.json completed)" = 2 ] && [ "$(cat n.txt)" = 1 ]'
+
 new workdir
 mkdir data && echo hello > data/in.txt
 { header workdir
@@ -405,6 +413,18 @@ new service-gap
 sed -i '/name = "big"/,/memory/ s/memory = "64M"/memory = "128M"/' wf.toml
 timeout 60 "$workz" run wf.toml --max-threads 4 --max-memory 270M -q > s.json
 check "an idle service gives its memory to a rule that needs it, and starts again later" '[ "$(status_of s.json completed)" = 3 ] && [ "$(loads)" = 2 ] && [ "$(leftovers)" = 0 ]'
+
+new service-index
+{ header service-index
+  rule build '[]' '["idx/data"]' '"echo v1 > idx/data"'
+  printf '[shared.ix]\npath = "idx"\ncontainer = "%s"\ncommand = "cat %s/idx/data > /dev/null"\nmemory = "64M"\n\n' "$img" "$PWD"
+  srule use '[]' '["u.txt"]' '"cat idx/data > u.txt"' ix
+} > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+sed -i 's/echo v1/echo v2/' wf.toml
+"$workz" plan wf.toml > plan.txt
+"$workz" run wf.toml "${iso[@]}" -q > s2.json
+check "a rebuilt service index runs the rules that join it again, after the rule that writes it" '[ "$(status_of s1.json completed)" = 2 ] && grep -q "run   use  (producer build runs)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(cat u.txt)" = v2 ]'
 
 new service-retry
 { header service-retry

@@ -121,7 +121,7 @@ An entry with `container` is a service:
 | `retries`   | integer  | 0        | restarts before ready, 0 to 3    |
 | `mounts`    | table    | none     | host path = path in the image    |
 
-- A file input is also an input of every rule that uses it. It may not hold the output of a rule; a service's `path` may, if every rule that joins it depends on that rule.
+- `path` is also an input of every rule that uses the shared input. A file input's path may not hold the output of a rule, since its pages are measured at launch; a service's may, and the rules writing there run before the service's users, which may not write there themselves.
 - `command`, `memory`, `timeout`, `retries` and `mounts` belong to services only.
 - See [Shared inputs](Resources-and-Scheduling.md#shared-inputs) and [Shared services](Containers-and-Services.md#shared-services).
 
@@ -155,7 +155,7 @@ An entry with `container` is a service:
 
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
-- A rule may not read its own output, two rules may not write the same file, and no rule may read another rule's log or benchmark.
+- An input that is a directory depends on every rule that writes inside it, so it is read once they have completed.
 - `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
 - `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
 - An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.

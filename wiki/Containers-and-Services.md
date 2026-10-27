@@ -135,7 +135,8 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 
 - Only container rules can join a service, and a rule can join one service.
 - `path` may hold files that rules of the same workflow produce, such as the index itself. Every rule that joins the service must then depend on those rules, and `workz validate` says which input to add if one does not.
-- The service's image, command, path and mounts are part of its users' rule keys. The files in `path` are not, so list the index in each user's `input` as well, as the example does, to rerun the users when the index is rebuilt.
+- The service's image, command, path and mounts are part of its users' rule keys, and its `path` is an input of every rule that joins it: rebuilding the index reruns them, and a rule that writes the index runs before them. Listing it in `input` as well changes nothing.
+- A rule that joins a service may not write inside its `path`: the service would load before the file exists.
 - `mounts` on a service places host files inside its image, as on a rule.
 
 ### Sizing a service

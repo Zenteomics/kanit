@@ -113,7 +113,7 @@ test "[unit] - [workflow]: format 1 accepts every rule field and every table" {
     try testing.expectEqual(@as(u64, 1024), wf.rules[1].memory_mib);
 }
 
-test "[unit] - [workflow]: a mapped shared input is an input of the rules that use it" {
+test "[unit] - [workflow]: a shared input's path is an input of the rules that use it" {
     var s = try Scratch.init();
     defer s.deinit();
     var problem: workflow.Problem = .{};
@@ -161,7 +161,9 @@ test "[unit] - [workflow]: a mapped shared input is an input of the rules that u
     try testing.expectEqualStrings("ref/index", r.input[1]);
     try testing.expect(std.mem.endsWith(u8, r.input_abs[1], "/ref/index"));
     try testing.expectEqual(@as(usize, 2), wf.rules[1].input.len);
-    try testing.expectEqual(@as(usize, 0), wf.rules[2].input.len);
+    // A service's index too: a rebuilt one reruns the rules that join it.
+    try testing.expectEqual(@as(usize, 1), wf.rules[2].input.len);
+    try testing.expectEqualStrings("ref/star", wf.rules[2].input[0]);
 }
 
 test "format 1 rejects unknown keys, bad values and unsafe paths" {
