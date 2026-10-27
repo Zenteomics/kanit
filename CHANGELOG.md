@@ -4,6 +4,12 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
+## [Unreleased]
+
+### Removed
+
+- A resource group no longer takes a `wait` key. Its only accepted value, `"queue"`, described how every group works; delete the line where a workflow has it.
+
 ## [0.4.0] - 2026-10-27
 
 Rules can now say what they are, by step, sample, category and tool, and the reports and a rebuilt HTML page group by those labels; every launch keeps that page up to date while it runs. The terminal output is rebuilt too: `run` keeps a status line and ends with a summary, `watch` draws gauges, and every command explains itself with `--help`. Reports say what limited a launch from lower bounds its records support, and a launch that failed or was refused says what went wrong and the command that resolves it. A rule that cannot be set up, or a killed engine, no longer takes the rest of the launch with it, and reuse survives a reboot on btrfs.

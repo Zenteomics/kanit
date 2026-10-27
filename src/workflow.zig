@@ -178,7 +178,7 @@ pub const Problem = struct {
 const top_keys = [_][]const u8{ "workflow", "defaults", "rules", "resource_groups", "shared" };
 const workflow_keys = [_][]const u8{ "name", "version", "description", "author", "format_version" };
 const default_keys = [_][]const u8{ "threads", "memory" };
-const group_keys = [_][]const u8{ "max", "wait" };
+const group_keys = [_][]const u8{"max"};
 const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
 const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample" };
 const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
@@ -524,9 +524,6 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
             try p.checkKeys(g, &group_keys, &at, "a resource group");
             const max = (try p.int(g, "max", &at, "resource group")) orelse return p.fail(&at, "resource_groups.{s}.max is required", .{e.key_ptr.*});
             if (max < 1 or max > 1_000_000) return p.failKey(&at, "max", "resource_groups.{s}.max must be between 1 and 1000000", .{e.key_ptr.*});
-            if (try p.str(g, "wait", &at, "resource group")) |w| {
-                if (!std.mem.eql(u8, w, "queue")) return p.failKey(&at, "wait", "resource_groups.{s}.wait must be \"queue\"", .{e.key_ptr.*});
-            }
             try groups.append(arena, .{ .name = try arena.dupe(u8, e.key_ptr.*), .max = @intCast(max) });
         }
     }

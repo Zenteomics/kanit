@@ -95,10 +95,9 @@ shared = ["genome"]
 
 ## [resource_groups.NAME]
 
-| Key    | Type    | Default   | Meaning                         |
-| ------ | ------- | --------- | ------------------------------- |
-| `max`  | integer | required  | capacity, 1 to 1,000,000        |
-| `wait` | string  | `"queue"` | only `"queue"`; changes nothing |
+| Key   | Type    | Default  | Meaning                  |
+| ----- | ------- | -------- | ------------------------ |
+| `max` | integer | required | capacity, 1 to 1,000,000 |
 
 A rule takes units with `groups = { NAME = count }` in its resources; a count must be between 1 and the group's `max`. See [Resource groups](Resources-and-Scheduling.md#resource-groups).
 
