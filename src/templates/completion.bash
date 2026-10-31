@@ -28,9 +28,14 @@ _workz() {
         if [ -n "$wf" ]; then wd=$(dirname "$wf"); else wd=.; fi
     fi
     case $prev in
-        -t | --target | --rerun-rule)
+        -t | --target | --rerun-rule | --focus)
             COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
             return ;;
+        --pass-env) COMPREPLY=($(compgen -e -- "$cur")); return ;;
+        # Numbers, sizes, durations and names: nothing to offer, and never files.
+        -j | --jobs | --max-threads | --max-memory | -r | --retry | --timeout | --grace | --slice | --attempt | \
+            --keep | --interval | --threads | --why | --users)
+            COMPREPLY=(); return ;;
         -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
         --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --format)

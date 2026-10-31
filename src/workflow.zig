@@ -606,7 +606,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         default_memory = try keep(?[]const u8, p.str(d, "memory", &at, "defaults"), null);
         // Checked where declared, so an unused bad default is found too.
         if (default_threads) |t| if (t < 1 or t > 4096) try noted(p.failKey(&at, "threads", "defaults: threads must be between 1 and 4096", .{}));
-        if (default_memory) |m| if (parseMemoryMib(m) == null) try noted(p.failKey(&at, "memory", "defaults: invalid memory '{s}' (use a size such as 512M or 60G, at most 1024T)", .{m}));
+        if (default_memory) |m| if (parseMemoryMib(m) == null) try noted(p.failKey(&at, "memory", "defaults: invalid memory '{s}' (use a size from 1M to 1024T, such as 512M or 60G)", .{m}));
     }
 
     // [resource_groups.*]

@@ -29,6 +29,7 @@ Three changes need action:
   - `summary.json`, `launch.json` and `request.json` add `v`, and `versions.json` becomes `{"v": 1, "commands": [...]}` instead of a bare list. A record or event with a newer `v` is left out and named, never misread.
   - `.workz/` is made readable by its owner alone; another user who read the records needs to be given access again.
   - `run` refuses `--slice` with `--no-isolation`, which ignored it, and `version` refuses words after it.
+  - An option's value can follow `=`, as in `--launch=ID`, and `--` ends the options. An empty word is no longer taken as a value: `--pass-env ""` and `-d ""` say the option needs one.
   - `plan` exits 1 when `run` would refuse the launch, for a missing input, an output changed outside workz or an input that does not match `--input-manifest`, also with `--budget`, and says so on standard error.
   - `workz prepare` writes `{threads}` as `${WORKZ_THREADS}`, so the command reads the threads the rule gets, a `--threads` override included; prepare again to pick this up.
 
@@ -108,6 +109,15 @@ Three changes need action:
 - **Records in Git.** The guide and the files `workz init` writes say to add `.workz/` to the project's `.gitignore`.
 - **Dead launches.** `status`, `watch`, `control` and `logs --follow` see that a launch whose engine was killed is no longer running: they stop waiting, and `control` refuses. `watch --once` and the text view say `unfinished` instead of `running` and exit 1.
 - **Text from programs.** A tool's error line that is not UTF-8 is recorded with U+FFFD in place of the bad bytes, so `reason` stays a string instead of becoming an array of bytes; tool versions, service errors and control lines are kept the same way, and the views and the HTML page cut long text without splitting a character.
+- **Command line.**
+  - An empty `-d`, a directory given as WORKFLOW and `-d` naming a file are refused with a message, instead of using the current directory or printing an error trace.
+  - `--launch` takes only a launch ID, so `.` or a path can no longer show another directory as a launch.
+  - `prepare -o --check` and `init ""` or `init -` are refused, instead of writing a file named `--check`, failing late, or writing a file named `-`.
+  - `--focus 12+` reads as the rule `12` when the workflow has it.
+  - `--grace 0s` kills at once, as `--grace 0` does; `report --json --format tsv` is refused instead of the last format winning.
+  - `verify` in a working directory without records leaves no `.workz/` behind.
+  - `graph --why` finds a path through the rules `--target` selects only, and a service whose path is one rule's output shows that rule as what it loads.
+  - Completion offers no file names after options that take numbers, sizes, durations or names.
 - **Running launches.**
   - `report` says on standard error that the attempts still running have no record yet and are left out; with none ended, it says so instead of that the launch ran no rule.
   - `logs RULE --follow` during a launch that has yet to start the rule waits for it and follows its new attempt, instead of printing the previous launch's attempt and exiting.

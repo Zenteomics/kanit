@@ -158,18 +158,18 @@ test "removing a launch directory does not follow symlinks out of it" {
 
 test "[unit] - [views]: focus expressions name a rule and its depths" {
     const Focus = workz.views.Focus;
-    const up = Focus.parse("+align").?;
+    const up = Focus.parse("+align", null).?;
     try testing.expectEqualStrings("align", up.rule);
     try testing.expectEqual(@as(?u32, Focus.all), up.up);
     try testing.expectEqual(@as(?u32, null), up.down);
-    const down = Focus.parse("align+2").?;
+    const down = Focus.parse("align+2", null).?;
     try testing.expectEqual(@as(?u32, 2), down.down);
     try testing.expectEqual(@as(?u32, null), down.up);
-    const both = Focus.parse("1+align+").?;
+    const both = Focus.parse("1+align+", null).?;
     try testing.expectEqual(@as(?u32, 1), both.up);
     try testing.expectEqual(@as(?u32, Focus.all), both.down);
-    try testing.expect(Focus.parse("align") == null);
-    try testing.expect(Focus.parse("+") == null);
+    try testing.expect(Focus.parse("align", null) == null);
+    try testing.expect(Focus.parse("+", null) == null);
 }
 
 test "[unit] - [views]: steps collapse samples, and a shared input shows what loads and joins it" {
@@ -209,10 +209,14 @@ test "[unit] - [views]: steps collapse samples, and a shared input shows what lo
     const users = try workz.views.build(a, &wf, &g, mask, .{ .users = "genome" });
     try testing.expectEqual(@as(usize, 4), users.nodes.len);
 
-    const path = try workz.views.whyPath(a, &wf, &g, "index", "report");
+    const path = try workz.views.whyPath(a, &wf, &g, mask, "index", "report");
     try testing.expectEqual(@as(usize, 3), path.len);
     try testing.expectEqualStrings("report", wf.rules[path[2]].name);
-    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, "report", "index"));
+    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, mask, "report", "index"));
+    // A path runs through the selected rules only.
+    const narrow = try a.dupe(bool, mask);
+    narrow[wf.ruleIndex("report").?] = false;
+    try testing.expectError(error.NotSelected, workz.views.whyPath(a, &wf, &g, narrow, "index", "report"));
 }
 
 test "[unit] - [run]: a rule's budget need counts its request, its client and each shared input once" {
@@ -265,4 +269,44 @@ test "[unit] - [cgroup]: counters are read from the cgroup files, and a missing 
     try testing.expectEqual(@as(?u64, 5), c.memory_full_us);
     try testing.expectEqual(@as(?u64, null), c.io_some_us);
     try testing.expectEqual(@as(?u64, 4096), c.file);
+}
+
+test "[unit] - [views]: a service whose path is one rule's output shows that rule as what it loads" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[shared.idx]\npath = \"idx.bin\"\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\n\n" ++
+        "[[rules]]\nname = \"make\"\noutput = [\"idx.bin\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"use\"\noutput = [\"u.txt\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"idx\"]\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const v = try workz.views.build(a, &wf, &g, mask, .{ .users = "idx" });
+    var loads: usize = 0;
+    for (v.edges) |e| loads += @intFromBool(e.kind == .loads);
+    try testing.expectEqual(@as(usize, 1), loads);
+}
+
+test "[unit] - [views]: a focus on a rule named with digits reads as that rule" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"12\"\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"b\"\ninput = [\"a.txt\"]\noutput = [\"b.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    const Focus = workz.views.Focus;
+    const down = Focus.parse("12+", &wf).?;
+    try testing.expectEqualStrings("12", down.rule);
+    try testing.expectEqual(@as(?u32, Focus.all), down.down);
+    try testing.expectEqual(@as(?u32, null), down.up);
+    const up = Focus.parse("1+b", &wf).?;
+    try testing.expectEqualStrings("b", up.rule);
+    try testing.expectEqual(@as(?u32, 1), up.up);
 }

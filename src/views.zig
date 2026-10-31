@@ -27,19 +27,38 @@ pub const Focus = struct {
     pub const all = std.math.maxInt(u32);
 
     /// `+X` (all upstream), `X+` (all downstream), `+X+`, and a depth
-    /// before or after the sign: `2+X`, `X+1`.
-    pub fn parse(text: []const u8) ?Focus {
+    /// before or after the sign: `2+X`, `X+1`. Since a rule name may be all
+    /// digits, some texts read two ways, such as `12+` and `1+2`: the first
+    /// reading whose rule `wf` has wins, else the first reading. Null when
+    /// the text names no rule with a direction.
+    pub fn parse(text: []const u8, wf: ?*const workflow.Workflow) ?Focus {
+        var first: ?Focus = null;
+        for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, true } }) |use| {
+            const f = reading(text, use[0], use[1]) orelse continue;
+            if (wf) |w| if (w.ruleIndex(f.rule) != null) return f;
+            if (first == null) first = f;
+        }
+        return first;
+    }
+
+    /// `text` read with a depth before its first `+` (`prefix`) and after
+    /// its last (`suffix`); null when it does not read that way.
+    fn reading(text: []const u8, prefix: bool, suffix: bool) ?Focus {
         var f: Focus = .{ .rule = text };
         var rest = text;
-        if (std.mem.indexOfScalar(u8, rest, '+')) |i| if (allDigits(rest[0..i])) {
+        if (prefix) {
+            const i = std.mem.indexOfScalar(u8, rest, '+') orelse return null;
+            if (!allDigits(rest[0..i])) return null;
             f.up = if (i == 0) all else std.fmt.parseInt(u32, rest[0..i], 10) catch return null;
             rest = rest[i + 1 ..];
-        };
-        if (std.mem.lastIndexOfScalar(u8, rest, '+')) |i| if (allDigits(rest[i + 1 ..])) {
+        }
+        if (suffix) {
+            const i = std.mem.lastIndexOfScalar(u8, rest, '+') orelse return null;
+            if (!allDigits(rest[i + 1 ..])) return null;
             f.down = if (i + 1 == rest.len) all else std.fmt.parseInt(u32, rest[i + 1 ..], 10) catch return null;
             rest = rest[0..i];
-        };
-        if (rest.len == 0 or (f.up == null and f.down == null)) return null;
+        }
+        if (rest.len == 0 or std.mem.indexOfScalar(u8, rest, '+') != null) return null;
         f.rule = rest;
         return f;
     }
@@ -96,7 +115,7 @@ pub const View = struct {
     edges: []const Edge,
 };
 
-pub const Error = error{ UnknownRule, UnknownShared, NoPath, OutOfMemory };
+pub const Error = error{ UnknownRule, UnknownShared, NoPath, NotSelected, OutOfMemory };
 
 /// The rules a view shows: the selected ones, narrowed by the options.
 fn chosen(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, opts: Options) ![]bool {
@@ -115,7 +134,7 @@ fn chosen(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mas
         for (sel, wf.rules, 0..) |*s, r, i| s.* = s.* and (usesShared(r, name) or loads(wf, g, i, si));
     }
     if (opts.why) |pair| {
-        const path = try whyPath(a, wf, g, pair[0], pair[1]);
+        const path = try whyPath(a, wf, g, mask, pair[0], pair[1]);
         @memset(sel, false);
         for (path) |i| sel[i] = true;
     }
@@ -141,22 +160,24 @@ fn usesShared(r: workflow.Rule, name: []const u8) bool {
     return false;
 }
 
-/// Whether rule `i` writes inside the path of service `si`, which loads it.
+/// Whether rule `i` writes the path of service `si`, or inside it, which the
+/// service loads.
 fn loads(wf: *const workflow.Workflow, g: *const graph.Graph, i: usize, si: usize) bool {
     const s = wf.shared[si];
     if (!s.isService()) return false;
     const sp = s.path_abs orelse return false;
-    for (wf.rules[i].output_abs) |o| if (workflow.within(sp, o) and !eql(u8, o, sp)) return true;
+    for (wf.rules[i].output_abs) |o| if (workflow.within(sp, o)) return true;
     _ = g;
     return false;
 }
 
 /// The rules of one path from rule `from` to rule `to`, in order: the
-/// shortest, found breadth first through the rules reading each one's
-/// outputs.
-pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, from: []const u8, to: []const u8) ![]const usize {
+/// shortest, found breadth first through the selected rules (`mask`)
+/// reading each one's outputs.
+pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, from: []const u8, to: []const u8) ![]const usize {
     const s = wf.ruleIndex(from) orelse return error.UnknownRule;
     const t = wf.ruleIndex(to) orelse return error.UnknownRule;
+    if (!mask[s] or !mask[t]) return error.NotSelected;
     const prev = try a.alloc(?usize, wf.rules.len);
     @memset(prev, null);
     var queue: std.ArrayList(usize) = .empty;
@@ -165,7 +186,7 @@ pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph
     var found = s == t;
     while (head < queue.items.len and !found) : (head += 1) {
         const i = queue.items[head];
-        for (g.children[i]) |c| if (prev[c] == null and c != s) {
+        for (g.children[i]) |c| if (mask[c] and prev[c] == null and c != s) {
             prev[c] = i;
             if (c == t) {
                 found = true;

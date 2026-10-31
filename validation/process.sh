@@ -1109,7 +1109,7 @@ vrc=$?
 rrc=$?
 "$workz" run wf.toml --no-isolation --max-memory 1024T -q > s.json 2> /dev/null
 mrc=$?
-check "sizes above 1024T are refused before any arithmetic, and 1024T is accepted" '[ $vrc = 2 ] && grep -q "invalid memory .18446744073709551615M." v.err && [ $rrc = 2 ] && grep -q "at most 1024T" r.err && [ $mrc = 0 ]'
+check "sizes above 1024T are refused before any arithmetic, and 1024T is accepted" '[ $vrc = 2 ] && grep -q "invalid memory .18446744073709551615M." v.err && [ $rrc = 2 ] && grep -q "from 1M to 1024T" r.err && [ $mrc = 0 ]'
 
 new input-errors
 mkdir -p deep && p=deep && for i in $(seq 70); do p="$p/d"; done && mkdir -p "$p"
@@ -1377,7 +1377,7 @@ done
 check "every help text fits in 80 columns ($widest)" '[ "$widest" -le 80 ]'
 "$workz" status --history x 2> hist-x.txt
 rc=$?
-check "a WORKFLOW that does not exist is refused, as --history x is" '[ $rc = 2 ] && grep -q "no workflow file x; -d DIR names a working directory" hist-x.txt'
+check "a WORKFLOW that does not exist is refused, and --history x says it takes a number" '[ $rc = 2 ] && grep -q "history takes a whole number of launches, and no workflow file x exists" hist-x.txt'
 "$workz" run wf.toml --max-thread 4 2> typo.txt
 rc=$?
 check "a mistyped option is named with the one probably meant" '[ $rc = 2 ] && grep -q "did you mean .--max-threads.?" typo.txt'
@@ -1400,12 +1400,34 @@ rc1=$?
 rc2=$?
 "$workz" run wf.toml -r -1 2> negative.txt
 rc3=$?
-check "an option the command does not take, a bad variable name and a negative count are refused" '[ $rc1 = 2 ] && grep -q "unknown option .-t. for status" status-t.txt && [ $rc2 = 2 ] && grep -q "invalid value .. (use a variable name" pass-env.txt && [ $rc3 = 2 ] && grep -q "invalid value .-1. (use 0 to 3)" negative.txt'
+check "an option the command does not take, a bad variable name and a negative count are refused" '[ $rc1 = 2 ] && grep -q "unknown option .-t. for status" status-t.txt && [ $rc2 = 2 ] && grep -q "pass-env needs a value" pass-env.txt && [ $rc3 = 2 ] && grep -q "invalid value .-1. (use 0 to 3)" negative.txt'
 "$workz" version extra 2> ver.txt
 vrc=$?
 "$workz" run wf.toml --no-isolation --slice x.slice 2> slice.txt
 src=$?
 check "version takes no words, and --slice needs the scope --no-isolation leaves out" '[ $vrc = 2 ] && grep -q "version takes no arguments" ver.txt && [ $src = 2 ] && grep -q "which --no-isolation does not make" slice.txt'
+mkdir cl && cd cl && touch afile
+{ header cl; rule a '[]' '["a.txt"]' '"touch a.txt"'; rule b '["a.txt"]' '["b.txt"]' '"touch b.txt"'; } > wf.toml
+"$workz" plan -d "" wf.toml 2> empty-d.txt; r1=$?
+"$workz" plan .. 2> dir-wf.txt; r2=$?
+"$workz" plan wf.toml -d afile 2> file-d.txt; r3=$?
+"$workz" watch --once --launch .. 2> launch-dot.txt; r4=$?
+check "an empty -d, a directory as WORKFLOW, -d naming a file and a launch ID that is a path are refused with a message" '[ $r1 = 2 ] && grep -q "^workz: -d needs a value" empty-d.txt && [ $r2 = 2 ] && grep -q "is a directory; name the workflow file in it" dir-wf.txt && [ $r3 = 2 ] && grep -q "names a file, not a directory" file-d.txt && [ $r4 = 2 ] && grep -q "use a launch ID" launch-dot.txt && ! grep -q "error:" empty-d.txt dir-wf.txt file-d.txt launch-dot.txt && [ ! -e .workz ]'
+"$workz" plan --target=a -- wf.toml > eq.txt 2> eq.err; r1=$?
+"$workz" plan wf.toml --summary=yes 2> flag-eq.txt; r2=$?
+check "an option takes its value after =, a flag takes none, and -- ends the options" '[ $r1 = 0 ] && grep -q "^run   a " eq.txt && ! grep -q " b " eq.txt && [ $r2 = 2 ] && grep -q "summary takes no value" flag-eq.txt'
+"$workz" prepare -o --check 2> prep-o.txt; r1=$?
+"$workz" init "" 2> init-empty.txt; r2=$?
+"$workz" init - 2> init-dash.txt; r3=$?
+check "prepare -o and init refuse an option or an empty word as a file name" '[ $r1 = 2 ] && grep -q "needs a value" prep-o.txt && [ ! -e ./--check ] && [ $r2 = 2 ] && [ $r3 = 2 ] && grep -q "init needs a file name" init-dash.txt && [ ! -e ./- ]'
+"$workz" verify wf.toml > verify.txt; r1=$?
+check "verify without records reports every rule unrecorded and leaves no .workz behind" '[ $r1 = 1 ] && grep -q "unrecorded a" verify.txt && [ ! -e .workz ]'
+"$workz" run wf.toml --no-isolation -q --grace 0s > grace.json; r1=$?
+"$workz" report -d . --json --format tsv 2> formats.txt; r2=$?
+"$workz" run wf.toml --max-memory 512K 2> small.txt; r3=$?
+"$workz" graph wf.toml --why a:b -t a 2> why.txt; r4=$?
+check "--grace 0s is zero, two report formats are refused, a size names its range, and --why follows --target" '[ $r1 = 0 ] && [ $r2 = 2 ] && grep -q "give one format" formats.txt && [ $r3 = 2 ] && grep -q "from 1M to 1024T" small.txt && [ $r4 = 2 ] && grep -q "b is not among the rules --target selects" why.txt'
+cd ..
 
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml

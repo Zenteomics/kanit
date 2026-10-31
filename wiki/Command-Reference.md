@@ -13,6 +13,8 @@ workz <command> [options]
 
 WORKFLOW defaults to `workflow.toml` in the current directory, the file `workz init` writes. The working directory is the directory of the workflow file, or `-d DIR`. Commands that only read records (`watch`, `status`, `logs`, `report`, `control`, `clean`) take the workflow path only to find that directory, and work without it from inside the working directory. `--target` applies to the commands that read the workflow.
 
+An option's value is the next word, or follows `=` in the same word, as in `--launch=ID`; a word that starts with `-` or is empty is never taken as a value. After `--`, every word is the workflow or an argument, even one that starts with `-`. `-d` must name a directory, and WORKFLOW a file. `--launch ID` takes a launch ID, as `status --history` lists them, never a path.
+
 ## init
 
 ```text
@@ -94,7 +96,7 @@ Shows the selected rules and what links them, in layers: as text on a terminal, 
 
 - `rules` links each rule to the rules that read its outputs, naming the file; `files` puts the files between them, with each written file inside a directory input linked to it; `resources` adds each shared input, the rules that write what a service loads (`loads`) and the rules that map or join it, and each resource group with the units its rules take; `all` is `files` and `resources`.
 - `--focus +RULE` keeps RULE and every rule it depends on, `RULE+` the rules depending on it, `+RULE+` both, and a number limits the levels: `2+RULE`, `RULE+1`.
-- Give at most one of `--focus`, `--why` and `--users`. `--why` exits 1 when no path leads from FROM to TO.
+- Give at most one of `--focus`, `--why` and `--users`. `--why` follows only the rules `--target` selects, and exits 1 when no path leads from FROM to TO. A rule named with digits makes some `--focus` texts read two ways, such as `12+`: the reading that names a rule of the workflow wins.
 - JSON follows the Cytoscape elements shape: `{"elements": {"nodes": [{"data": ...}], "edges": [{"data": ...}]}}`, each node with `id`, `kind` (`rule`, `step`, `file`, `shared`, `group`) and `label`, each edge with `source`, `target` and `kind` (`input`, `produces`, `consumes`, `within`, `maps`, `joins`, `loads`, `takes`).
 
 ## run
@@ -125,7 +127,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 | `--json`             |            | off               | JSON summary, also on a terminal           |
 | `--no-color`         |            | off               | no colors on a terminal                    |
 
-- Sizes take `K`, `M`, `G` or `T`, up to `1024T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` kills at once.
+- Sizes take `K`, `M`, `G` or `T`, from `1M` to `1024T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` or `--grace 0s` kills at once.
 - `--threads STEP=N` gives every rule of step STEP a request of N threads in this launch, for trying another thread count without editing the workflow. The request is part of each rule's key, so those rules run again with it, and again with the workflow's request in a launch without it ([Resources and scheduling](Resources-and-Scheduling.md#trying-another-thread-count)).
 - The [input manifest](Reuse-and-Resume.md#input-manifests) is a JSON object of absolute paths to `"sha256:<hex>"` digests, or to a digest with a stamp.
 - `--slice` places the run's scope, so it needs isolation: `run` refuses it with `--no-isolation`.
@@ -209,7 +211,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 | `--compare`      | OTHER                 |         | compare with another launch             |
 | `--methods`      |                       |         | what produced the recorded results      |
 
-`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare`, `--bottlenecks` and `--methods`. `--methods` describes the results recorded in the working directory, whatever launches made them, so it takes no `--launch`; it prints text, or JSON with `--format json` ([Reports](Reports.md#methods)). `--format` applies to the attempt table and to `--suggest`, which prints a table on a terminal, and TSV, or JSON with `--format json`, to a file or a pipe; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output.
+`--compare` takes a launch ID, a launch directory, or a working directory for its newest launch. Give at most one of `--suggest`, `--compare`, `--bottlenecks` and `--methods`. `--methods` describes the results recorded in the working directory, whatever launches made them, so it takes no `--launch`; it prints text, or JSON with `--format json` ([Reports](Reports.md#methods)). `--format` applies to the attempt table and to `--suggest`, which prints a table on a terminal, and TSV, or JSON with `--format json`, to a file or a pipe; `--compare` and `--bottlenecks` print text. The HTML page is not printed onto a terminal: write it with `-o`, or redirect standard output. Two formats, such as `--json --format tsv`, are refused.
 
 ## verify
 
@@ -217,7 +219,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 workz verify [WORKFLOW] [--content]
 ```
 
-Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs.
+Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
 
 ## clean
 
