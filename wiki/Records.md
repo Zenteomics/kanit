@@ -69,7 +69,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 ```json
 {
   "v": 1,
-  "engine": "workz 0.5.0 sha256:...",
+  "engine": "workz 0.6.0 sha256:...",
   "engine_key": 4,
   "launch": "20261027T224512.478-40c9943e",
   "status": "completed",

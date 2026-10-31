@@ -4,9 +4,9 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
-## Unreleased
+## [0.6.0] - 2026-10-31
 
-This version makes reuse and records hold where 0.5.0 could mislead: a directory input counts its whole shape, a failed rerun keeps the last result and its record, a dead service fails the rules that used it, budget checks count only the rules that will run, and damaged records are named instead of shown. workz reads workflows with z-toml 0.4.1.
+This version makes reuse and records hold where 0.5.0 could mislead: a directory input counts its whole shape, a failed rerun or a killed launch keeps the last result and its record, `plan` and `verify` decide as `run` does, a dead service fails the rules that used it, a stopped tool keeps its grace period, budget checks count only the rules that will run, and damaged records are named instead of shown. Containers and crashes can no longer cost the records, `{threads}` follows a `--threads` override, validation and the command line refuse what they cannot honor, and every record says its format version. workz reads workflows with z-toml 0.4.1.
 
 Three changes need action:
 

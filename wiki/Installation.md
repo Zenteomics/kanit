@@ -22,7 +22,7 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 ```text
-workz 0.5.0
+workz 0.6.0
 ```
 
 `ReleaseSafe` keeps Zig's safety checks in the shipped executable. A plain `zig build` gives a Debug build for development, and `zig build test --summary all` runs the unit tests.

@@ -244,7 +244,7 @@ workz help [COMMAND]
 workz COMMAND --help
 ```
 
-`workz help` lists the commands grouped by job. `workz help COMMAND`, `workz COMMAND --help` and `workz COMMAND -h` show a command's usage, options with their defaults, and examples. `workz version` (or `--version`) prints the version, such as `workz 0.5.0`.
+`workz help` lists the commands grouped by job. `workz help COMMAND`, `workz COMMAND --help` and `workz COMMAND -h` show a command's usage, options with their defaults, and examples. `workz version` (or `--version`) prints the version, such as `workz 0.6.0`.
 
 A mistyped command or option is named in the error with the one probably meant:
 
