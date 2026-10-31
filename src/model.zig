@@ -172,14 +172,14 @@ pub fn median(xs: []const f64) f64 {
 }
 
 /// Reads every attempt record of a launch, in rule and attempt order:
-/// `attempts/<rule>/<NNN>/record.json`, where NNN is zero-padded so the
-/// names sort by number. An attempt still running has no record yet.
+/// `attempts/<rule>/<NNN>/record.json`, attempts sorted by number. An attempt
+/// still running has no record yet.
 pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     const dir = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
     var out: std.ArrayList(Attempt) = .empty;
     for ((try sys.dirNames(gpa, a, dir)) orelse &.{}) |rule| {
         const rule_dir = try std.fs.path.join(a, &.{ dir, rule });
-        for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
+        for ((try records.attemptNames(gpa, a, rule_dir)) orelse &.{}) |n| {
             if (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, n, "record.json" }), unreadable)) |r| try out.append(a, r);
         }
     }
@@ -197,6 +197,11 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
         if (unreadable) |list| try list.append(a, path);
         return null;
     };
+    // A record of a newer format is left out rather than misread.
+    if (fields.newer(v, records.record_version)) {
+        if (unreadable) |list| try list.append(a, path);
+        return null;
+    }
     const wall = num(get(v, "wall_s")) orelse 0;
     const req = get(v, "request");
     const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
@@ -272,12 +277,15 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
         k -= 1;
         const launch = launches[k];
         if (!std.mem.lessThan(u8, launch, id)) continue;
-        var i: usize = 0;
-        while (i < wanted.count()) {
-            const rule = wanted.keys()[i];
+        // The rules that launch ran, listed once: probing every wanted rule
+        // in every earlier launch would cost rules times launches.
+        const attempts_dir = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts" });
+        const ran = (try sys.dirNames(gpa, a, attempts_dir)) orelse continue;
+        for (ran) |rule| {
+            const i = wanted.getIndex(rule) orelse continue;
             // The rule's last completed attempt in that launch, if any.
-            const rule_dir = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts", rule });
-            const numbers = (try sys.dirNames(gpa, a, rule_dir)) orelse &.{};
+            const rule_dir = try std.fs.path.join(a, &.{ attempts_dir, rule });
+            const numbers = (try records.attemptNames(gpa, a, rule_dir)) orelse &.{};
             var j = numbers.len;
             const found = while (j > 0) {
                 j -= 1;
@@ -289,7 +297,7 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
                 reused.reused_from = launch;
                 try out.append(a, reused);
                 wanted.swapRemoveAt(i);
-            } else i += 1;
+            }
         }
     }
     return out.items;
@@ -744,11 +752,16 @@ fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]c
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
     const bytes = sys.readFile(gpa, path, 1 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
         try unreadable.append(a, path);
         return null;
     };
+    if (fields.newer(v, records.record_version)) {
+        try unreadable.append(a, path);
+        return null;
+    }
+    return v;
 }
 
 fn stateOf(s: tracker.Status, finished: bool) State {
@@ -1198,8 +1211,11 @@ fn collectWaits(a: Allocator, l: *Launch) !void {
             var fits = false;
             for (tr.group_waits.items) |w| {
                 if (!eql(u8, w.group, name) or w.to_ns == 0 or s.ns < w.from_ns or s.ns >= w.to_ns) continue;
-                waiting = true;
                 const v = tr.rules.items[w.rule];
+                // Older records give a rule's request only once it starts: one
+                // that never started cannot tell whether it fit.
+                if (v.threads == 0 and v.memory_mib == 0) continue;
+                waiting = true;
                 if (l.max_threads - s.threads_reserved >= @as(f64, @floatFromInt(v.threads)) and l.max_memory_mib - s.memory_reserved_mib >= @as(f64, @floatFromInt(v.memory_mib))) fits = true;
             }
             moments += @intFromBool(waiting);

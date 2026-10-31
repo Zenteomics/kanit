@@ -48,13 +48,15 @@ workz: workflow.toml: 3 problems
 
 - `rule NAME: declare the producer path instead of the symlink 'PATH'`: The input reaches another rule's output, or a directory it writes into, through a symlink. Use the output's own path, so the dependency is visible to workz.
 
-- `rule NAME: 'PATH' passes through a symlinked directory; name it by its real path`: An output, log, benchmark or workdir is written through a symlink to a directory. Write the path the symlink points to.
+- `rule NAME: input 'PATH' names another file than it spells: a '..' follows a symlink; write the path without '..'`: A directory before the `..` is a symlink, so the kernel steps up from where the link points, not from where the path seems to be. Write the path to the file itself.
+
+- `rule NAME: 'PATH' passes through a symlinked directory; name it by its real path`: An output, log, benchmark or workdir is written through a symlink to a directory, or through a symlink that points nowhere. Write the path the symlink points to.
 
 - `rule NAME: 'PATH' is inside its directory input 'DIR'; write it outside that directory`: The rule would change its own input while it runs. Write the output, log, benchmark or workdir beside the directory, or name the input files one by one.
 
 - `cannot read input DIR: DIR/LINK is a symlink to a directory; declare the directory it names as an input of its own`: A directory input holds a symlink to a directory, whose contents workz would not see. Declare the linked directory as an input too, or name the inputs below the link explicitly.
 
-- `rule NAME must declare memory` and `rule NAME: invalid memory 'TEXT'`: Every rule needs a memory request, as a string such as `"512M"` or `"4G"`, on the rule, in its resources or in `[defaults]`.
+- `rule NAME must declare memory` and `rule NAME: invalid memory 'TEXT'`: Every rule needs a memory request, as a string such as `"512M"` or `"4G"`, on the rule, in its resources or in `[defaults]`. A size is digits and a unit, without a sign or `_`. `defaults: invalid memory 'TEXT'` is the same for the default, which is checked even when every rule sets its own.
 
 - `rule NAME uses undeclared resource group 'G'`, `rule NAME uses undeclared shared input 'S'` (with `; did you mean 'X'?` when a declared one is close): Declare the group under `[resource_groups.G]` or the input under `[shared.S]`, or fix the name.
 
@@ -81,6 +83,8 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 - `rule NAME requests N threads; the run allows M` and `rule NAME needs N MiB; the run allows M MiB`, which says `with its shared inputs` or `with its Podman client` where they count: One rule's request alone is larger than the budget, so it could never start. Raise `--max-threads` or `--max-memory`, or lower the request; `workz plan --budget` finds every such rule before a launch.
 
 - `missing input of rule NAME: PATH`: An input that no rule produces does not exist. Create it, fix the path, or add the rule that makes it.
+
+- `shared input NAME (PATH): FILE is not a regular file, and a shared input maps every file it holds`: A file input holds a FIFO, socket or device, which cannot be mapped and could block the holder. Move it out of the shared directory.
 
 - `output of completed rule NAME changed since it was recorded: PATH`: A recorded output was changed outside workz, and workz will not overwrite it silently. Run the rule again with `--rerun-rule NAME`, which keeps the changed bytes in `previous/`, or restore the file ([Changed outputs](Reuse-and-Resume.md#changed-outputs)). The launch exits with status 1.
 

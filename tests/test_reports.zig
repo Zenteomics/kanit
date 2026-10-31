@@ -549,3 +549,33 @@ test "[edge] - [report]: record fields that do not fit their type read as missin
     try testing.expectEqual(@as(?f64, null), workz.fields.float(v, "text"));
     try testing.expectEqual(@as(?f64, null), workz.fields.float(v, "missing"));
 }
+
+test "[failure] - [report]: a record or event of a newer format is left out and counted, never misread" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/a", "launch/attempts/a/001", "launch/attempts/b", "launch/attempts/b/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl",
+        \\{"v":1,"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":96}
+        \\{"v":2,"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","attempt":1}
+        \\
+    );
+    _ = try s.file("launch/attempts/a/001/record.json",
+        \\{"v":2,"rule":"a","attempt":1,"status":"completed","reason":"","wall_s":1.0,"request":{"threads":1,"memory_mib":1}}
+    );
+    // Written before records carried a version: read as the first one.
+    _ = try s.file("launch/attempts/b/001/record.json",
+        \\{"rule":"b","attempt":1,"status":"completed","reason":"","wall_s":1.0,"request":{"threads":1,"memory_mib":1}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+
+    try testing.expectEqual(@as(usize, 1), l.tracker.unreadable_lines);
+    try testing.expectEqual(@as(usize, 1), l.unreadable.items.len);
+    try testing.expect(std.mem.endsWith(u8, l.unreadable.items[0], "/attempts/a/001/record.json"));
+    try testing.expectEqual(@as(usize, 1), l.rows.len);
+    try testing.expectEqualStrings("b", l.rows[0].rule);
+}

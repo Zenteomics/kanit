@@ -137,11 +137,12 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
         else => return err,
     };
     defer gpa.free(bytes);
-    var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return error.CorruptState;
+    var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch |err| return if (err == error.OutOfMemory) err else error.CorruptState;
     const v = probe.value.format_version;
     probe.deinit();
     if (v < 1 or v > format_version) return error.UnsupportedState;
-    s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
+    // Running out of memory is not a damaged file.
+    s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else error.CorruptState;
     // Format 1 lacks `envs`, which this engine adds as rules run; formats 1
     // and 2 record identities with the device number. Once read, the file
     // is saved as the current format.
@@ -349,24 +350,32 @@ fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList(
 }
 
 /// Total bytes of a file or of every file below a directory, each rounded
-/// up to whole 4 KiB pages; used to reserve shared inputs.
-pub fn pageBytes(gpa: Allocator, path: []const u8) !u64 {
+/// up to whole 4 KiB pages; used to reserve shared inputs. Every entry must
+/// be a regular file, or a symlink to one, since a holder maps them: a FIFO
+/// or device returns `error.NotRegularFile`. On an error, `failed` names the
+/// entry when it is known.
+pub fn pageBytes(gpa: Allocator, path: []const u8, failed: *?[]u8) !u64 {
     var files: std.ArrayList([]u8) = .empty;
     defer {
         for (files.items) |f| gpa.free(f);
         files.deinit(gpa);
     }
-    try listFiles(gpa, path, &files);
+    try listFiles(gpa, path, &files, failed);
     var total: u64 = 0;
     for (files.items) |f| {
         const id = (try sys.stat(gpa, f)) orelse continue;
+        if (!id.isReg()) {
+            failed.* = try gpa.dupe(u8, f);
+            return error.NotRegularFile;
+        }
         total += std.mem.alignForward(u64, id.size, 4096);
     }
     return total;
 }
 
-/// Every regular file at or below `path`.
-pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !void {
+/// Every entry other than a directory at or below `path`. On an error,
+/// `failed` names the entry when it is known.
+pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8), failed: *?[]u8) !void {
     const id = (try sys.stat(gpa, path)) orelse return error.FileNotFound;
     if (!id.isDir()) {
         try out.append(gpa, try gpa.dupe(u8, path));
@@ -377,9 +386,7 @@ pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !v
         for (lines.items) |l| gpa.free(l);
         lines.deinit(gpa);
     }
-    var failed: ?[]u8 = null;
-    defer if (failed) |f| gpa.free(f);
-    try walk(gpa, path, path.len, &lines, 0, false, &failed);
+    try walk(gpa, path, path.len, &lines, 0, false, failed);
     for (lines.items) |l| {
         const rel = l[0..std.mem.indexOfScalar(u8, l, '\t').?];
         try out.append(gpa, try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, rel }));
@@ -489,20 +496,24 @@ fn lessConst(_: void, x: []const u8, y: []const u8) bool {
 ///
 /// Early cutoff. A rule marked `cutoff = true` has its outputs hashed after
 /// success. A consumer then keys such an input on its content digest, and the
-/// producer contributes its output digests instead of its rule key, so a
-/// producer that reruns and writes the same bytes leaves its consumers reused.
-/// A digest is used only while the file's identity equals the recorded one.
+/// producer contributes the digests of the outputs the consumer reads instead
+/// of its rule key, so a producer that reruns and writes the same bytes
+/// leaves its consumers reused, and a changed output reruns only its readers.
+/// A digest is used while the file's identity equals the recorded one, or
+/// while its bytes still match the digest, as `checkOutput` decides.
 pub const Cutoff = struct {
     /// Output path to "sha256:<hex>".
     digests: std.StringHashMapUnmanaged([]const u8) = .empty,
-    /// Per rule: what a cutoff producer contributes to its consumers' keys.
-    parent: []?[]const u8,
+    /// Per rule: the outputs of a cutoff producer, with their digests, when
+    /// every one is intact.
+    outputs: []?[]const Output,
 
     /// Builds the view from the recorded state. Outputs recorded without a
-    /// digest are hashed once; with `store`, the digest is kept in the state.
+    /// digest are hashed once; with `store`, the digest, and the identity of
+    /// an output whose bytes still match, are kept in the state.
     pub fn init(a: Allocator, gpa: Allocator, wf: *const workflow.Workflow, st: *State, ids: *Identities, store: bool) !Cutoff {
-        var c: Cutoff = .{ .parent = try a.alloc(?[]const u8, wf.rules.len) };
-        @memset(c.parent, null);
+        var c: Cutoff = .{ .outputs = try a.alloc(?[]const Output, wf.rules.len) };
+        @memset(c.outputs, null);
         var mit = st.data.manifest.map.iterator();
         while (mit.next()) |m| {
             const now = (try ids.get(m.key_ptr.*)) orelse continue;
@@ -514,19 +525,19 @@ pub const Cutoff = struct {
             const outs = try st.allocator().dupe(Output, e.outputs);
             var complete = true;
             for (outs) |*o| {
-                const now = (try ids.get(o.path)) orelse {
-                    complete = false;
-                    continue;
-                };
-                if (!std.mem.eql(u8, now, o.id)) {
-                    complete = false;
-                    continue;
+                switch (try checkOutput(gpa, ids, o.*)) {
+                    .intact => {},
+                    .refreshed => |now| o.id = try st.allocator().dupe(u8, now),
+                    .missing, .changed => {
+                        complete = false;
+                        continue;
+                    },
                 }
                 if (o.sha256 == null) o.sha256 = try st.allocator().dupe(u8, &try sys.sha256File(gpa, o.path));
                 try c.digests.put(a, o.path, try std.fmt.allocPrint(a, "sha256:{s}", .{o.sha256.?}));
             }
             if (store) e.outputs = outs;
-            if (complete) c.parent[i] = try parentText(a, outs);
+            if (complete) c.outputs[i] = outs;
         }
         return c;
     }
@@ -534,21 +545,25 @@ pub const Cutoff = struct {
     /// Records the digests of a cutoff rule that just completed.
     pub fn record(self: *Cutoff, a: Allocator, i: usize, outputs: []const Output) !void {
         for (outputs) |o| try self.digests.put(a, o.path, try std.fmt.allocPrint(a, "sha256:{s}", .{o.sha256.?}));
-        self.parent[i] = try parentText(a, outputs);
+        self.outputs[i] = try a.dupe(Output, outputs);
     }
 
-    /// A producer's contribution to a consumer's key.
-    pub fn parentKey(self: *const Cutoff, i: usize, rule_key: []const u8) []const u8 {
-        return self.parent[i] orelse rule_key;
+    /// What producer `p` contributes to the key of `consumer`: for a cutoff
+    /// producer, the digests of the outputs the consumer reads, as an input
+    /// or inside a directory input; else `rule_key`.
+    pub fn parentKey(self: *const Cutoff, a: Allocator, p: usize, consumer: *const workflow.Rule, rule_key: []const u8) ![]const u8 {
+        const outs = self.outputs[p] orelse return rule_key;
+        var w: std.Io.Writer.Allocating = .init(a);
+        try w.writer.writeAll("cutoff");
+        for (outs) |o| {
+            const read = for (consumer.input_abs) |in| {
+                if (workflow.within(in, o.path)) break true;
+            } else false;
+            if (read) try w.writer.print(" {s}", .{o.sha256.?});
+        }
+        return w.written();
     }
 };
-
-fn parentText(a: Allocator, outputs: []const Output) ![]const u8 {
-    var w: std.Io.Writer.Allocating = .init(a);
-    try w.writer.writeAll("cutoff");
-    for (outputs) |o| try w.writer.print(" {s}", .{o.sha256.?});
-    return w.toOwnedSlice();
-}
 
 pub const Key = struct {
     command: []const u8,
@@ -688,7 +703,7 @@ pub fn checkOutput(gpa: Allocator, ids: *Identities, o: Output) !OutputCheck {
 
 /// The key of rule `i`. Each producer contributes the key it has in this
 /// launch (`launch.get(p)`), else its recorded key, else "none"; a cutoff
-/// producer contributes the digests of its outputs instead.
+/// producer contributes the digests of the outputs rule `i` reads instead.
 pub fn ruleKey(
     a: Allocator,
     ids: *Identities,
@@ -708,7 +723,7 @@ pub fn ruleKey(
     for (parents, names, keys) |p, *n, *k| {
         n.* = wf.rules[p].name;
         const recorded = if (st.data.rules.map.get(n.*)) |e| e.key else "none";
-        k.* = cut.parentKey(p, launch.get(p) orelse recorded);
+        k.* = try cut.parentKey(a, p, &wf.rules[i], launch.get(p) orelse recorded);
     }
     return computeKey(a, ids, &wf.rules[i], wf.root, env_text, names, keys, engine, cut, extra, missing);
 }

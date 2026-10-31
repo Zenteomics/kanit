@@ -3,7 +3,7 @@
 Reports look at a launch in two scopes:
 
 - **The pipeline**: the latest completed run of every rule, whether this launch ran it or reused it from an earlier launch. Steps, time per category, tool and sample, request suggestions and comparisons use it, so a launch that reran one script still describes the whole pipeline.
-- **The launch**: the attempts this launch started. The attempt table, the critical path, waiting for resources and the use of the budget use it.
+- **The launch**: the attempts this launch started. The attempt table, the critical path, waiting for resources and the use of the budget use it. An attempt writes its record when it ends, so while the launch runs, its running attempts are left out, and `report` says so on standard error; the HTML page shows them.
 
 The reports use these terms:
 

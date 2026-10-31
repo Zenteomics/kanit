@@ -103,9 +103,11 @@ pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
     return l;
 }
 
-/// A label value: 1 to 200 bytes without control characters.
+/// A label value: 1 to 200 characters of valid UTF-8, without control
+/// characters.
 fn validLabel(value: []const u8) bool {
-    if (value.len == 0 or value.len > 200) return false;
+    if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return false;
+    if ((std.unicode.utf8CountCodepoints(value) catch return false) > 200) return false;
     for (value) |c| if (c < 0x20 or c == 0x7f) return false;
     return true;
 }
@@ -462,9 +464,12 @@ pub fn parseMemoryMib(text: []const u8) ?u64 {
     const last = std.ascii.toUpper(t[t.len - 1]);
     const has_unit = std.mem.indexOfScalar(u8, "KMGT", last) != null;
     const digits = if (has_unit) t[0 .. t.len - 1] else t;
+    // Digits alone: parseInt would also take a sign and underscores.
+    if (!allDigits(digits)) return null;
     const n = std.fmt.parseInt(u64, digits, 10) catch return null;
     const mib = switch (if (has_unit) last else 'M') {
-        'K' => n / 1024,
+        // Rounded up, so a request never shrinks; under 1 MiB is refused.
+        'K' => if (n < 1024) return null else std.math.divCeil(u64, n, 1024) catch unreachable,
         'M' => n,
         'G' => std.math.mul(u64, n, 1024) catch return null,
         'T' => std.math.mul(u64, n, 1024 * 1024) catch return null,
@@ -479,7 +484,7 @@ pub fn parseMemoryMib(text: []const u8) ?u64 {
 pub fn parseDuration(text: []const u8) ?u64 {
     const t = std.mem.trim(u8, text, " ");
     if (t.len == 0) return null;
-    if (std.fmt.parseInt(u64, t, 10)) |n| return if (n > 0) n else null else |_| {}
+    if (allDigits(t)) return if (std.fmt.parseInt(u64, t, 10) catch null) |n| (if (n > 0) n else null) else null;
     var total: u64 = 0;
     var i: usize = 0;
     while (i < t.len) {
@@ -599,6 +604,9 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         try p.keysNoted(d, &default_keys, &at, "[defaults]");
         default_threads = try keep(?i64, p.int(d, "threads", &at, "defaults"), null);
         default_memory = try keep(?[]const u8, p.str(d, "memory", &at, "defaults"), null);
+        // Checked where declared, so an unused bad default is found too.
+        if (default_threads) |t| if (t < 1 or t > 4096) try noted(p.failKey(&at, "threads", "defaults: threads must be between 1 and 4096", .{}));
+        if (default_memory) |m| if (parseMemoryMib(m) == null) try noted(p.failKey(&at, "memory", "defaults: invalid memory '{s}' (use a size from 1M to 1024T, such as 512M or 60G)", .{m}));
     }
 
     // [resource_groups.*]
@@ -643,6 +651,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         .array => |a| a,
         else => return problem.set(gpa, "rules must be an array of tables", .{}),
     };
+    if (rules_a.items.len == 0) return problem.set(gpa, "the workflow declares no [[rules]]", .{});
     var rules: std.ArrayList(Rule) = .empty;
     for (rules_a.items, 0..) |rv, i| {
         const r = parseRule(&p, &wf, root, default_threads, default_memory, i, rv) catch |err| switch (err) {
@@ -737,6 +746,9 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
     const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
     if (std.mem.trim(u8, shell, " \t\r\n").len == 0) return p.failKey(&at, "shell", "rule {s}: shell is empty; give the command that writes its outputs", .{name});
+    // Bash drops a NUL and runs what follows it, which is not the command
+    // a reader of the workflow sees.
+    if (std.mem.indexOfScalar(u8, shell, 0) != null) return p.failKey(&at, "shell", "rule {s}: shell holds a NUL byte", .{name});
     var input = try p.strings(r, "input", &at, name);
     const output = try p.strings(r, "output", &at, name);
     const diagnostics = try p.strings(r, "diagnostics", &at, name);
@@ -941,6 +953,15 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: [
     // name, which the graph and the containment checks do not see.
     const parent = std.fs.path.dirname(abs) orelse return;
     const real_root = (try cache.real(wf.root)) orelse return;
+    // A missing directory on the way may be a symlink that points nowhere:
+    // the resolution below skips it, so it is looked for here, up to the
+    // first directory that exists.
+    var head = parent;
+    while (head.len > wf.root.len and within(wf.root, head)) : (head = std.fs.path.dirname(head) orelse break) {
+        if (try cache.real(head) != null) break;
+        if (try sys.lstat(gpa, head) != null)
+            return problem.set(gpa, "rule {s}: '{s}' passes through a symlinked directory; name it by its real path", .{ rule, written });
+    }
     const dest = (try cache.destination(parent)) orelse return;
     defer gpa.free(dest);
     if (!within(real_root, dest)) return problem.set(gpa, "rule {s}: the parent of '{s}' resolves outside the working directory", .{ rule, written });
@@ -998,6 +1019,7 @@ const PathCache = struct {
             const real_dir = (try self.real(dir)) orelse break :blk null;
             break :blk try std.fs.path.join(self.gpa, &.{ real_dir, std.fs.path.basename(path) });
         };
+        errdefer if (r) |x| self.gpa.free(x);
         try self.reals.put(self.gpa, path, r);
         return r;
     }
@@ -1026,6 +1048,33 @@ fn fileAncestor(gpa: Allocator, problem: *Problem, root: []const u8, files: *con
         const owner = files.get(dir) orelse sides.get(dir) orelse continue;
         return problem.add(gpa, "rule {s}: {s}'{s}' needs '{s}' to be a directory, but rule {s} writes that path as a file", .{ rule, what, written, keyPath(root, dir), owner });
     }
+}
+
+/// Whether `written`, a path with a `..` component, leads the kernel
+/// somewhere else than its normalized form `abs`: the kernel resolves the
+/// part up to the last `..` with every symlink in it, normalizing does not.
+/// False when that part does not exist, since the kernel cannot follow it
+/// either.
+fn dotDotDiffers(gpa: Allocator, cache: *PathCache, root: []const u8, written: []const u8, abs: []const u8) !bool {
+    var it = std.mem.splitScalar(u8, written, '/');
+    var end: ?usize = null;
+    var pos: usize = 0;
+    while (it.next()) |part| {
+        pos += part.len;
+        if (std.mem.eql(u8, part, "..")) end = pos;
+        pos += 1;
+    }
+    const cut = end orelse return false;
+    const raw = if (std.fs.path.isAbsolute(written)) written[0..cut] else try std.fs.path.join(gpa, &.{ root, written[0..cut] });
+    defer if (!std.fs.path.isAbsolute(written)) gpa.free(raw);
+    const kernel = (try sys.realpath(gpa, raw)) orelse return false;
+    defer gpa.free(kernel);
+    const rest = std.mem.trimStart(u8, written[cut..], "/");
+    const target = try std.fs.path.join(gpa, &.{ kernel, rest });
+    defer gpa.free(target);
+    const lexical = (try cache.destination(abs)) orelse return false;
+    defer gpa.free(lexical);
+    return !std.mem.eql(u8, std.mem.trimEnd(u8, target, "/"), std.mem.trimEnd(u8, lexical, "/"));
 }
 
 fn insideInput(gpa: Allocator, problem: *Problem, rule: []const u8, what: []const u8, written: []const u8, abs: []const u8, in_written: []const u8, in: []const u8) !void {
@@ -1225,6 +1274,13 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
                     continue :inputs;
                 }
             };
+            // Paths are normalized as written, `a/../b` as `b`, while the
+            // kernel follows a symlink before its `..`: a spelling whose two
+            // readings differ names a file the graph cannot see.
+            if (try dotDotDiffers(gpa, &cache, wf.root, written, in)) {
+                try problem.add(gpa, "rule {s}: input '{s}' names another file than it spells: a '..' follows a symlink; write the path without '..'", .{ r.name, written });
+                continue :inputs;
+            }
             // An input reaching a declared output, or a directory holding
             // one, through a symlink must name the producer path: the graph
             // links rules by the paths they write.
@@ -1260,4 +1316,10 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
         }
     }
     if (problem.count > prior) return error.Invalid;
+}
+
+fn allDigits(text: []const u8) bool {
+    if (text.len == 0) return false;
+    for (text) |c| if (!std.ascii.isDigit(c)) return false;
+    return true;
 }

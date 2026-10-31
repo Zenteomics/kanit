@@ -39,11 +39,22 @@ pub fn escape(w: *std.Io.Writer, s: []const u8) !void {
 }
 
 /// `name` cut to `max` characters by dropping its middle.
-fn middle(a: Allocator, name: []const u8, max: usize) []const u8 {
-    if (name.len <= max or max < 5) return name;
+pub fn middle(a: Allocator, name: []const u8, max: usize) []const u8 {
+    const chars = std.unicode.utf8CountCodepoints(name) catch return name;
+    if (chars <= max or max < 5) return name;
     const keep = max - 3;
     const head = (keep + 1) / 2;
-    return std.fmt.allocPrint(a, "{s}...{s}", .{ name[0..head], name[name.len - (keep - head) ..] }) catch name;
+    // Byte offsets of the first `head` and the last `keep - head` characters.
+    var it = std.unicode.Utf8View.initUnchecked(name).iterator();
+    var head_end: usize = 0;
+    var tail_start: usize = 0;
+    var k: usize = 0;
+    while (it.nextCodepointSlice()) |_| {
+        k += 1;
+        if (k == head) head_end = it.i;
+        if (k == chars - (keep - head)) tail_start = it.i;
+    }
+    return std.fmt.allocPrint(a, "{s}...{s}", .{ name[0..head_end], name[tail_start..] }) catch name;
 }
 
 /// A round step for axis ticks, giving at most `most` of them over `span`.

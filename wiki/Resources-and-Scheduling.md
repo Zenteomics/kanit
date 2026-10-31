@@ -96,7 +96,7 @@ shared = ["index"]
 Before the first rule that uses it starts, workz starts a holder process that maps every file of `path` and touches each page, so the files sit in memory once, charged to the holder. Its size, rounded up to whole pages, counts against the memory budget once, however many rules use it. Tools that map their index, such as `bowtie2 --mm`, then share those pages instead of each loading a copy.
 
 - The holder stays while a rule that has yet to run needs it, and stops after its last user. When a waiting rule needs memory that only an idle holder occupies, the holder gives way.
-- With isolation, workz sets the run scope's `MemoryLow` at the start of the launch to the total size of its shared inputs and services, so other work on the machine does not push an index out of memory.
+- With isolation, workz sets the run scope's `MemoryLow` at the start of the launch to the total size of its shared inputs and services. This protection is best-effort: other work's page cache is reclaimed before the index, but when the machine has nothing else to reclaim, the index can be pushed out rather than other work being killed.
 - A shared input's path, a mapped file or a service's index, is also an input of every rule that uses it, so rebuilding the index reruns them; there is no need to list it in `input` as well.
 - A shared input may not contain the output of a rule.
 

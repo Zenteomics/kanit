@@ -45,9 +45,11 @@ fn fail(a: Allocator, problem: *Problem, comptime fmt: []const u8, args: anytype
 /// a header line naming its columns, one of them `sample`. Empty lines and
 /// lines starting with `#` are skipped.
 pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error!Sheet {
-    const bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, sys.errorText(err) });
-    defer gpa.free(bytes);
-    const sep: u8 = if (std.mem.endsWith(u8, path, ".csv")) ',' else '\t';
+    const raw_bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, sys.errorText(err) });
+    defer gpa.free(raw_bytes);
+    // A spreadsheet program may start the file with a UTF-8 byte order mark.
+    const bytes = if (std.mem.startsWith(u8, raw_bytes, "\xef\xbb\xbf")) raw_bytes[3..] else raw_bytes;
+    const csv = std.mem.endsWith(u8, path, ".csv");
     var lines = std.mem.splitScalar(u8, bytes, '\n');
     var header: ?[]const []const u8 = null;
     var rows: std.ArrayList([]const []const u8) = .empty;
@@ -57,8 +59,15 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
         const line = std.mem.trimEnd(u8, raw, "\r");
         if (std.mem.trim(u8, line, " \t").len == 0 or line[0] == '#') continue;
         var fields: std.ArrayList([]const u8) = .empty;
-        var it = std.mem.splitScalar(u8, line, sep);
-        while (it.next()) |f| try fields.append(a, try a.dupe(u8, std.mem.trim(u8, f, " ")));
+        if (csv) {
+            splitCsv(a, line, &fields) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.Malformed => return fail(a, problem, "{s} line {d}: a quoted field must close its quote before the next comma or the end of the line", .{ shown, n }),
+            };
+        } else {
+            var it = std.mem.splitScalar(u8, line, '\t');
+            while (it.next()) |f| try fields.append(a, try a.dupe(u8, std.mem.trim(u8, f, " ")));
+        }
         if (header) |h| {
             if (fields.items.len != h.len) return fail(a, problem, "{s} line {d}: {d} fields, but the header has {d}", .{ shown, n, fields.items.len, h.len });
             for (fields.items, h) |v, col| if (v.len == 0) return fail(a, problem, "{s} line {d}: column {s} is empty", .{ shown, n, col });
@@ -69,6 +78,7 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
     const sheet: Sheet = .{ .columns = h, .rows = rows.items, .source = shown };
     const si = sheet.column("sample") orelse return fail(a, problem, "{s} has no column named sample", .{shown});
     for (h, 0..) |col, i| for (h[i + 1 ..]) |other| if (eql(u8, col, other)) return fail(a, problem, "{s} names column {s} twice", .{ shown, col });
+    for (h) |col| if (reserved(col)) return fail(a, problem, "{s}: column {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, col });
     for (rows.items, 0..) |row, k| {
         if (!workflow.validName(row[si])) return fail(a, problem, "{s}: sample '{s}' must use letters, digits, '_', '.', '-', starting with a letter or digit", .{ shown, row[si] });
         for (rows.items[0..k]) |earlier| if (eql(u8, earlier[si], row[si])) return fail(a, problem, "{s} lists sample {s} twice", .{ shown, row[si] });
@@ -77,19 +87,65 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
     return sheet;
 }
 
+/// The placeholders `workz prepare` fills from the step itself; a column or
+/// param of the same name would hide them, so the command and the request
+/// could disagree.
+fn reserved(name: []const u8) bool {
+    for ([_][]const u8{ "step", "input", "output", "threads" }) |r| if (eql(u8, name, r)) return true;
+    return false;
+}
+
+/// The fields of one CSV line, as RFC 4180 writes them: a field in double
+/// quotes may hold commas, and `""` in it is one quote. Unquoted fields are
+/// trimmed of spaces. A quoted field spans one line.
+fn splitCsv(a: Allocator, line: []const u8, fields: *std.ArrayList([]const u8)) error{ OutOfMemory, Malformed }!void {
+    var i: usize = 0;
+    while (true) {
+        while (i < line.len and line[i] == ' ') i += 1;
+        if (i < line.len and line[i] == '"') {
+            var field: std.ArrayList(u8) = .empty;
+            i += 1;
+            while (true) {
+                if (i >= line.len) return error.Malformed;
+                if (line[i] == '"') {
+                    if (i + 1 < line.len and line[i + 1] == '"') {
+                        try field.append(a, '"');
+                        i += 2;
+                        continue;
+                    }
+                    i += 1;
+                    break;
+                }
+                try field.append(a, line[i]);
+                i += 1;
+            }
+            while (i < line.len and line[i] == ' ') i += 1;
+            if (i < line.len and line[i] != ',') return error.Malformed;
+            try fields.append(a, field.items);
+        } else {
+            const end = std.mem.indexOfScalarPos(u8, line, i, ',') orelse line.len;
+            try fields.append(a, try a.dupe(u8, std.mem.trim(u8, line[i..end], " ")));
+            i = end;
+        }
+        if (i >= line.len) return;
+        i += 1;
+    }
+}
+
 /// The values `{name}` placeholders take in one rule.
 const Scope = struct {
     sheet: ?Sheet,
     /// The sample sheet row of a `for_each` rule.
     row: ?[]const []const u8,
     params: *const std.StringArrayHashMapUnmanaged([]const u8),
-    step: []const u8,
+    /// Where the values are, for messages: `step NAME`, `shared.NAME`, `workflow`.
+    place: []const u8,
+    /// The value of `{step}`, in a step only.
+    step: ?[]const u8 = null,
     /// Set for `shell`: its rule's inputs, outputs and threads.
     input: ?[]const u8 = null,
     output: ?[]const u8 = null,
     threads: ?[]const u8 = null,
-    /// `[defaults] threads` of the template, for a step that sets none.
-    default_threads: ?toml.Value = null,
 
     fn get(self: Scope, name: []const u8) ?[]const u8 {
         if (self.row) |row| if (self.sheet.?.column(name)) |c| return row[c];
@@ -139,9 +195,9 @@ fn subst(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, s: []co
                 // A sheet column outside a per-sample rule is a mistake even in
                 // a command.
                 if (scope.sheet) |sh| if (sh.column(name) != null)
-                    return fail(a, problem, "step {s}: {s} names {{{s}}}, a column of the sample sheet, but the step has no for_each = \"sample\"", .{ scope.step, key, name });
+                    return fail(a, problem, "{s}: {s} names {{{s}}}, a column of the sample sheet, but the step has no for_each = \"sample\"", .{ scope.place, key, name });
                 if (!eql(u8, key, "shell") and !eql(u8, key, "command")) {
-                    return fail(a, problem, "step {s}: {s} names {{{s}}}, which is no sample-sheet column, param or placeholder", .{ scope.step, key, name });
+                    return fail(a, problem, "{s}: {s} names {{{s}}}, which is no sample-sheet column, param or placeholder", .{ scope.place, key, name });
                 }
             }
         };
@@ -271,14 +327,6 @@ fn joined(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v:
     return out.items;
 }
 
-/// The threads of a rule as the workflow parser settles them: its resources'
-/// threads, else its own, else the template's defaults, else one.
-fn effectiveThreads(a: Allocator, values: *const std.StringArrayHashMapUnmanaged(toml.Value), default_threads: ?toml.Value) ![]const u8 {
-    const res_threads = if (values.get("resources")) |res| (if (res == .table) res.table.get("threads") else null) else null;
-    const t = res_threads orelse values.get("threads") orelse default_threads orelse return "1";
-    return if (t == .integer) try std.fmt.allocPrint(a, "{d}", .{t.integer.value}) else "1";
-}
-
 /// Writes the rule of step `name` for one sample (`row`), or the step's
 /// single rule.
 fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const toml.Table, name: []const u8, scope: Scope) !void {
@@ -294,7 +342,9 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
         var s = scope;
         s.input = try joined(a, problem, name, "input", values.get("input"));
         s.output = try joined(a, problem, name, "output", values.get("output"));
-        s.threads = try effectiveThreads(a, &values, scope.default_threads);
+        // The variable, not a number: a `--threads` override reaches the
+        // command as it reaches the rule's request.
+        s.threads = "${WORKZ_THREADS}";
         try values.put(a, "shell", try ruleValue(a, problem, s, "shell", sh));
     }
     const sample: ?[]const u8 = if (scope.row) |row| row[scope.sheet.?.column("sample").?] else null;
@@ -341,6 +391,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
         const st = sv.table;
         var kit = st.iterator();
         while (kit.next()) |e| if (!contains(&sample_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown key '{s}' in [samples]; use sheet or names", .{ shown, e.key_ptr.* });
+        if (st.get("sheet") != null and st.get("names") != null) return fail(a, problem, "{s}: [samples] takes sheet or names, not both", .{shown});
         if (st.get("sheet")) |p| {
             if (p != .string) return fail(a, problem, "{s}: samples.sheet must be a path", .{shown});
             const dir = std.fs.path.dirname(path) orelse ".";
@@ -367,6 +418,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
         while (pit.next()) |e| {
             const name = e.key_ptr.*;
             if (!isIdent(name)) return fail(a, problem, "{s}: param '{s}' must be a name of letters, digits and '_'", .{ shown, name });
+            if (reserved(name)) return fail(a, problem, "{s}: param {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, name });
             if (sheet) |sh| if (sh.column(name) != null) return fail(a, problem, "{s}: param {s} is also a column of {s}", .{ shown, name, sh.source });
             try params.put(a, name, switch (e.value_ptr.*) {
                 .string => |s| s,
@@ -382,7 +434,9 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
     try w.print("# Written by `workz prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
     for ([_][]const u8{ "workflow", "defaults" }) |name| if (doc.get(name)) |v| {
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
-        try writeTable(w, name, null, v.table);
+        // Its values may name params, as every table's may.
+        const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .place = name };
+        try writeTable(w, name, null, (try ruleValue(a, problem, scope, name, v)).table);
     };
     for ([_][]const u8{ "resource_groups", "shared" }) |name| if (doc.get(name)) |v| {
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
@@ -390,7 +444,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
         while (git.next()) |e| {
             if (e.value_ptr.* != .table) return fail(a, problem, "{s}: {s}.{s} must be a table", .{ shown, name, e.key_ptr.* });
             // A shared input may use the params, such as an index's path.
-            const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .step = e.key_ptr.* };
+            const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .place = try std.fmt.allocPrint(a, "{s}.{s}", .{ name, e.key_ptr.* }) };
             const filled = try ruleValue(a, problem, scope, name, e.value_ptr.*);
             try writeTable(w, name, e.key_ptr.*, filled.table);
         }
@@ -415,8 +469,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
             if (workflow.closest(&workflow.rule_keys, key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
             return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });
         }
-        const defaults = if (doc.get("defaults")) |d| (if (d == .table) d.table.get("threads") else null) else null;
-        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .step = name, .default_threads = defaults };
+        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .place = try std.fmt.allocPrint(a, "step {s}", .{name}), .step = name };
         if (step.get("for_each")) |fe| {
             if (fe != .string or !eql(u8, fe.string, "sample")) return fail(a, problem, "step {s}: for_each takes \"sample\"", .{name});
             const sh = sheet orelse return fail(a, problem, "step {s}: for_each = \"sample\" needs a [samples] table", .{name});

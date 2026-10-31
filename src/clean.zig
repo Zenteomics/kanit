@@ -20,7 +20,10 @@ pub const Options = struct {
     dry_run: bool = false,
 };
 
-pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, failed: usize = 0 };
+/// What `clean` removed, or would remove with `dry_run`; `kept_for_recovery`
+/// counts launches and `previous/` directories kept because they hold the
+/// only copy of an output that a killed launch moved aside.
+pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, kept_for_recovery: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, failed: usize = 0 };
 
 fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
     const p = try sys.z(gpa, path);
@@ -80,7 +83,11 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             try container.removeLeftovers(gpa, a, podman, root, &envp, devnull);
     }
 
-    if (opts.previous) try removePrevious(gpa, a, rec, opts.dry_run, &result, w);
+    // A killed launch's unfinished attempts may hold the only copy of an
+    // output in their previous/, which the next launch moves back: both steps
+    // keep them.
+    const pending = try records.pendingAttempts(gpa, a, rec, null);
+    if (opts.previous) try removePrevious(gpa, a, rec, pending, opts.dry_run, &result, w);
 
     const keep = opts.keep orelse return result;
     const names = try records.launchNames(gpa, a, rec);
@@ -104,6 +111,13 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             result.kept_for_records += 1;
             continue;
         }
+        const recovers = for (pending) |p| {
+            if (std.mem.eql(u8, p.launch, name)) break true;
+        } else false;
+        if (recovers) {
+            result.kept_for_recovery += 1;
+            continue;
+        }
         result.bytes += try removeAt(gpa, launches_fd, try a.dupeZ(u8, name), opts.dry_run, 0);
         result.launches += 1;
         try w.print("{s} launch {s}\n", .{ if (opts.dry_run) "would remove" else "removed", name });
@@ -113,7 +127,7 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
 
 /// Removes the `previous/` directory of every attempt in every launch,
 /// with a line for each launch that had any.
-fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, result: *Result, w: *std.Io.Writer) !void {
+fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, pending: []const records.Pending, dry: bool, result: *Result, w: *std.Io.Writer) !void {
     for (try records.launchNames(gpa, a, rec)) |launch| {
         const attempts = try std.fs.path.join(a, &.{ rec, "launches", launch, "attempts" });
         var dirs: usize = 0;
@@ -121,7 +135,13 @@ fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, resu
         for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {
             const rule_dir = try std.fs.path.join(a, &.{ attempts, rule });
             for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
-                const fd = openDir(gpa, try std.fs.path.join(a, &.{ rule_dir, n })) catch continue;
+                const attempt = try std.fs.path.join(a, &.{ rule_dir, n });
+                if (isPending(pending, attempt)) {
+                    try w.print("kept {s}/previous: it holds outputs the next launch puts back\n", .{attempt});
+                    result.kept_for_recovery += 1;
+                    continue;
+                }
+                const fd = openDir(gpa, attempt) catch continue;
                 defer sys.close(fd);
                 bytes += removeAt(gpa, fd, "previous", dry, 0) catch |err| switch (err) {
                     error.FileNotFound => continue,
@@ -140,4 +160,9 @@ fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, resu
         result.previous_bytes += bytes;
         try w.print("{s} previous/ of {d} attempt(s) in launch {s}, {d:.1} MiB\n", .{ if (dry) "would remove" else "removed", dirs, launch, @as(f64, @floatFromInt(bytes)) / 1048576.0 });
     }
+}
+
+fn isPending(pending: []const records.Pending, attempt: []const u8) bool {
+    for (pending) |p| if (std.mem.eql(u8, p.dir, attempt)) return true;
+    return false;
 }

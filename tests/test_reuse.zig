@@ -380,3 +380,214 @@ test "[failure] - [sys]: an exclusive write refuses a file or symlink planted at
     defer testing.allocator.free(kept);
     try testing.expectEqualStrings("keep", kept);
 }
+
+test "[property] - [state]: a record is reused only with its key and every output as recorded" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const out = try s.file("o.txt", "A");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const id = try freshIdentity(out);
+    defer testing.allocator.free(id);
+    const digest = sys.sha256Bytes("A");
+    const base: state.Entry = .{ .key = "k", .command = "c", .env = "e", .request = "r", .writes = "w", .inputs = "i", .parents = "p", .engine = "g", .outputs = &.{.{ .path = out, .id = id }}, .attempt = "", .finished = "" };
+    const key: state.Key = .{ .command = "c", .env = "e", .request = "r", .writes = "w", .inputs = "i", .input_ids = &.{}, .parents = "p", .engine = "g", .key = "k" };
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+
+    try testing.expect(try state.reuseCheck(testing.allocator, &ids, &base, &key) == .reuse);
+
+    // Each key part on its own, named as `explain` names it.
+    const Part = struct { field: []const u8, name: []const u8 };
+    inline for ([_]Part{
+        .{ .field = "command", .name = "command" },
+        .{ .field = "env", .name = "environment" },
+        .{ .field = "request", .name = "resource request" },
+        .{ .field = "writes", .name = "declared outputs, log or benchmark" },
+        .{ .field = "inputs", .name = "inputs" },
+        .{ .field = "parents", .name = "a producing rule" },
+        .{ .field = "engine", .name = "engine key" },
+    }) |part| {
+        var k = key;
+        @field(k, part.field) = "other";
+        const r = try state.reuseCheck(testing.allocator, &ids, &base, &k);
+        try testing.expectEqualStrings(part.name, r.key);
+    }
+
+    // The outputs: gone, changed without a digest, changed with matching
+    // bytes (refreshed and reused), changed with other bytes.
+    var e = base;
+    e.outputs = &.{.{ .path = try std.fs.path.join(a, &.{ s.path, "gone" }), .id = id }};
+    try testing.expect(try state.reuseCheck(testing.allocator, &ids, &e, &key) == .output_missing);
+    e.outputs = &.{.{ .path = out, .id = "1:1:1:1" }};
+    try testing.expect(try state.reuseCheck(testing.allocator, &ids, &e, &key) == .output_changed);
+    e.outputs = &.{.{ .path = out, .id = "1:1:1:1", .sha256 = &digest }};
+    try testing.expect(try state.reuseCheck(testing.allocator, &ids, &e, &key) == .reuse);
+    try testing.expect(try state.checkOutput(testing.allocator, &ids, e.outputs[0]) == .refreshed);
+    const other = sys.sha256Bytes("B");
+    e.outputs = &.{.{ .path = out, .id = "1:1:1:1", .sha256 = &other }};
+    try testing.expect(try state.reuseCheck(testing.allocator, &ids, &e, &key) == .output_changed);
+}
+
+test "[unit] - [records]: the journal reopens exactly the rules dispatched and not finished" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const Case = struct { text: []const u8, open: []const []const u8 };
+    for ([_]Case{
+        .{ .text = "", .open = &.{} },
+        .{ .text = "dispatch\ta\n", .open = &.{"a"} },
+        .{ .text = "dispatch\ta\ndone\ta\n", .open = &.{} },
+        .{ .text = "done\tb\n", .open = &.{} },
+        .{ .text = "dispatch\ta\ndispatch\ta\n", .open = &.{"a"} },
+        .{ .text = "dispatch\ta\ndone\ta\ndispatch\ta\n", .open = &.{"a"} },
+        .{ .text = "dispatch\ta\ndispatch\tb\ndone\ta\n", .open = &.{"b"} },
+        // A line without a tab, as a torn write leaves, is skipped.
+        .{ .text = "dispatch\ta\ndisp", .open = &.{"a"} },
+    }) |c| {
+        _ = try s.file(".workz/journal", c.text);
+        const open = try workz.records.Journal.unfinished(testing.allocator, arena.allocator(), rec);
+        try testing.expectEqual(c.open.len, open.len);
+        for (c.open, open) |want, got| try testing.expectEqualStrings(want, got);
+    }
+
+    // The next launch reads the state without the reopened rules' records.
+    _ = try s.file(".workz/state.json",
+        \\{"format_version": 4, "files": {}, "envs": {}, "manifest": {}, "rules": {
+        \\"a": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g", "outputs": [], "attempt": "x", "finished": "f"},
+        \\"b": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g", "outputs": [], "attempt": "x", "finished": "f"}}}
+    );
+    _ = try s.file(".workz/journal", "dispatch\ta\n");
+    var st = try state.loadRecorded(testing.allocator, arena.allocator(), rec);
+    defer st.deinit();
+    try testing.expect(st.data.rules.map.get("a") == null);
+    try testing.expect(st.data.rules.map.get("b") != null);
+}
+
+test "[failure] - [state]: every truncation of a state file and every unknown version is refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    const full =
+        \\{"format_version": 4, "files": {"in.txt": "1:2:3:4"}, "envs": {}, "manifest": {}, "rules": {
+        \\"a": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g", "outputs": [{"path": "o.txt", "id": "5:6:7:8"}], "attempt": "x", "finished": "f"}}}
+    ;
+    var n: usize = 0;
+    while (n < full.len) : (n += 1) {
+        _ = try s.file(".workz/state.json", full[0..n]);
+        if (state.load(testing.allocator, rec)) |st| {
+            var held = st;
+            held.deinit();
+            std.debug.print("a state cut at byte {d} was accepted\n", .{n});
+            return error.TestUnexpectedResult;
+        } else |err| try testing.expect(err == error.CorruptState);
+    }
+    _ = try s.file(".workz/state.json", full);
+    var st = try state.load(testing.allocator, rec);
+    st.deinit();
+    for ([_][]const u8{ "0", "5", "-1" }) |v| {
+        const text = try std.fmt.allocPrint(testing.allocator, "{{\"format_version\": {s}, \"files\": {{}}, \"envs\": {{}}, \"manifest\": {{}}, \"rules\": {{}}}}", .{v});
+        defer testing.allocator.free(text);
+        _ = try s.file(".workz/state.json", text);
+        try testing.expectError(error.UnsupportedState, state.load(testing.allocator, rec));
+    }
+}
+
+fn loadWorkflowOnce(gpa: std.mem.Allocator, path: []const u8, root: []const u8) !void {
+    var problem: workflow.Problem = .{};
+    defer gpa.free(problem.message);
+    var wf = workflow.load(gpa, path, root, &problem) catch |err| switch (err) {
+        error.Invalid => return,
+        else => return err,
+    };
+    wf.deinit();
+}
+
+fn loadStateOnce(gpa: std.mem.Allocator, rec: []const u8) !void {
+    var st = state.load(gpa, rec) catch |err| switch (err) {
+        error.CorruptState, error.UnsupportedState => return,
+        else => return err,
+    };
+    st.deinit();
+}
+
+test "[failure] - [workflow]: loading a workflow or a state frees everything when an allocation fails" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const good = try s.file("good.toml", head ++ "[shared.ref]\npath = \"ref\"\n\n[[rules]]\nname = \"a\"\ninput = [\"in.txt\"]\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"ref\"]\n");
+    const bad = try s.file("bad.toml", head ++ "[[rules]]\nname = \"a\"\noutput = [\"a\", \"a/b\"]\nshell = \"\"\nmemory = \"lots\"\n");
+    try testing.checkAllAllocationFailures(testing.allocator, loadWorkflowOnce, .{ good, s.path });
+    try testing.checkAllAllocationFailures(testing.allocator, loadWorkflowOnce, .{ bad, s.path });
+    const rec = try s.dir(".workz");
+    _ = try s.file(".workz/state.json",
+        \\{"format_version": 4, "files": {"in.txt": "1:2:3:4"}, "envs": {"e": "PATH=/bin\n"}, "manifest": {}, "rules": {
+        \\"a": {"key": "k", "command": "c", "env": "e", "request": "r", "writes": "w", "inputs": "i", "parents": "p", "engine": "g", "outputs": [{"path": "o.txt", "id": "5:6:7:8"}], "attempt": "x", "finished": "f"}}}
+    );
+    try testing.checkAllAllocationFailures(testing.allocator, loadStateOnce, .{rec});
+}
+
+test "[unit] - [state]: the state file keeps its bytes for a fixed record" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    _ = try s.file(".workz/state.json",
+        \\{"format_version": 4, "files": {"in.txt": "1:2:3:4"}, "envs": {"e": "PATH=/bin\n"}, "manifest": {}, "rules": {
+        \\"a": {"key": "k", "command": "c", "env": "e", "request": "threads=1 memory=1M", "writes": "w", "inputs": "i", "parents": "p", "engine": "workz-key 4", "outputs": [{"path": "o.txt", "id": "5:6:7:8", "sha256": null}], "attempt": ".workz/launches/L/attempts/a/001", "finished": "2026-01-01T00:00:00.000Z", "wall_s": 1.5, "input_ids": [{"path": "in.txt", "id": "1:2:3:4"}]}}}
+    );
+    var st = try state.load(testing.allocator, rec);
+    defer st.deinit();
+
+    try st.save(testing.allocator);
+
+    const saved = try sys.readFile(testing.allocator, try std.fs.path.join(st.allocator(), &.{ rec, "state.json" }), 1 << 20);
+    defer testing.allocator.free(saved);
+    // A change here changes the persisted format: decide its version first.
+    const golden =
+        \\{"format_version":4,"rules":{"a":{"key":"k","command":"c","env":"e","request":"threads=1 memory=1M","writes":"w","inputs":"i","parents":"p","engine":"workz-key 4","outputs":[{"path":"o.txt","id":"5:6:7:8","sha256":null}],"attempt":".workz/launches/L/attempts/a/001","finished":"2026-01-01T00:00:00.000Z","wall_s":1.5,"input_ids":[{"path":"in.txt","id":"1:2:3:4"}]}},"files":{"in.txt":"1:2:3:4"},"manifest":{},"envs":{"e":"PATH=/bin\n"}}
+        \\
+    ;
+    if (!std.mem.eql(u8, golden, saved)) {
+        std.debug.print("saved:\n{s}\n", .{saved});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "[unit] - [records]: a killed launch's unfinished attempt is the newest one, numbered past 999" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    for ([_][]const u8{ ".workz/launches", ".workz/launches/A", ".workz/launches/A/attempts", ".workz/launches/A/attempts/r", ".workz/launches/A/attempts/r/999", ".workz/launches/A/attempts/r/1000", ".workz/launches/B" }) |d| _ = try s.dir(d);
+    _ = try s.file(".workz/journal", "dispatch\tr\ndispatch\tq\ndone\tq\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const pending = try workz.records.pendingAttempts(testing.allocator, a, rec, "B");
+
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqualStrings("r", pending[0].rule);
+    try testing.expectEqualStrings("A", pending[0].launch);
+    try testing.expect(std.mem.endsWith(u8, pending[0].dir, "/attempts/r/1000"));
+}
+
+test "[unit] - [records]: logs and reports take attempt 1000 as the one after 999" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/A", ".workz/launches/A/attempts", ".workz/launches/A/attempts/r", ".workz/launches/A/attempts/r/999", ".workz/launches/A/attempts/r/1000" }) |d| _ = try s.dir(d);
+    const tail = ",\"status\":\"failed\",\"started\":\"2026-01-01T00:00:00.000Z\",\"request\":{\"threads\":1,\"memory_mib\":64}}";
+    _ = try s.file(".workz/launches/A/attempts/r/999/record.json", "{\"rule\":\"r\",\"attempt\":999" ++ tail);
+    _ = try s.file(".workz/launches/A/attempts/r/1000/record.json", "{\"rule\":\"r\",\"attempt\":1000" ++ tail);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const dir = (try workz.logs.find(testing.allocator, a, s.path, "r", .{})).?;
+    try testing.expect(std.mem.endsWith(u8, dir, "/attempts/r/1000"));
+
+    const list = try workz.model.attempts(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, ".workz/launches/A" }), null);
+    try testing.expectEqual(@as(usize, 2), list.len);
+    try testing.expectEqual(@as(i64, 1000), list[1].attempt);
+}

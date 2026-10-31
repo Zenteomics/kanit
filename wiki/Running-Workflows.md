@@ -62,6 +62,7 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 - Nothing enforces requests: there is no memory limit, no out-of-memory kill of the whole attempt, no CPU quota, and no cgroup counters in the records.
 - Rules share the machine's network.
 - If the engine is killed, a guard process kills the process groups of the attempts that were running.
+- A process that leaves its attempt's process group, such as one started with `setsid`, outlives the attempt: without a cgroup, nothing finds it.
 
 ## Failures
 
@@ -92,7 +93,7 @@ The rule `after` depends on `exits`, so it is blocked: it never starts, and the 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.
 - **With `--keep-going`**, independent rules go on; only the rules that depend on a failed one are blocked.
-- **Stopping an attempt** sends its process group `SIGTERM`, waits the grace period (`--grace`, default 10 s), then kills everything left in its cgroup. Container rules get 10 s more for Podman.
+- **Stopping an attempt** sends its process group `SIGTERM`, waits the grace period (`--grace`, default 10 s), then kills everything left in its cgroup. The attempt ends when every process it started has ended, so a tool that tidies up after `SIGTERM` keeps the grace period when the rule's shell exits first. Container rules get 10 s more for Podman.
 
 A failed rule has no completed record, so the next launch runs it again; everything that completed is reused.
 
@@ -100,7 +101,7 @@ A failed rule has no completed record, so the next launch runs it again; everyth
 
 ## Interrupts
 
-`Ctrl-C` (or `SIGTERM`, or `SIGHUP`) stops the launch gracefully: running attempts get `SIGTERM` and the grace period, and no new rule starts. A second interrupt, at least a second after the first, kills them at once. The launch ends with status `interrupted` and exit status 130; rules that had not started are `cancelled`.
+`Ctrl-C` (or `SIGTERM`, or `SIGHUP`) stops the launch gracefully: running attempts get `SIGTERM` and the grace period, and no new rule starts. A second interrupt, at least a second after the first, kills them at once. After `workz control cancel`, which stops the launch the same way, the first interrupt keeps the grace period and the second kills. The launch ends with status `interrupted` and exit status 130; rules that had not started are `cancelled`.
 
 ## Steering a running launch
 

@@ -142,9 +142,8 @@ pub fn reasonClass(reason: []const u8) []const u8 {
     return reason;
 }
 
-/// Counts of the decisions by reason class, largest first.
-pub fn printSummary(w: *std.Io.Writer, ctx: *Context, mask: []const bool) !void {
-    const ds = try ctx.decideAll(mask);
+/// Counts of the decisions `ds` by reason class, largest first.
+pub fn printSummary(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, mask: []const bool) !void {
     var groups: std.StringArrayHashMapUnmanaged(struct { run: bool, n: usize }) = .empty;
     for (ctx.g.order) |i| {
         if (!mask[i]) continue;
@@ -170,8 +169,8 @@ pub fn printSummary(w: *std.Io.Writer, ctx: *Context, mask: []const bool) !void 
     try w.print("{d} to run, {d} to reuse\n", .{ runs, reuse });
 }
 
-pub fn printPlan(w: *std.Io.Writer, ctx: *Context, mask: []const bool) !void {
-    const ds = try ctx.decideAll(mask);
+/// One line per selected rule in graph order: run or reuse, and why.
+pub fn printPlan(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, mask: []const bool) !void {
     var runs: usize = 0;
     var reuse: usize = 0;
     for (ctx.g.order) |i| {
@@ -258,15 +257,21 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
         const outs = try sa.dupe(state.Output, e.outputs);
         for (outs) |*o| {
             checked += 1;
-            const id = (try ids.get(o.path)) orelse {
-                try w.print("missing   {s}: {s}\n", .{ r.name, o.path });
-                ok = false;
-                continue;
-            };
-            if (!std.mem.eql(u8, id, o.id)) {
-                try w.print("changed   {s}: {s}\n", .{ r.name, o.path });
-                ok = false;
-                continue;
+            switch (try state.checkOutput(gpa, ids, o.*)) {
+                .intact => {},
+                // Its bytes still match its stored digest: `run` reuses it
+                // under its new identity.
+                .refreshed => |now| o.id = try sa.dupe(u8, now),
+                .missing => {
+                    try w.print("missing   {s}: {s}\n", .{ r.name, o.path });
+                    ok = false;
+                    continue;
+                },
+                .changed => {
+                    try w.print("changed   {s}: {s}\n", .{ r.name, o.path });
+                    ok = false;
+                    continue;
+                },
             }
             if (!content) continue;
             const d = try sys.sha256File(gpa, o.path);

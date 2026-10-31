@@ -26,14 +26,17 @@ test "container mounts list each directory once with the access it needs" {
     rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
     const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});
-    // /w must be writable for top.txt, which also covers /w/out.
-    try testing.expectEqual(@as(usize, 3), ms.len);
+    // /w must be writable for top.txt, which also covers /w/out; the
+    // records below it stay read-only.
+    try testing.expectEqual(@as(usize, 4), ms.len);
     try testing.expectEqualStrings("/data/reads", ms[0].dir);
     try testing.expect(!ms[0].write);
     try testing.expectEqualStrings("/data/ref", ms[1].dir);
     try testing.expect(!ms[1].write);
     try testing.expectEqualStrings("/w", ms[2].dir);
     try testing.expect(ms[2].write);
+    try testing.expectEqualStrings("/w/.workz", ms[3].dir);
+    try testing.expect(!ms[3].write);
 
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/sub/b.txt" };
     const nested = try workz.container.mounts(a, "/w", &rule, &.{});
@@ -155,18 +158,18 @@ test "removing a launch directory does not follow symlinks out of it" {
 
 test "[unit] - [views]: focus expressions name a rule and its depths" {
     const Focus = workz.views.Focus;
-    const up = Focus.parse("+align").?;
+    const up = Focus.parse("+align", null).?;
     try testing.expectEqualStrings("align", up.rule);
     try testing.expectEqual(@as(?u32, Focus.all), up.up);
     try testing.expectEqual(@as(?u32, null), up.down);
-    const down = Focus.parse("align+2").?;
+    const down = Focus.parse("align+2", null).?;
     try testing.expectEqual(@as(?u32, 2), down.down);
     try testing.expectEqual(@as(?u32, null), down.up);
-    const both = Focus.parse("1+align+").?;
+    const both = Focus.parse("1+align+", null).?;
     try testing.expectEqual(@as(?u32, 1), both.up);
     try testing.expectEqual(@as(?u32, Focus.all), both.down);
-    try testing.expect(Focus.parse("align") == null);
-    try testing.expect(Focus.parse("+") == null);
+    try testing.expect(Focus.parse("align", null) == null);
+    try testing.expect(Focus.parse("+", null) == null);
 }
 
 test "[unit] - [views]: steps collapse samples, and a shared input shows what loads and joins it" {
@@ -206,8 +209,104 @@ test "[unit] - [views]: steps collapse samples, and a shared input shows what lo
     const users = try workz.views.build(a, &wf, &g, mask, .{ .users = "genome" });
     try testing.expectEqual(@as(usize, 4), users.nodes.len);
 
-    const path = try workz.views.whyPath(a, &wf, &g, "index", "report");
+    const path = try workz.views.whyPath(a, &wf, &g, mask, "index", "report");
     try testing.expectEqual(@as(usize, 3), path.len);
     try testing.expectEqualStrings("report", wf.rules[path[2]].name);
-    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, "report", "index"));
+    try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, mask, "report", "index"));
+    // A path runs through the selected rules only.
+    const narrow = try a.dupe(bool, mask);
+    narrow[wf.ruleIndex("report").?] = false;
+    try testing.expectError(error.NotSelected, workz.views.whyPath(a, &wf, &g, narrow, "index", "report"));
+}
+
+test "[unit] - [run]: a rule's budget need counts its request, its client and each shared input once" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    // 5000 bytes take two 4 KiB pages: 1 MiB once rounded up.
+    _ = try s.file("ref.fa", "x" ** 5000);
+    const text = head ++ "[shared.ref]\npath = \"ref.fa\"\n\n[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"100M\"\n\n[shared.gone]\npath = \"missing-ref\"\n\n" ++
+        "[[rules]]\nname = \"host\"\noutput = [\"h\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"ref\"]\n" ++
+        "[[rules]]\nname = \"box\"\noutput = [\"b\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"ref\", \"svc\"]\n" ++
+        "[[rules]]\nname = \"far\"\noutput = [\"f\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"gone\"]\n";
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, text, &problem);
+    defer wf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var failure: []const u8 = "";
+
+    // `far` does not run, so its missing shared input is never measured.
+    const sizes = try workz.run.sharedSizes(testing.allocator, a, &wf, &.{ true, true, false }, &failure);
+
+    try testing.expectEqual(@as(u64, 1), sizes[0].?.mib);
+    try testing.expectEqual(@as(u64, 100 + workz.run.container_client_mib), sizes[1].?.reserve_mib);
+    try testing.expect(sizes[2] == null);
+    try testing.expectEqual(@as(u64, 10 + 1), workz.run.neededMib(&wf.rules[0], sizes));
+    try testing.expectEqual(@as(u64, 10 + workz.run.container_client_mib + 1 + 100 + workz.run.container_client_mib), workz.run.neededMib(&wf.rules[1], sizes));
+    try testing.expectError(error.Unmeasurable, workz.run.sharedSizes(testing.allocator, a, &wf, &.{ false, false, true }, &failure));
+    try testing.expectEqualStrings("shared input gone (missing-ref): no such file or directory", failure);
+}
+
+test "[unit] - [cgroup]: counters are read from the cgroup files, and a missing file reads as unknown" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("memory.peak", "314572800\n");
+    _ = try s.file("memory.events", "low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\noom_group_kill 0\n");
+    _ = try s.file("cpu.stat", "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n");
+    _ = try s.file("memory.pressure", "some avg10=0.00 avg60=0.00 avg300=0.00 total=77\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=5\n");
+    _ = try s.file("memory.stat", "anon 1000\nfile 4096\n");
+
+    const c = workz.cgroup.read(testing.allocator, s.path);
+
+    try testing.expectEqual(@as(?u64, 314572800), c.memory_peak);
+    try testing.expectEqual(@as(?u64, null), c.memory_current);
+    try testing.expectEqual(@as(u64, 1), c.oom_kill);
+    try testing.expectEqual(@as(u64, 3), c.memory_max_events);
+    try testing.expectEqual(@as(?u64, 2500000), c.cpu_usage_usec);
+    try testing.expectEqual(@as(?u64, 77), c.memory_some_us);
+    try testing.expectEqual(@as(?u64, 5), c.memory_full_us);
+    try testing.expectEqual(@as(?u64, null), c.io_some_us);
+    try testing.expectEqual(@as(?u64, 4096), c.file);
+}
+
+test "[unit] - [views]: a service whose path is one rule's output shows that rule as what it loads" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[shared.idx]\npath = \"idx.bin\"\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\n\n" ++
+        "[[rules]]\nname = \"make\"\noutput = [\"idx.bin\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"use\"\noutput = [\"u.txt\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"idx\"]\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const v = try workz.views.build(a, &wf, &g, mask, .{ .users = "idx" });
+    var loads: usize = 0;
+    for (v.edges) |e| loads += @intFromBool(e.kind == .loads);
+    try testing.expectEqual(@as(usize, 1), loads);
+}
+
+test "[unit] - [views]: a focus on a rule named with digits reads as that rule" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"12\"\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"b\"\ninput = [\"a.txt\"]\noutput = [\"b.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    const Focus = workz.views.Focus;
+    const down = Focus.parse("12+", &wf).?;
+    try testing.expectEqualStrings("12", down.rule);
+    try testing.expectEqual(@as(?u32, Focus.all), down.down);
+    try testing.expectEqual(@as(?u32, null), down.up);
+    const up = Focus.parse("1+b", &wf).?;
+    try testing.expectEqualStrings("b", up.rule);
+    try testing.expectEqual(@as(?u32, 1), up.up);
 }

@@ -28,9 +28,14 @@ _workz() {
         if [ -n "$wf" ]; then wd=$(dirname "$wf"); else wd=.; fi
     fi
     case $prev in
-        -t | --target | --rerun-rule)
+        -t | --target | --rerun-rule | --focus)
             COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
             return ;;
+        --pass-env) COMPREPLY=($(compgen -e -- "$cur")); return ;;
+        # Numbers, sizes, durations and names: nothing to offer, and never files.
+        -j | --jobs | --max-threads | --max-memory | -r | --retry | --timeout | --grace | --slice | --attempt | \
+            --keep | --interval | --threads | --why | --users)
+            COMPREPLY=(); return ;;
         -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
         --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
         --format)
@@ -48,8 +53,8 @@ _workz() {
     local opts="-h --help -d --workdir"
     case $cmd in
         run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet --json --no-color" ;;
-        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --pass-env --threads" ;;
-        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
+        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
+        explain) opts="$opts -t --target --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
         validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
         prepare) opts="-h --help -o --output --check" ;;

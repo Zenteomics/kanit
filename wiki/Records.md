@@ -1,4 +1,4 @@
-Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, so a reader can check what it parses.
+Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. workz refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
 
 ## Layout
 
@@ -51,7 +51,7 @@ workz reads the state files of earlier versions, formats 1 to 4, and saves them 
 
 Written when the launch starts:
 
-- `engine` (the version and the executable's SHA-256), `engine_key` and `launch`;
+- `v`, `engine` (the version and the executable's SHA-256), `engine_key` and `launch`;
 - `workflow` and `workflow_sha256`, and `workflow_name` and `workflow_version` from its `[workflow]` table;
 - `workdir` and `started`;
 - the budget: `max_threads`, `max_memory_mib` and `jobs`;
@@ -60,7 +60,7 @@ Written when the launch starts:
 
 ### versions.json
 
-Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
+Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): `v` and `commands`, one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
 
 ### summary.json
 
@@ -68,7 +68,8 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 
 ```json
 {
-  "engine": "workz 0.5.0 sha256:...",
+  "v": 1,
+  "engine": "workz 0.6.0 sha256:...",
   "engine_key": 4,
   "launch": "20261027T224512.478-40c9943e",
   "status": "completed",
@@ -98,7 +99,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 ## Attempt files
 
 - `command.sh` is the script that ran: for a host rule, `set -euo pipefail` followed by the rule's `shell`.
-- `request.json` holds `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
+- `request.json` holds `v`, `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
 - `stdout.log` and `stderr.log` are the command's output.
 - `record.json` is written last, when the attempt ends. An attempt that could not start, such as one whose workdir link would replace a file, gets one too, with `started` `null`.
 - `previous/` holds the earlier outputs moved aside before the attempt ran. When the attempt does not complete, workz moves them back to their paths, so the last result stays where its record says, and moves what the attempt left there into `failed/`.
@@ -123,7 +124,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
 | `image`                | the image ID a container rule ran, else `null`             |
 | `version`              | the rule's version command, else `null`                    |
-| `queue`                | `waited_s`, and seconds per wait reason                    |
+| `queue`                | `waited_s`, and `reasons`: each `reason` with its `seconds` |
 | `key`                  | the rule key the attempt ran under                         |
 
 The `cgroup` object holds:
@@ -138,7 +139,7 @@ The `cgroup` object holds:
 `events.jsonl` holds one JSON object per line, appended as things happen. Every event has `v` (1), `time` (UTC, to the millisecond) and `event`:
 
 ```json
-{"v":1,"time":"2026-10-26T03:36:53.792Z","event":"task_waiting","rule":"trim_S3","reason":"group:disk"}
+{"v":1,"time":"2026-10-26T03:36:53.792Z","event":"task_waiting","rule":"trim_S3","reason":"group:disk","threads":2,"memory_mib":1024}
 {"v":1,"time":"2026-10-26T03:36:56.801Z","event":"task_finished","rule":"trim_S2","attempt":1,"status":"completed","wall_s":3.007621927,"cpu_s":2.981506,"maxrss_kib":3840,"memory_peak":1712128}
 ```
 
@@ -146,6 +147,7 @@ Launch events:
 
 - `launch_started`: `launch`, `selected`, `rules`, `max_threads`, `max_memory_mib`, `jobs`, `isolation`, `cgroup`, `shared`, `checks_s`.
 - `launch_refused`: `reason`.
+- `launch_ending`: no fields. Every rule has ended, and the launch writes its records; `control` commands sent from here on are answered with `the launch is ending` and not applied.
 - `launch_finished`: `status`, `counts`, `elapsed_s`, `error`; a refused launch counts every selected rule as `not_started`.
 - `inputs_checked`: `manifest`, `files`, `files_read`, `bytes_read`, `seconds`, `ok`.
 - `containers_checked`: `images`, `leftovers_removed`, `seconds`.
@@ -156,7 +158,7 @@ Launch events:
 
 Rule events:
 
-- `task_waiting`: `rule`, `reason`.
+- `task_waiting`: `rule`, `reason`, `threads`, `memory_mib`.
 - `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`, `shared` (the shared inputs it holds).
 - `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.
@@ -165,6 +167,7 @@ Rule events:
 - `task_timeout`: `rule`, `attempt`.
 - `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
 - `output_restored`: `rule`, `path`, `moved_from`, `bytes`, for an earlier output put back after an attempt that did not complete.
+- `output_failed`: `rule`, `path`, `moved_to`, `bytes`, for what an attempt that did not complete left at an output path, moved into its `failed/`.
 - `output_changed`, `output_identity_refreshed`: `rule`, `path`.
 
 Shared input events:
@@ -194,8 +197,8 @@ would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) t
 ```
 
 - Without options, `workz clean` removes only the containers earlier launches left behind.
-- `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to.
-- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays.
+- `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to, and a launch whose engine was killed during an attempt: its `previous/` holds the only copy of that rule's earlier outputs until the next launch puts them back.
+- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--dry-run` lists what would go.
 - It takes the working directory's lock, so it never removes anything while a launch runs.

@@ -337,3 +337,80 @@ test "[unit] - [run]: the readable summary names each failure with its last erro
     try testing.expect(std.mem.indexOf(u8, text, "\n next      workz logs align_S1") != null);
     try testing.expect(std.mem.indexOf(u8, text, "prep") == null);
 }
+
+test "[unit] - [run]: the text view of a launch whose engine died says it did not finish and shows nothing running" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.monitor.render(testing.allocator, &out.writer, &t, 0, false);
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "unfinished: its engine ended without recording its end") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "running for") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "RUNNING") == null);
+}
+
+test "[unit] - [run]: the readable summary names the rules a failure blocked" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try s.dir("launch");
+    _ = try s.file("launch/summary.json",
+        \\{"status":"failed","elapsed_s":1,"selected":3,"counts":{"completed":1,"reused":0,"failed":1,"blocked":2},"failures":[{"rule":"align","status":"failed","reason":"exited with status 1"},{"rule":"merge","status":"blocked","reason":"blocked"},{"rule":"plot","status":"blocked","reason":"blocked"}]}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.monitor.writeSummary(testing.allocator, arena.allocator(), &out.writer, launch, false);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n blocked   merge, plot\n") != null);
+}
+
+test "[failure] - [run]: status --history keeps a row for a launch whose summary cannot be read" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/A", ".workz/launches/B", ".workz/launches/C" }) |d| _ = try s.dir(d);
+    _ = try s.file(".workz/launches/A/summary.json", "{\"status\":\"completed\",\"elapsed_s\":1,\"counts\":{\"completed\":1}}");
+    _ = try s.file(".workz/launches/B/summary.json", "[1, 2]");
+    _ = try s.file(".workz/launches/C/summary.json", "{not json");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.monitor.history(testing.allocator, &out.writer, s.path, 10);
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "\nC                               unreadable\nB                               unreadable\nA                               completed") != null);
+}
+
+test "[edge] - [run]: program output becomes valid UTF-8 and cuts never split a character" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    // Each byte that starts no valid sequence is replaced on its own.
+    try testing.expectEqualStrings("ok \u{FFFD} done \u{FFFD}\u{FFFD}", try sys.utf8Text(a, "ok \xff done \xe2\x82"));
+    const valid = "caf\u{e9}";
+    try testing.expect((try sys.utf8Text(a, valid)).ptr == valid.ptr);
+    try testing.expectEqualStrings("caf", sys.utf8Prefix("caf\u{e9}", 4));
+    try testing.expectEqualStrings("caf\u{e9}", sys.utf8Prefix("caf\u{e9}", 5));
+    // 30 characters of two bytes each, shown as 20: 9, "...", 8.
+    const name = "\u{e9}" ** 30;
+    const short = workz.html.middle(a, name, 20);
+    try testing.expect(std.unicode.utf8ValidateSlice(short));
+    try testing.expectEqual(@as(usize, 20), try std.unicode.utf8CountCodepoints(short));
+}
+
+test "[failure] - [run]: the text view of a running launch whose events cannot be read shows an unknown start, not 1970" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", "garbage\n");
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.monitor.render(testing.allocator, &out.writer, &t, 0, true);
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "running, started at an unknown time") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "1 line of events.jsonl could not be read and is left out") != null);
+}

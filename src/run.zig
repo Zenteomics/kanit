@@ -92,11 +92,17 @@ const Task = struct {
     started_real: i128 = 0,
     deadline_ns: ?i128 = null,
     kill_at: ?i128 = null,
+    /// The exit of a stopped attempt's shell, kept while processes it
+    /// started still run: they get the rest of the grace period to end.
+    ended: ?process.Reaped = null,
     timed_out: bool = false,
     cancelled: bool = false,
     /// Why the shared service the attempt joined failed while it ran; the
     /// attempt is stopped and fails without a retry.
     lost_service: ?[]const u8 = null,
+    /// The current attempt's process started: what is at its output paths
+    /// after it ends may be its own.
+    spawned: bool = false,
     reason: []const u8 = "",
     /// The diagnostics kept from the last attempt, as the rule wrote them.
     diagnostics: []const []const u8 = &.{},
@@ -342,8 +348,13 @@ const Engine = struct {
     sigfd: sys.Fd,
 
     stopping: bool = false,
+    /// No rule starts or stops any more: the launch writes its records, and
+    /// control commands are answered without being applied.
+    ending: bool = false,
     interrupted: bool = false,
     interrupted_at: i128 = 0,
+    /// When the first INT, TERM or HUP arrived; a `control cancel` is not one.
+    signalled_at: ?i128 = null,
     fatal: ?[]const u8 = null,
     dirty: bool = false,
     pending_done: std.ArrayList([]const u8) = .empty,
@@ -673,7 +684,7 @@ const Engine = struct {
         }
         t.wait_reason = reason;
         t.wait_since = sys.monoNs();
-        if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why });
+        if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why, .threads = self.rule(i).threads, .memory_mib = self.rule(i).memory_mib });
     }
 
     /// Ends the wait of a rule that starts. A wait for a part of the budget
@@ -856,7 +867,9 @@ const Engine = struct {
         t.timed_out = false;
         t.cancelled = false;
         t.lost_service = null;
+        t.spawned = false;
         t.kill_at = null;
+        t.ended = null;
         try self.endWait(i);
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
 
@@ -867,6 +880,7 @@ const Engine = struct {
             try std.fmt.allocPrint(self.a, "#!/usr/bin/env bash\nset -euo pipefail\n{s}\n", .{r.shell});
         try sys.writeFile(self.gpa, script, body);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/request.json", .{t.dir}), .{
+            .v = records.record_version,
             .rule = r.name,
             .attempt = t.attempts,
             .shell = r.shell,
@@ -878,6 +892,13 @@ const Engine = struct {
             .output = r.output,
             .timeout_s = self.timeoutOf(r),
         });
+
+        // The rule's record stays until an attempt replaces it: a failed
+        // attempt gives the outputs back, and the journal drops the record
+        // if the engine dies while the attempt runs. The mark comes before
+        // any output moves, so a killed engine leaves no moved output that
+        // the next launch would not look for.
+        try self.journal.mark(self.gpa, "dispatch", r.name);
 
         // Keep earlier bytes of every output: move them into previous/.
         for (r.output_abs, 0..) |o, k| {
@@ -894,10 +915,6 @@ const Engine = struct {
             if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(self.gpa, d);
         }
 
-        // The rule's record stays until an attempt replaces it: a failed
-        // attempt gives the outputs back, and the journal drops the record
-        // if the engine dies while the attempt runs.
-        try self.journal.mark(self.gpa, "dispatch", r.name);
         if (r.workdir_abs) |d| if (try self.prepareWorkdir(r, d)) |why| return self.failToStart(i, why);
 
         const out_fd = try sys.openWrite(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stdout.log", .{t.dir}), .truncate);
@@ -968,6 +985,7 @@ const Engine = struct {
         t.pid = process.spawn(&spec) catch |err| {
             return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
         };
+        t.spawned = true;
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
         self.queueVersion(r) catch {};
@@ -996,8 +1014,10 @@ const Engine = struct {
             if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
             t.cg = null;
             self.reserve(i, false);
-            self.releaseShared(i);
+            // Ready before its shared inputs are given back, so their holders
+            // stay loaded for the next attempt.
             t.status = .ready;
+            self.releaseShared(i);
             self.ready_counter += 1;
             t.ready_seq = self.ready_counter;
             t.ready_ns = sys.monoNs();
@@ -1018,7 +1038,7 @@ const Engine = struct {
         const r = self.rule(i);
         if (t.dir.len == 0) return;
         records.writeJson(self.gpa, std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}) catch return, .{
-            .v = 1,
+            .v = records.record_version,
             .rule = r.name,
             .attempt = n,
             .status = @tagName(status),
@@ -1045,16 +1065,24 @@ const Engine = struct {
         for (r.output_abs, r.output, 0..) |o, written, k| {
             const name = try std.fmt.allocPrint(self.a, "{d}-{s}", .{ k, std.fs.path.basename(o) });
             const prev = try std.fs.path.join(self.a, &.{ t.dir, "previous", name });
-            const kept = (try sys.lstat(self.gpa, prev)) orelse continue;
-            if (try sys.lstat(self.gpa, o)) |_| {
+            const kept = try sys.lstat(self.gpa, prev);
+            // What the attempt left at the path goes to failed/, also when no
+            // earlier output comes back: left there, a partial file would
+            // read as the rule's output, changed outside workz. Before the
+            // process started, a file at the path is the earlier output.
+            if (kept != null or t.spawned) if (try sys.lstat(self.gpa, o)) |left| {
                 const failed_dir = try std.fs.path.join(self.a, &.{ t.dir, "failed" });
                 sys.mkdir(self.gpa, failed_dir) catch |err| if (err != error.PathAlreadyExists) return err;
-                try sys.rename(self.gpa, o, try std.fs.path.join(self.a, &.{ failed_dir, name }));
-            }
+                const dest = try std.fs.path.join(self.a, &.{ failed_dir, name });
+                try sys.rename(self.gpa, o, dest);
+                self.ids.forget(o);
+                self.events.emit("output_failed", .{ .rule = r.name, .path = written, .moved_to = dest, .bytes = left.size });
+            };
+            const kept_id = kept orelse continue;
             try sys.rename(self.gpa, prev, o);
             self.ids.forget(o);
-            self.previous_bytes -|= kept.size;
-            self.events.emit("output_restored", .{ .rule = r.name, .path = written, .moved_from = prev, .bytes = kept.size });
+            self.previous_bytes -|= kept_id.size;
+            self.events.emit("output_restored", .{ .rule = r.name, .path = written, .moved_from = prev, .bytes = kept_id.size });
             const e = entry orelse continue;
             const sa = self.st.allocator();
             const outs = try sa.dupe(state.Output, e.outputs);
@@ -1211,6 +1239,10 @@ const Engine = struct {
         errdefer sys.close(stop_fd);
 
         var procs: sys.Fd = -1;
+        errdefer if (h.cg) |cg| {
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            h.cg = null;
+        };
         if (self.tree) |tree| {
             h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{ .memory_bytes = h.mib * 1024 * 1024, .oom_group = true });
             procs = try cgroup.openProcs(self.gpa, self.containers_cg.?);
@@ -1241,6 +1273,7 @@ const Engine = struct {
         var out: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&out, .{ .CLOEXEC = true }));
         defer sys.close(out[1]);
+        errdefer sys.close(out[0]);
         const spec: process.Spec = .{
             .path = (try self.a.dupeZ(u8, self.podman.?)).ptr,
             .argv = (try process.Vec.init(self.a, argv)).items.ptr,
@@ -1251,12 +1284,7 @@ const Engine = struct {
             .stderr = log_fd,
             .cgroup_procs = procs,
         };
-        h.pid = process.spawn(&spec) catch |err| {
-            sys.close(out[0]);
-            if (h.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
-            h.cg = null;
-            return err;
-        };
+        h.pid = try process.spawn(&spec);
         if (self.guard) |gd| gd.note('+', h.pid);
         h.pipe = out[0];
         h.stop_fd = stop_fd;
@@ -1289,8 +1317,9 @@ const Engine = struct {
         const n = sys.read(h.pipe, &buf) catch 0;
         sys.close(h.pipe);
         h.pipe = -1;
-        // A service given up on stays failed even if it reports ready late.
-        if (h.timed_out) return;
+        // A service given up on stays failed even if it reports ready late,
+        // and one being stopped stays stopping: its exit is a release.
+        if (h.timed_out or h.st == .stopping) return;
         h.ready_deadline = null;
         if (n == 0 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
             // The holder ends; its exit fails the rules waiting for it.
@@ -1589,7 +1618,7 @@ const Engine = struct {
         const status: []const u8 = if (ok) "completed" else if (t.cancelled) "cancelled" else "failed";
         const finished_text = try records.timeText(self.a, now_real);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}), .{
-            .v = 1,
+            .v = records.record_version,
             .rule = r.name,
             .attempt = t.attempts,
             .status = status,
@@ -1746,22 +1775,21 @@ const Engine = struct {
     /// The last line of file `path`, made fit for a recorded reason.
     fn errorLineOf(self: *Engine, path: []const u8) ![]const u8 {
         const line = try self.lastLineOf(path);
-        var end = @min(line.len, 200);
-        // Cut before a UTF-8 continuation byte, never inside a character.
-        while (end < line.len and end > 0 and line[end] & 0xc0 == 0x80) end -= 1;
-        const out = try self.a.dupe(u8, line[0..end]);
+        const cut = sys.utf8Prefix(line, 200);
+        const out = try self.a.dupe(u8, cut);
         for (out) |*ch| if (ch.* < 0x20 or ch.* == 0x7f) {
             ch.* = ' ';
         };
-        return if (end < line.len) std.fmt.allocPrint(self.a, "{s}...", .{out}) else out;
+        return if (cut.len < line.len) std.fmt.allocPrint(self.a, "{s}...", .{out}) else out;
     }
 
+    /// The last line of file `path`, as valid UTF-8, since it goes into records.
     fn lastLineOf(self: *Engine, path: []const u8) ![]const u8 {
         const tail = sys.readTail(self.gpa, path, 2048) catch return "";
         defer self.gpa.free(tail);
         const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
         const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
-        return self.a.dupe(u8, trimmed[begin..]);
+        return sys.utf8Text(self.a, try self.a.dupe(u8, trimmed[begin..]));
     }
 
     /// Keeps the last `diagnostics_max` bytes of each of the rule's
@@ -1831,8 +1859,10 @@ const Engine = struct {
             }) + 1;
             self.control_offset += end;
             var it = std.mem.splitScalar(u8, buf[0..end], '\n');
-            while (it.next()) |line| {
-                if (line.len == 0) continue;
+            while (it.next()) |raw| {
+                if (raw.len == 0) continue;
+                // A line written by hand may hold bytes that are not text.
+                const line = try sys.utf8Text(self.a, raw);
                 var words = std.mem.tokenizeScalar(u8, line, ' ');
                 const cmd = words.next() orelse continue;
                 const name = words.next() orelse "";
@@ -1847,6 +1877,7 @@ const Engine = struct {
 
     fn control(self: *Engine, cmd: []const u8, name: []const u8) ![]const u8 {
         const eql = std.mem.eql;
+        if (self.ending) return "the launch is ending";
         if (eql(u8, cmd, "cancel")) {
             if (self.stopping) return "already stopping";
             self.interrupted = true;
@@ -1898,6 +1929,14 @@ const Engine = struct {
 
     // ---- stopping ----
 
+    /// Marks the end of the run loop in the event stream, which `workz
+    /// control` reads to refuse commands that would not be applied.
+    fn beginEnding(self: *Engine) void {
+        if (self.ending) return;
+        self.ending = true;
+        self.events.emit("launch_ending", .{});
+    }
+
     fn beginStop(self: *Engine) void {
         if (self.stopping) return;
         self.stopping = true;
@@ -1920,7 +1959,9 @@ const Engine = struct {
     /// a container `podman stop`, which kills every container process after
     /// the grace period. The group is killed later if the attempt is still
     /// running: after the grace period, or ten seconds more for a container.
+    /// An attempt already stopping keeps its first deadline.
     fn terminate(self: *Engine, t: *Task, grace: i128) void {
+        if (t.kill_at != null) return;
         // A stopped attempt can no longer time out.
         t.deadline_ns = null;
         process.signalGroup(t.pid, .TERM);
@@ -1964,6 +2005,25 @@ const Engine = struct {
         }
     }
 
+    /// Whether processes of a running attempt remain: its cgroup is
+    /// populated, or without one, its process group has a member.
+    fn stillRuns(self: *Engine, t: *const Task) bool {
+        if (t.cg) |cg| return cgroup.populated(self.gpa, cg);
+        return process.groupAlive(t.pid);
+    }
+
+    /// Ends each stopped attempt whose shell has exited once the processes
+    /// it left have ended too, or have been killed after the grace period.
+    fn finishEnded(self: *Engine) !void {
+        for (self.tasks, 0..) |*t, i| {
+            if (t.status != .running) continue;
+            const rp = t.ended orelse continue;
+            if (t.kill_at != null and self.stillRuns(t)) continue;
+            t.ended = null;
+            try self.finish(i, rp);
+        }
+    }
+
     fn nextDeadline(self: *Engine) ?i128 {
         var best: ?i128 = null;
         for (self.holders) |h| for ([_]?i128{ h.kill_at, h.ready_deadline }) |d| if (d) |v| {
@@ -1971,7 +2031,10 @@ const Engine = struct {
         };
         for (self.tasks) |t| {
             if (t.status != .running) continue;
-            for ([_]?i128{ t.deadline_ns, t.kill_at }) |d| if (d) |v| {
+            // The processes a stopped attempt's shell left have no event for
+            // their end: they are checked every 20 ms.
+            const drain: ?i128 = if (t.ended != null) sys.monoNs() + 20 * std.time.ns_per_ms else null;
+            for ([_]?i128{ t.deadline_ns, t.kill_at, drain }) |d| if (d) |v| {
                 best = if (best) |b| @min(b, v) else v;
             };
         }
@@ -2175,10 +2238,10 @@ const Engine = struct {
                 .image = v.image,
                 .status = if (!v.started) "not run" else if (v.stopped) "stopped" else if (v.exit_code == 0) "completed" else "failed",
                 .exit_code = v.exit_code,
-                .output = try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n")),
+                .output = try sys.utf8Text(self.a, try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n"))),
             });
         }
-        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), entries.items);
+        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), .{ .v = records.record_version, .commands = entries.items });
     }
 
     fn helper(self: *Engine, pid: ?linux.pid_t) void {
@@ -2214,8 +2277,10 @@ const Engine = struct {
     fn reapAll(self: *Engine) !void {
         while (process.reap()) |rp| {
             for (self.tasks, 0..) |*t, i| {
-                if (t.status == .running and t.pid == rp.pid) {
-                    try self.finish(i, rp);
+                if (t.status == .running and t.ended == null and t.pid == rp.pid) {
+                    // A stopped attempt's shell often dies at SIGTERM before
+                    // the tool it ran: the tool keeps its grace period.
+                    if (t.kill_at != null and self.stillRuns(t)) t.ended = rp else try self.finish(i, rp);
                     break;
                 }
             } else for (self.holders, 0..) |*h, hi| {
@@ -2236,6 +2301,9 @@ const Engine = struct {
 
     fn loop(self: *Engine) !void {
         var idle_passes: u32 = 0;
+        // `workz control` may append before the file is watched: those
+        // commands apply before the first rule starts.
+        if (self.control_watch >= 0) try self.readControl();
         while (true) {
             try self.updateReadiness();
             // Holders kept for rules that can no longer run are released.
@@ -2270,21 +2338,29 @@ const Engine = struct {
             if (process.has(seen, .INT) or process.has(seen, .TERM) or process.has(seen, .HUP)) {
                 // A repeated interrupt kills at once; one arriving within a second of
                 // the first is the same request delivered twice (terminal and launcher).
-                if (self.interrupted) {
-                    if (sys.monoNs() - self.interrupted_at >= std.time.ns_per_s) {
+                const now = sys.monoNs();
+                if (self.signalled_at) |at| {
+                    if (now - at >= std.time.ns_per_s) {
+                        if (!self.opts.quiet) self.note("workz: interrupted again; killing running tasks");
                         for (self.tasks) |*t| if (t.status == .running) {
-                            t.kill_at = sys.monoNs();
+                            t.kill_at = now;
                         };
                         for (self.holders) |*h| if (h.pid > 0) {
-                            h.kill_at = sys.monoNs();
+                            h.kill_at = now;
                         };
                     }
                 } else {
-                    self.interrupted = true;
-                    self.interrupted_at = sys.monoNs();
+                    self.signalled_at = now;
                     self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
-                    if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
-                    self.beginStop();
+                    if (self.interrupted) {
+                        // `control cancel` already stops the launch with its grace period.
+                        if (!self.opts.quiet) self.note("workz: interrupted; the launch is already stopping (interrupt again to kill)");
+                    } else {
+                        self.interrupted = true;
+                        self.interrupted_at = now;
+                        if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
+                        self.beginStop();
+                    }
                 }
             }
             for (fds.items[1..]) |f| if (f.revents != 0) {
@@ -2293,6 +2369,7 @@ const Engine = struct {
             };
             try self.reapAll();
             self.checkTimers();
+            try self.finishEnded();
             self.sample();
             if (self.page_path != null and sys.monoNs() >= self.next_page_ns) self.drawPage();
             self.drawStatus(false);
@@ -2320,6 +2397,31 @@ pub fn reservedMib(r: *const workflow.Rule) u64 {
     return r.memory_mib + if (r.container != null) container_client_mib else 0;
 }
 
+/// Moves the outputs of every attempt a killed launch left unfinished
+/// (`records.pendingAttempts`) back from its `previous/`, and what that
+/// attempt left at their paths into its `failed/`, as a failed attempt does
+/// in its own launch.
+fn recoverPrevious(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, rec: []const u8, current: []const u8, events: *records.Events) !void {
+    for (try records.pendingAttempts(gpa, a, rec, current)) |p| {
+        const name = p.rule;
+        const dir = p.dir;
+        const r = &wf.rules[wf.ruleIndex(name) orelse continue];
+        for (r.output_abs, r.output, 0..) |o, written, n| {
+            const file = try std.fmt.allocPrint(a, "{d}-{s}", .{ n, std.fs.path.basename(o) });
+            const prev = try std.fs.path.join(a, &.{ dir, "previous", file });
+            const kept = (try sys.lstat(gpa, prev)) orelse continue;
+            if (try sys.lstat(gpa, o)) |_| {
+                const failed_dir = try std.fs.path.join(a, &.{ dir, "failed" });
+                sys.mkdir(gpa, failed_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+                try sys.rename(gpa, o, try std.fs.path.join(a, &.{ failed_dir, file }));
+            }
+            if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(gpa, d);
+            try sys.rename(gpa, prev, o);
+            events.emit("output_restored", .{ .rule = name, .path = written, .moved_from = prev, .bytes = kept.size });
+        }
+    }
+}
+
 /// What one shared input holds and takes from the budget, as `Holder`.
 pub const SharedSize = struct { bytes: u64, mib: u64, reserve_mib: u64 };
 
@@ -2340,10 +2442,15 @@ pub fn sharedSizes(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, r
                 out[hi] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
                 continue;
             }
-            const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err| switch (err) {
+            var failed: ?[]u8 = null;
+            defer if (failed) |f| gpa.free(f);
+            const bytes = state.pageBytes(gpa, s.path_abs.?, &failed) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {
-                    failure.* = try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) });
+                    const why = if (err == error.NotRegularFile)
+                        try std.fmt.allocPrint(a, "{s} is not a regular file, and a shared input maps every file it holds", .{failed.?})
+                    else if (failed) |f| try std.fmt.allocPrint(a, "{s}: {s}", .{ f, sys.errorText(err) }) else sys.errorText(err);
+                    failure.* = try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, why });
                     return error.Unmeasurable;
                 },
             };
@@ -2414,6 +2521,7 @@ const EngineCost = struct { cpu_s: f64, max_rss_mib: f64 };
 
 /// `summary.json`, the record of how a launch ended.
 const Summary = struct {
+    v: u32 = records.record_version,
     engine: []const u8,
     engine_key: u32 = state.engine_key,
     launch: []const u8,
@@ -2542,6 +2650,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var selected: usize = 0;
     for (mask) |m| selected += @intFromBool(m);
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.json" }), .{
+        .v = records.record_version,
         .engine = engine_id,
         .engine_key = state.engine_key,
         .launch = launch.id,
@@ -2589,6 +2698,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         else => return err,
     };
     defer st.deinit();
+    // A launch killed during an attempt left that attempt's earlier outputs
+    // in its previous/: they go back to their paths before anything runs.
+    recoverPrevious(gpa, a, wf, rec, launch.id, &events) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => std.debug.print("workz: cannot put back the earlier outputs a killed launch moved aside: {s}\n", .{sys.errorText(err)}),
+    };
 
     // A recorded output that changed outside the engine is refused unless
     // --rerun, except when it has a stored digest and its bytes still match:
@@ -2647,7 +2762,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     // Input manifest: authoritative digests for external inputs.
     if (opts.input_manifest) |mpath| {
-        const m = try checkManifest(gpa, &st, &ids, mpath);
+        const m = try checkManifest(gpa, &st, &ids, mpath, true);
         events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
         if (!m.usable) return refusal.refuse(.invalid, "the input manifest cannot be used");
         if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
@@ -2806,6 +2921,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     defer if (engine.guard) |gd| gd.stop();
     defer engine.pending_done.deinit(gpa);
     defer engine.leftover_cgroups.deinit(gpa);
+    defer engine.helpers.deinit(gpa);
     @memset(engine.group_used, 0);
     for (engine.tasks, 0..) |*t, i| {
         t.* = .{};
@@ -2813,13 +2929,16 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         t.max_attempts = 1 + (wf.rules[i].retries orelse opts.retry);
     }
     engine.last_save_ns = sys.monoNs();
-    // The control file of this launch, watched for appended commands.
+    // The control file of this launch, watched for appended commands. It is
+    // created without truncating: a command appended while the launch was
+    // being set up is kept.
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
     control: {
-        sys.writeFile(gpa, engine.control_path, "") catch |err| {
+        const cfd = sys.openWrite(gpa, engine.control_path, .append) catch |err| {
             std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
             break :control;
         };
+        sys.close(cfd);
         const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
             std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             break :control;
@@ -2859,6 +2978,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.loop() catch |err| {
         engine.fatal = sys.errorText(err);
         engine.beginStop();
+        engine.beginEnding();
         // Wait for running tasks to end before writing the final records.
         while (engine.running() > 0) {
             var fds = [_]linux.pollfd{.{ .fd = sigfd, .events = linux.POLL.IN, .revents = 0 }};
@@ -2866,10 +2986,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             _ = process.readSignals(sigfd);
             engine.reapAll() catch {};
             engine.checkTimers();
+            engine.finishEnded() catch {};
         }
     };
+    engine.beginEnding();
     engine.awaitVersions(10);
-    engine.awaitHelpers(engine.opts.grace_s + 10);
+    engine.awaitHelpers(engine.opts.grace_s +| 10);
     engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{sys.errorText(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
@@ -2908,6 +3030,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try engine.saveState(true);
     try records.Journal.reset(gpa, rec);
     for (engine.leftover_cgroups.items) |cg| cgroup.remove(gpa, cg) catch {};
+    // Commands sent while the launch ended are answered in its events.
+    if (engine.control_watch >= 0) engine.readControl() catch {};
 
     var counts: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0);
     for (engine.tasks) |t| counts[@intFromEnum(t.status)] += 1;
@@ -2981,7 +3105,9 @@ pub const ManifestCheck = struct { ok: bool, usable: bool = true, files: usize =
 /// A file is read only when neither the cached identity nor the stamp equals
 /// its current identity; a matching stamp is trusted as the identity the
 /// manifest's writer hashed.
-fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8) !ManifestCheck {
+/// With `save`, digests it computed are kept in the state file for the next
+/// launch; `plan` checks without writing.
+pub fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8, save: bool) !ManifestCheck {
     const t0 = sys.monoNs();
     var res: ManifestCheck = .{ .ok = true };
     const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
@@ -3063,7 +3189,7 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
             res.ok = false;
         }
     }
-    if (res.ok and hashed_any) try st.save(gpa);
+    if (save and res.ok and hashed_any) try st.save(gpa);
     res.seconds = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
     return res;
 }

@@ -74,7 +74,7 @@ Some files are keyed on a SHA-256 digest of their bytes instead of their identit
 
 ### Cutoff
 
-`cutoff = true` on a rule hashes its outputs after it succeeds. Consumers are keyed on those digests instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order:
+`cutoff = true` on a rule hashes its outputs after it succeeds. Each consumer is keyed on the digests of the outputs it reads instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused, and when one output changes, only the rules that read it run. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order:
 
 ```sh
 workz plan workflow.toml
@@ -139,7 +139,7 @@ Both work with `plan` and `explain` too, so you can see the effect first. Combin
 
 ## Previous outputs
 
-Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. If the attempt fails, is stopped or cannot start, workz moves them back, and the rule keeps its record: `verify` and the next `plan` still see the last result, and what the failed attempt wrote goes to its `failed/` directory. A rule therefore never sees its own old outputs, and the bytes a completed rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
+Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. If the attempt fails, is stopped or cannot start, workz moves them back, and the rule keeps its record; if the engine was killed during the attempt, the next launch moves them back before it starts: `verify` and the next `plan` still see the last result, and what the failed attempt wrote goes to its `failed/` directory. A rule therefore never sees its own old outputs, and the bytes a completed rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
 
 ## Verify outputs
 

@@ -635,7 +635,7 @@ test "[unit] - [prepare]: a template becomes one rule per sample, with labels, g
     const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
     for ([_][]const u8{
         "name = \"S1__count\"\nstep = \"count\"\nsample = \"S1\"\ninput = [\"reads/a.fq\", \"ref/idx\"]",
-        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t 2\"",
+        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t ${WORKZ_THREADS}\"",
         "input = [\"counts/S1.txt\", \"counts/S2.txt\"]",
         "shell = \"cat counts/S1.txt counts/S2.txt > all.txt\"",
     }) |want| if (std.mem.indexOf(u8, text, want) == null) {
@@ -671,7 +671,7 @@ test "[unit] - [prepare]: mistakes in a template are named" {
     }
 }
 
-test "[regression] - [prepare]: dotted names stay one table, and {threads} is the threads the rule gets" {
+test "[regression] - [prepare]: dotted names stay one table, and {threads} follows the rule's threads at run time" {
     var s = try Scratch.init();
     defer s.deinit();
     const path = try s.file("pipeline.toml", "[workflow]\nname = \"p\"\n[defaults]\nthreads = 2\nmemory = \"1M\"\n" ++
@@ -687,8 +687,8 @@ test "[regression] - [prepare]: dotted names stay one table, and {threads} is th
     try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.\"disk.io\"]\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.disk-2]\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "[shared.\"ref.index\"]\n") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 2 > d.txt\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 3 > r.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo ${WORKZ_THREADS} > d.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo ${WORKZ_THREADS} > r.txt\"") != null);
     var wproblem: workflow.Problem = .{};
     defer testing.allocator.free(wproblem.message);
     var wf = try loadText(&s, text, &wproblem);
@@ -706,4 +706,130 @@ test "[unit] - [prepare]: --check reads rule names that a comment follows" {
     const new = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"\nshell = \"true\"\n";
     try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
     try testing.expectEqualStrings("change 1: S1__count\n", text.written());
+}
+
+test "[failure] - [workflow]: an input whose '..' follows a symlink is refused, and plain '..' is not" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("far");
+    _ = try s.dir("far/deep");
+    _ = try s.dir("sub");
+    _ = try s.file("far/y.txt", "stale");
+    try s.link("lnk", "far/deep");
+
+    const msg = try problemsIn(&s, head ++ rule1("produce", "output = [\"far/y.txt\"]\n") ++
+        rule1("consume", "input = [\"lnk/../y.txt\"]\noutput = [\"c.txt\"]\n"));
+    defer testing.allocator.free(msg);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule consume: input 'lnk/../y.txt' names another file than it spells") != null);
+
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, head ++ rule1("produce", "output = [\"far/y.txt\"]\n") ++
+        rule1("consume", "input = [\"sub/../far/y.txt\"]\noutput = [\"c.txt\"]\n"), &problem);
+    wf.deinit();
+}
+
+test "[failure] - [workflow]: values that cannot mean what they say are refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    try s.link("gone", "/nonexistent-workz-dir");
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = head ++ rule1("a", "output = [\"gone/q.txt\"]\n"), .want = "rule a: 'gone/q.txt' passes through a symlinked directory" },
+        .{ .text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"a\"]\nshell = \"echo ok > a\\u0000; echo BAD > bad\"\nmemory = \"1M\"\n", .want = "rule a: shell holds a NUL byte" },
+        .{ .text = head ++ "rules = []\n", .want = "the workflow declares no [[rules]]" },
+        .{ .text = head ++ "[defaults]\nmemory = \"bogus\"\nthreads = 0\n\n" ++ rule1("a", "output = [\"a\"]\n"), .want = "defaults: invalid memory 'bogus'" },
+        .{ .text = head ++ "[defaults]\nthreads = 0\n\n" ++ rule1("a", "output = [\"a\"]\n"), .want = "defaults: threads must be between 1 and 4096" },
+        .{ .text = head ++ rule1("a", "output = [\"a\"]\nstep = \"" ++ "é" ** 201 ++ "\"\n"), .want = "step must be 1 to 200 characters" },
+    }) |c| {
+        const msg = try problemsIn(&s, c.text);
+        defer testing.allocator.free(msg);
+        if (std.mem.indexOf(u8, msg, c.want) == null) {
+            std.debug.print("message: {s}\nexpected to contain: {s}\n", .{ msg, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 200 two-byte characters are 200 characters.
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, head ++ rule1("a", "output = [\"a\"]\nstep = \"" ++ "é" ** 200 ++ "\"\n"), &problem);
+    wf.deinit();
+}
+
+test "[edge] - [workflow]: sizes and durations are digits and a unit, and K rounds up" {
+    try testing.expectEqual(@as(?u64, 2), workflow.parseMemoryMib("1536K"));
+    try testing.expectEqual(@as(?u64, 1), workflow.parseMemoryMib("1024K"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1023K"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("+512M"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1_024"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("-1G"));
+    try testing.expectEqual(@as(?u64, 90), workflow.parseDuration("90"));
+    try testing.expectEqual(@as(?u64, 5400), workflow.parseDuration("1h30m"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("+30"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("1_0"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("+30m"));
+}
+
+test "[unit] - [prepare]: workflow and defaults name params, a sheet may start with a byte order mark, and CSV fields may be quoted" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.csv", "\xef\xbb\xbfsample,label\nS1,\"a, b \"\"c\"\"\"\nS2, plain \n");
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p-{tag}"
+        \\[defaults]
+        \\memory = "{mem}"
+        \\[params]
+        \\tag = "v2"
+        \\mem = "2G"
+        \\[samples]
+        \\sheet = "samples.csv"
+        \\[[steps]]
+        \\name = "say"
+        \\for_each = "sample"
+        \\output = ["{sample}.txt"]
+        \\shell = "echo {label} > {sample}.txt"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    for ([_][]const u8{
+        "[workflow]\nname = \"p-v2\"\n",
+        "[defaults]\nmemory = \"2G\"\n",
+        "shell = \"echo a, b \\\"c\\\" > S1.txt\"",
+        "shell = \"echo plain > S2.txt\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "[failure] - [prepare]: a template refuses what would be read two ways or not at all" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("threads.tsv", "sample\tthreads\nS1\t4\n");
+    _ = try s.file("open.csv", "sample,label\nS1,\"never closed\n");
+    _ = try s.file("names.tsv", "sample\nS1\n");
+    const step = "[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\n";
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = "[workflow]\nname = \"p\"\ndescription = \"{nope}\"\n" ++ step, .want = "workflow: description names {nope}, which is no sample-sheet column, param or placeholder" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"threads.tsv\"\n" ++ step, .want = "threads.tsv: column threads has the name of a placeholder workz prepare fills" },
+        .{ .text = "[workflow]\nname = \"p\"\n[params]\ninput = \"x\"\n" ++ step, .want = "param input has the name of a placeholder workz prepare fills" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"open.csv\"\n" ++ step, .want = "open.csv line 2: a quoted field must close its quote" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"names.tsv\"\nnames = [\"S2\"]\n" ++ step, .want = "[samples] takes sheet or names, not both" },
+    }, 0..) |c, k| {
+        var name_buf: [16]u8 = undefined;
+        const path = try s.file(try std.fmt.bufPrint(&name_buf, "f{d}.toml", .{k}), c.text);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var problem: workz.prepare.Problem = .{};
+        try testing.expectError(error.Invalid, workz.prepare.compile(testing.allocator, arena.allocator(), path, "f.toml", &problem));
+        if (std.mem.indexOf(u8, problem.message, c.want) == null) {
+            std.debug.print("message: {s}\nexpected: {s}\n", .{ problem.message, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
 }

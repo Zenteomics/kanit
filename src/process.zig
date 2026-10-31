@@ -159,6 +159,11 @@ pub fn signalGroup(pgid: linux.pid_t, sig: linux.SIG) void {
     _ = linux.kill(-pgid, sig);
 }
 
+/// Whether a process group still has a member.
+pub fn groupAlive(pgid: linux.pid_t) bool {
+    return linux.errno(linux.kill(-pgid, @enumFromInt(0))) != .SRCH;
+}
+
 pub fn signalPid(pid: linux.pid_t, sig: linux.SIG) void {
     _ = linux.kill(pid, sig);
 }
@@ -169,7 +174,8 @@ pub fn wait(fds: []linux.pollfd, deadline_ns: ?i128) void {
     var ts: linux.timespec = undefined;
     var tsp: ?*linux.timespec = null;
     if (deadline_ns) |d| {
-        const left = @max(d - sys.monoNs(), 0);
+        // A far deadline waits a day at most; the caller waits again.
+        const left = @min(@max(d - sys.monoNs(), 0), std.time.ns_per_day);
         ts = .{ .sec = @intCast(@divFloor(left, std.time.ns_per_s)), .nsec = @intCast(@mod(left, std.time.ns_per_s)) };
         tsp = &ts;
     }
@@ -212,8 +218,12 @@ pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *co
     sys.close(pipe[1]);
     var out: std.ArrayList(u8) = .empty;
     var buf: [4096]u8 = undefined;
+    var read_failed = false;
     while (true) {
-        const n = sys.read(pipe[0], &buf) catch break;
+        const n = sys.read(pipe[0], &buf) catch {
+            read_failed = true;
+            break;
+        };
         if (n == 0) break;
         try out.appendSlice(a, buf[0..n]);
     }
@@ -225,5 +235,7 @@ pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *co
     }
     _ = gpa;
     if (!linux.W.IFEXITED(status.*) or linux.W.EXITSTATUS(status.*) != 0) return error.CommandFailed;
+    // Output cut short by a failed read is not the command's output.
+    if (read_failed) return error.CommandFailed;
     return out.items;
 }

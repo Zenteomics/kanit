@@ -41,6 +41,7 @@ const target_opt: Opt = .{ .flag = "-t, --target RULE", .desc = "select RULE and
 const rerun_opts = [_]Opt{
     .{ .flag = "--rerun", .desc = "decide as 'run --rerun' would" },
     .{ .flag = "--rerun-rule RULE", .desc = "decide as 'run --rerun-rule RULE' would (repeatable)" },
+    .{ .flag = "--input-manifest FILE", .desc = "decide as 'run --input-manifest FILE' would" },
     .{ .flag = "--pass-env NAME", .desc = "decide as 'run --pass-env NAME' would (repeatable)" },
     .{ .flag = "--threads STEP=N", .desc = "decide as 'run --threads STEP=N' would (repeatable)" },
 };
@@ -131,7 +132,10 @@ const commands = [_]Command{
         .group = .write,
         .about =
         \\Prints, for every selected rule, whether a run would run it or reuse it and
-        \\why, then how many of each. Nothing runs. 'dry-run' is another name for it.
+        \\why, then how many of each. Nothing runs. It exits 1 when run would refuse
+        \\the launch: a missing input, an output changed outside workz, or an input
+        \\that does not match --input-manifest.
+        \\'dry-run' is another name for it.
         ,
         .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
@@ -275,7 +279,8 @@ const commands = [_]Command{
         \\--history counts, per launch, the rules DONE (completed or reused),
         \\FAILED (failed or blocked) and CANCELLED (stopped or never started).
         \\
-        \\status exits 0 whatever the outcome it shows; run exits 1 on a failure.
+        \\status exits 0 for any outcome it shows, and 1 when it has none to show: no
+        \\launch, a summary that cannot be read, or a launch whose engine died.
         ,
         .options = &.{
             .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default: 10)" },
@@ -303,7 +308,7 @@ const commands = [_]Command{
             .{ .flag = "--stderr", .desc = "standard error only" },
             .{ .flag = "--attempt N", .desc = "attempt N instead of the newest" },
             .{ .flag = "--launch ID", .desc = "look in this launch" },
-            .{ .flag = "-f, --follow", .desc = "keep printing until the attempt ends" },
+            .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
         },
         .examples =
         \\workz logs align_s1
@@ -352,7 +357,8 @@ const commands = [_]Command{
         .about =
         \\Checks that every recorded output of the selected rules still has the
         \\identity workz recorded. With --content it also compares the bytes with
-        \\stored digests, and stores a digest for every output that has none.
+        \\stored digests, and stores a digest for every output that has none. It
+        \\exits 1 on a difference, or when a selected rule has no record to check.
         ,
         .options = &.{.{ .flag = "--content", .desc = "also compare and store content digests" }},
         .examples = "workz verify workflow.toml --content",
@@ -594,30 +600,47 @@ const Common = struct {
 };
 
 /// Parses common options; `extra` handles command-specific options and
-/// returns how many arguments it consumed (0 when not its option).
+/// returns how many arguments it consumed (0 when not its option). An
+/// option's value is the next word, or follows `=` as in `--launch=ID`;
+/// after `--`, every word is a workflow or an argument.
 fn parseArgs(ctx: Ctx, args: []const [:0]const u8, c: *Common, extra: anytype) !?Exit {
     var i: usize = 0;
+    var words_only = false;
     while (i < args.len) : (i += 1) {
-        const arg = args[i];
+        const word = args[i];
+        if (!words_only and std.mem.eql(u8, word, "--")) {
+            words_only = true;
+            continue;
+        }
+        if (words_only or !(word.len > 1 and word[0] == '-')) {
+            if (c.workflow == null) c.workflow = word else try c.positional.append(ctx.a, word);
+            continue;
+        }
+        const eq_at = if (std.mem.startsWith(u8, word, "--")) std.mem.indexOfScalar(u8, word, '=') else null;
+        const arg = if (eq_at) |k| word[0..k] else word;
         // The next word is this option's value unless it is an option
         // itself: `--launch --format html` lacks the launch. A lone `-` and a
-        // negative number are values.
+        // negative number are values; an empty word is none.
         const next: ?[]const u8 = if (i + 1 < args.len) args[i + 1] else null;
-        const value: ?[]const u8 = if (next) |n| (if (n.len > 1 and n[0] == '-' and !std.ascii.isDigit(n[1])) null else n) else null;
+        const value: ?[]const u8 = if (eq_at) |k|
+            (if (word.len > k + 1) word[k + 1 ..] else null)
+        else if (next) |n|
+            (if (n.len == 0 or (n.len > 1 and n[0] == '-' and !std.ascii.isDigit(n[1]))) null else n)
+        else
+            null;
+        var used: usize = 2;
         if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--workdir")) {
             c.workdir = value orelse return fail("{s} needs a value", .{arg});
-            i += 1;
         } else if ((std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--target")) and takesTargets(ctx)) {
             try c.targets.append(ctx.a, value orelse return fail("{s} needs a value", .{arg}));
-            i += 1;
-        } else if (arg.len > 1 and arg[0] == '-') {
-            const used = try extra.option(arg, value);
+        } else {
+            used = try extra.option(arg, value);
             if (used == 0) return try unknownOption(ctx, arg);
             if (used == std.math.maxInt(usize)) return .usage;
+        }
+        if (eq_at == null) {
             i += used - 1;
-        } else if (c.workflow == null) {
-            c.workflow = arg;
-        } else try c.positional.append(ctx.a, arg);
+        } else if (used == 1) return fail("{s} takes no value", .{arg});
     }
     return null;
 }
@@ -658,6 +681,24 @@ fn missingValue(arg: []const u8) usize {
     return std.math.maxInt(usize);
 }
 
+/// A duration of zero, as `0` or `0s`: `--grace` takes it to kill at once.
+fn zeroDuration(text: []const u8) bool {
+    const digits = if (text.len > 1 and std.mem.indexOfScalar(u8, "smhd", text[text.len - 1]) != null) text[0 .. text.len - 1] else text;
+    if (digits.len == 0) return false;
+    for (digits) |ch| if (ch != '0') return false;
+    return true;
+}
+
+/// `--launch ID`: a launch's directory name, never a path, so it cannot
+/// name a directory outside `.workz/launches`.
+fn launchValue(arg: []const u8, value: ?[]const u8, launch: *?[]const u8) usize {
+    const v = value orelse return missingValue(arg);
+    if (std.mem.eql(u8, v, ".") or std.mem.eql(u8, v, "..") or std.mem.indexOfScalar(u8, v, '/') != null)
+        return invalidValue(arg, v, "use a launch ID, as status --history lists them");
+    launch.* = v;
+    return 2;
+}
+
 /// An option value that does not parse; `hint` says what is expected.
 fn invalidValue(arg: []const u8, value: []const u8, hint: []const u8) usize {
     std.debug.print("workz: {s}: invalid value '{s}' ({s})\n", .{ arg, value, hint });
@@ -683,16 +724,40 @@ const Loaded = struct {
 
 fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
     const here = try sys.cwd(c.a);
-    // A WORKFLOW names its working directory, so it must exist.
-    if (common.workdir == null) if (common.workflow) |w| if (!sys.exists(c.gpa, w)) {
-        std.debug.print("workz: no workflow file {s}; -d DIR names a working directory\n", .{w});
-        return null;
-    };
-    const given = if (common.workdir) |d| try sys.absolute(c.a, here, d) else if (common.workflow) |w| std.fs.path.dirname(try sys.absolute(c.a, here, w)) orelse "/" else here;
+    // A WORKFLOW names its working directory, so it must exist, as a file.
+    if (common.workflow) |w| {
+        const id = (try sys.stat(c.gpa, w)) orelse {
+            if (common.workdir == null) {
+                std.debug.print("workz: no workflow file {s}; -d DIR names a working directory\n", .{w});
+                return null;
+            }
+            return try workdirOf(c, here, common.workdir.?);
+        };
+        if (id.isDir()) {
+            std.debug.print("workz: {s} is a directory; name the workflow file in it, or give -d {s} to work there\n", .{ w, w });
+            return null;
+        }
+    }
+    if (common.workdir) |d| return try workdirOf(c, here, d);
+    const given = if (common.workflow) |w| std.fs.path.dirname(try sys.absolute(c.a, here, w)) orelse "/" else here;
     return (try sys.realpath(c.a, given)) orelse {
         std.debug.print("workz: working directory does not exist: {s}\n", .{given});
         return null;
     };
+}
+
+/// The real path of the working directory `-d` names, which must be one.
+fn workdirOf(c: Ctx, here: []const u8, dir: []const u8) !?[]const u8 {
+    const given = try sys.absolute(c.a, here, dir);
+    const real = (try sys.realpath(c.a, given)) orelse {
+        std.debug.print("workz: working directory does not exist: {s}\n", .{given});
+        return null;
+    };
+    if (!((try sys.stat(c.gpa, real)) orelse return null).isDir()) {
+        std.debug.print("workz: -d names a file, not a directory: {s}\n", .{given});
+        return null;
+    }
+    return real;
 }
 
 /// Shows the source line of a rejected workflow on stderr.
@@ -800,6 +865,8 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8) !Exit {
 const GraphExtra = struct {
     opts: *workz.views.Options,
     format: *?workz.views.Format,
+    /// `--focus` as written, read again against the rule names once loaded.
+    focus: *?[]const u8,
     fn option(self: GraphExtra, arg: []const u8, value: ?[]const u8) !usize {
         const eq = std.mem.eql;
         if (eq(u8, arg, "--by")) {
@@ -820,7 +887,8 @@ const GraphExtra = struct {
         }
         if (eq(u8, arg, "--focus")) {
             const v = value orelse return missingValue(arg);
-            self.opts.focus = workz.views.Focus.parse(v) orelse return invalidValue(arg, v, "use +RULE, RULE+, +RULE+, or a depth such as 2+RULE");
+            self.opts.focus = workz.views.Focus.parse(v, null) orelse return invalidValue(arg, v, "use +RULE, RULE+, +RULE+, or a depth such as 2+RULE");
+            self.focus.* = v;
             return 2;
         }
         if (eq(u8, arg, "--why")) {
@@ -841,12 +909,14 @@ fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
     var common: Common = .{};
     var opts: workz.views.Options = .{};
     var format: ?workz.views.Format = null;
-    if (try parseArgs(c, args, &common, GraphExtra{ .opts = &opts, .format = &format })) |e| return e;
+    var focus: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, GraphExtra{ .opts = &opts, .format = &format, .focus = &focus })) |e| return e;
     if (extraArgs(c, &common)) |e| return e;
     if (@as(u8, @intFromBool(opts.focus != null)) + @intFromBool(opts.why != null) + @intFromBool(opts.users != null) > 1)
         return fail("choose one of --focus, --why and --users", .{});
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
+    if (focus) |text| opts.focus = workz.views.Focus.parse(text, &l.wf);
     // A terminal gets text; a file or a pipe gets DOT, for Graphviz.
     const kind = format orelse if (term.isTerminal(1)) workz.views.Format.text else .dot;
     var text: std.Io.Writer.Allocating = .init(c.gpa);
@@ -855,13 +925,14 @@ fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
         error.UnknownRule => return fail("no rule named {s} in {s}", .{ if (opts.focus) |f| f.rule else if (opts.why) |p| if (l.wf.ruleIndex(p[0]) == null) p[0] else p[1] else "?", l.wf.path }),
         error.UnknownShared => return fail("no shared input named {s} in {s}", .{ opts.users.?, l.wf.path }),
         error.NoPath => return failed("{s} does not lead to {s}: no rule between them reads what the one before writes", .{ opts.why.?[0], opts.why.?[1] }),
+        error.NotSelected => return fail("{s} is not among the rules --target selects", .{if (!l.mask[l.wf.ruleIndex(opts.why.?[0]).?]) opts.why.?[0] else opts.why.?[1]}),
         else => return err,
     };
     switch (kind) {
         .dot => try workz.views.writeDot(c.a, &text.writer, l.wf.name, v),
         .json => try workz.views.writeJson(&text.writer, v),
         .text => if (opts.why) |p|
-            try workz.views.writeWhy(&text.writer, &l.wf, &l.g, try workz.views.whyPath(c.a, &l.wf, &l.g, p[0], p[1]))
+            try workz.views.writeWhy(&text.writer, &l.wf, &l.g, try workz.views.whyPath(c.a, &l.wf, &l.g, l.mask, p[0], p[1]))
         else
             try workz.views.writeText(c.a, &text.writer, v),
     }
@@ -876,6 +947,8 @@ const PlanExtra = struct {
     budget: ?*bool = null,
     max_threads: ?*?u32 = null,
     max_memory: ?*?u64 = null,
+    /// `--input-manifest`, for `plan` only.
+    manifest: ?*?[]const u8 = null,
     pass: *std.ArrayList([]const u8),
     threads: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
@@ -909,7 +982,11 @@ const PlanExtra = struct {
         };
         if (self.max_memory) |m| if (std.mem.eql(u8, arg, "--max-memory")) {
             const v = value orelse return missingValue(arg);
-            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G, at most 1024T");
+            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size from 1M to 1024T, such as 512M or 60G");
+            return 2;
+        };
+        if (self.manifest) |m| if (std.mem.eql(u8, arg, "--input-manifest")) {
+            m.* = value orelse return missingValue(arg);
             return 2;
         };
         if (std.mem.eql(u8, arg, "--pass-env")) {
@@ -921,6 +998,22 @@ const PlanExtra = struct {
         return 0;
     }
 };
+
+/// Checks `--input-manifest` as `run` would, without writing the digests it
+/// computes: they decide the keys of the inputs they cover. Whether every
+/// input matches; null when the manifest cannot be used.
+fn checkPlanManifest(c: Ctx, st: *state.State, ids: *state.Identities, manifest: ?[]const u8) !?bool {
+    const m = manifest orelse return true;
+    const check = try run.checkManifest(c.gpa, st, ids, try sys.absolute(c.a, try sys.cwd(c.a), m), false);
+    return if (check.usable) check.ok else null;
+}
+
+/// Decisions read the records as they are; a launch still running records
+/// each rule only once it ends.
+fn noteLiveLaunch(c: Ctx, root: []const u8) !void {
+    const rec = try workz.records.recordsDir(c.a, root);
+    if (workz.records.running(c.gpa, rec)) std.debug.print("workz: a launch is running in {s}; rules it has not finished show their earlier records\n", .{root});
+}
 
 fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
     var ctx = try plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass), c.env);
@@ -938,7 +1031,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var budget = false;
     var max_threads: ?u32 = null;
     var max_memory: ?u64 = null;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory })) |e| return e;
+    var manifest: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory, .manifest = &manifest })) |e| return e;
     if (!budget and (max_threads != null or max_memory != null))
         return fail("{s} sets the budget --budget checks; give --budget too", .{if (max_threads != null) "--max-threads" else "--max-memory"});
     if (extraArgs(c, &common)) |e| return e;
@@ -950,22 +1044,40 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
     var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    try noteLiveLaunch(c, l.wf.root);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
+    const manifest_ok = (try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    (if (summary) plan.printSummary(&w.interface, &ctx, l.mask) else plan.printPlan(&w.interface, &ctx, l.mask)) catch |err| return unreadable(err, &ids);
+    const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
+    try (if (summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
     var refused: usize = 0;
+    // What `run` would refuse makes the plan fail too, so `plan && run`
+    // stops at the plan.
+    var missing: usize = 0;
+    var changed: usize = 0;
+    for (ds, l.mask) |d, m| if (m and d.run) {
+        if (std.mem.startsWith(u8, d.reason, "input missing")) missing += 1;
+        if (std.mem.startsWith(u8, d.reason, "output changed")) changed += 1;
+    };
+    if (missing + changed > 0) {
+        refused += missing + changed;
+        std.debug.print("workz: run would refuse this launch: {d} {s} with a missing input, {d} with an output changed outside workz\n", .{ missing, if (missing == 1) "rule" else "rules", changed });
+    }
+    if (!manifest_ok) {
+        refused += 1;
+        std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
+    }
     if (budget) {
-        const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
         const runs = try c.a.alloc(bool, l.wf.rules.len);
         var reused: usize = 0;
         for (runs, ds, l.mask) |*r, d, m| {
             r.* = m and d.run;
             reused += @intFromBool(m and !d.run);
         }
-        refused = try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
+        refused += try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
             .threads = max_threads orelse run.defaultThreads(),
             .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
             .defaults = max_threads == null and max_memory == null,
@@ -981,7 +1093,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
     var threads: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
+    var manifest: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .manifest = &manifest })) |e| return e;
     // `explain RULE` reads workflow.toml; `explain WORKFLOW RULE` names the file.
     if (common.positional.items.len == 0) if (common.workflow) |name| {
         try common.positional.append(c.a, name);
@@ -997,9 +1110,11 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
     var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    try noteLiveLaunch(c, l.wf.root);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
+    if (!((try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage)) std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const found = plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]) catch |err| return unreadable(err, &ids);
@@ -1031,12 +1146,13 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     const rec = try workz.records.recordsDir(c.a, l.wf.root);
-    try workz.records.makeRecordsDir(c.gpa, rec);
-    const lock = workz.records.lock(c.gpa, rec) catch |err| switch (err) {
+    // Without records every selected rule is unrecorded; verify leaves no
+    // `.workz/` behind to say so.
+    const lock: ?sys.Fd = if (!sys.exists(c.gpa, rec)) null else workz.records.lock(c.gpa, rec) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; verify after it ends", .{l.wf.root}),
         else => return err,
     };
-    defer sys.close(lock);
+    defer if (lock) |fd| sys.close(fd);
     var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
@@ -1070,12 +1186,11 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; workz run starts another", .{dir});
     if (!workz.records.launchActive(c.gpa, dir)) return failed("the newest launch did not finish, and no engine runs it: {s}; its engine ended without recording its end", .{dir});
-    if (words.items.len == 2) {
-        var tr = try workz.tracker.Tracker.init(c.gpa, dir);
-        defer tr.deinit();
-        _ = try tr.update();
-        if (!tr.index.contains(words.items[1])) return failed("rule {s} is not part of the running launch", .{words.items[1]});
-    }
+    var tr = try workz.tracker.Tracker.init(c.gpa, dir);
+    defer tr.deinit();
+    _ = try tr.update();
+    if (tr.ending) return failed("the newest launch is ending and applies no more commands: {s}", .{dir});
+    if (words.items.len == 2 and !tr.index.contains(words.items[1])) return failed("rule {s} is not part of the running launch", .{words.items[1]});
     const line = if (words.items.len == 2) try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ words.items[0], words.items[1] }) else "cancel\n";
     const fd = try sys.openWrite(c.gpa, try std.fs.path.join(c.a, &.{ dir, "control" }), .append);
     defer sys.close(fd);
@@ -1099,6 +1214,8 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
         } else if (arg.len > 1 and arg[0] == '-') {
             return try unknownOption(c, arg);
         } else if (file == null) {
+            // A file name, not standard output: init writes a file to edit.
+            if (arg.len == 0 or std.mem.eql(u8, arg, "-")) return fail("init needs a file name, not '{s}'", .{arg});
             file = arg;
         } else return fail("init takes at most one file name", .{});
     }
@@ -1128,9 +1245,14 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         if (std.mem.eql(u8, arg, "--check")) {
             check = true;
         } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
-            if (i + 1 >= args.len) return fail("{s} needs a value", .{arg});
+            // As for every option, the value is not another option.
+            const next = if (i + 1 < args.len) args[i + 1] else "";
+            if (next.len == 0 or (next.len > 1 and next[0] == '-')) return fail("{s} needs a value", .{arg});
             i += 1;
-            output = args[i];
+            output = next;
+        } else if (std.mem.startsWith(u8, arg, "--output=")) {
+            output = arg["--output=".len..];
+            if (output.?.len == 0) return fail("--output needs a value", .{});
         } else if (arg.len > 1 and arg[0] == '-') {
             return try unknownOption(c, arg);
         } else if (template == null) {
@@ -1270,10 +1392,7 @@ const LogsExtra = struct {
             self.opts.follow = true;
             return 1;
         }
-        if (eq(u8, arg, "--launch")) {
-            self.opts.launch = value orelse return missingValue(arg);
-            return 2;
-        }
+        if (eq(u8, arg, "--launch")) return launchValue(arg, value, &self.opts.launch);
         if (eq(u8, arg, "--attempt")) {
             const v = value orelse return missingValue(arg);
             self.opts.attempt = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number");
@@ -1300,7 +1419,8 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (opts.launch) |id| if (!sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ rec, "launches", id }))) return failed("no launch {s} recorded in {s}", .{ id, rec });
-    const dir = (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
+    const fresh = if (opts.follow and opts.launch == null and opts.attempt == null) try workz.logs.awaitAttempt(c.gpa, c.a, root, rule) else null;
+    const dir = fresh orelse (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
         if (opts.attempt) |n| return failed("no attempt {d} of rule {s} recorded in {s}", .{ n, rule, rec });
         if (opts.launch) |id| return failed("rule {s} did not run in launch {s}", .{ rule, id });
         return failed("no attempt of rule {s} recorded in {s}", .{ rule, rec });
@@ -1352,6 +1472,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     const verb = if (opts.dry_run) "would remove" else "removed";
     try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
     if (r.kept_for_records > 0) try w.interface.print("; kept {d} older launch(es) that hold recorded attempts", .{r.kept_for_records});
+    if (r.kept_for_recovery > 0) try w.interface.print("; kept {d} that hold outputs a killed launch moved aside, which the next launch puts back", .{r.kept_for_recovery});
     if (opts.previous) try w.interface.print("; previous/ of {d} attempt(s), {d:.1} MiB", .{ r.previous, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0 });
     if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");
@@ -1398,10 +1519,7 @@ const WatchExtra = struct {
             self.color.* = false;
             return 1;
         }
-        if (std.mem.eql(u8, arg, "--launch")) {
-            self.launch.* = value orelse return missingValue(arg);
-            return 2;
-        }
+        if (std.mem.eql(u8, arg, "--launch")) return launchValue(arg, value, self.launch);
         return 0;
     }
 };
@@ -1420,6 +1538,9 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     if (history != null and json) return fail("--history prints text; --json applies to the summary", .{});
     if (history != null and launch != null) return fail("--history lists the recent launches; --launch names one", .{});
     color = color and term.colorOn(1, c.env);
+    // `--history N` takes a count; any other word after it is the workflow.
+    if (history != null and common.workdir == null) if (common.workflow) |w| if (!sys.exists(c.gpa, w))
+        return fail("--history takes a whole number of launches, and no workflow file {s} exists", .{w});
     const root = (try rootOf(c, &common)) orelse return .usage;
     if (history) |n| {
         const rec = try workz.records.recordsDir(c.a, root);
@@ -1445,6 +1566,16 @@ const ReportExtra = struct {
     suggest: *bool,
     methods: *bool,
     output: *?[]const u8,
+    /// One format: a second that differs, as `--json --format tsv`, is refused
+    /// rather than left to win.
+    fn setFormat(self: ReportExtra, f: ReportFormat, used: usize) usize {
+        if (self.format.*) |had| if (had != f) {
+            std.debug.print("workz: give one format; --json is --format json\n", .{});
+            return std.math.maxInt(usize);
+        };
+        self.format.* = f;
+        return used;
+    }
     fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
             self.output.* = value orelse return missingValue(arg);
@@ -1466,20 +1597,13 @@ const ReportExtra = struct {
             self.bottlenecks.* = true;
             return 1;
         }
-        if (std.mem.eql(u8, arg, "--launch")) {
-            self.launch.* = value orelse return missingValue(arg);
-            return 2;
-        }
+        if (std.mem.eql(u8, arg, "--launch")) return launchValue(arg, value, self.launch);
         if (std.mem.eql(u8, arg, "--format")) {
             const v = value orelse return missingValue(arg);
-            self.format.* = std.meta.stringToEnum(ReportFormat, v) orelse return invalidValue(arg, v, "use tsv, json or html");
-            return 2;
+            return self.setFormat(std.meta.stringToEnum(ReportFormat, v) orelse return invalidValue(arg, v, "use tsv, json or html"), 2);
         }
         // As `run --json` and `status --json` print JSON.
-        if (std.mem.eql(u8, arg, "--json")) {
-            self.format.* = .json;
-            return 1;
-        }
+        if (std.mem.eql(u8, arg, "--json")) return self.setFormat(.json, 1);
         return 0;
     }
 };
@@ -1542,6 +1666,9 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     }
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
+    // An attempt writes its record when it ends; the page shows running ones.
+    if ((kind != .html or suggest) and workz.records.launchActive(c.gpa, dir))
+        std.debug.print("workz: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const w = &text.writer;
@@ -1628,14 +1755,14 @@ const RunExtra = struct {
             o.max_threads = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
             if (o.max_threads.? == 0) return invalidValue(arg, v, "use a whole number above 0");
         } else if (eq(u8, arg, "--max-memory")) {
-            o.max_memory_mib = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G, at most 1024T");
+            o.max_memory_mib = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size from 1M to 1024T, such as 512M or 60G");
         } else if (eq(u8, arg, "-r") or eq(u8, arg, "--retry")) {
             o.retry = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use 0 to 3");
             if (o.retry > 3) return invalidValue(arg, v, "use 0 to 3");
         } else if (eq(u8, arg, "--timeout")) {
             o.timeout_s = workflow.parseDuration(v) orelse return invalidValue(arg, v, "use a duration such as 90s, 30m or 2h");
         } else if (eq(u8, arg, "--grace")) {
-            o.grace_s = if (std.mem.eql(u8, v, "0")) 0 else workflow.parseDuration(v) orelse return invalidValue(arg, v, "use a duration such as 10s or 1m, or 0");
+            o.grace_s = if (zeroDuration(v)) 0 else workflow.parseDuration(v) orelse return invalidValue(arg, v, "use a duration such as 10s or 1m, or 0");
         } else if (eq(u8, arg, "--input-manifest")) {
             o.input_manifest = v;
         } else if (eq(u8, arg, "--slice")) {
@@ -1878,15 +2005,18 @@ fn writeProc(path: [*:0]const u8, text: []const u8) !void {
 fn hold(paths: []const [:0]const u8) Exit {
     const gpa = std.heap.page_allocator;
     var files: std.ArrayList([]u8) = .empty;
-    for (paths) |p| workz.state.listFiles(gpa, p, &files) catch return fail("cannot list shared input {s}", .{p});
+    var entry: ?[]u8 = null;
+    for (paths) |p| workz.state.listFiles(gpa, p, &files, &entry) catch return fail("cannot list shared input {s}", .{entry orelse p});
     var total: u64 = 0;
     for (files.items) |file| {
         const p = gpa.dupeZ(u8, file) catch return fail("out of memory listing shared input {s}", .{file});
-        const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        // Without O_NONBLOCK, opening a FIFO waits for a writer forever.
+        const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
         if (linux.errno(fd_rc) != .SUCCESS) return fail("cannot open shared input {s}", .{p});
         const fd: i32 = @intCast(fd_rc);
         var s: linux.Statx = undefined;
-        _ = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &s);
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .SIZE = true }, &s)) != .SUCCESS) return fail("cannot read shared input {s}", .{p});
+        if (s.mode & linux.S.IFMT != linux.S.IFREG) return fail("shared input {s} is not a regular file", .{p});
         if (s.size == 0) continue;
         const len: usize = @intCast(s.size);
         const m = linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);
@@ -1908,7 +2038,7 @@ fn hold(paths: []const [:0]const u8) Exit {
 /// the newest launch, which launch last ran some.
 fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
     const id = std.fs.path.basename(dir);
-    var why: []const u8 = "it ran no rule";
+    var why: []const u8 = if (workz.records.launchActive(c.gpa, dir)) "none has ended yet" else "it ran no rule";
     if (sys.readFile(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }), 1 << 20)) |text| {
         defer c.gpa.free(text);
         if (std.json.parseFromSliceLeaky(std.json.Value, c.a, text, .{ .allocate = .alloc_always })) |v| {

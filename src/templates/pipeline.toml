@@ -12,7 +12,8 @@
 # workflow; add .workz/ to the project's .gitignore.
 #
 # {name} takes a column of the sample sheet, a [params] value or {step}; in
-# `shell`, {input}, {output} and {threads} are the rule's own. Other braces,
+# `shell`, {input} and {output} are the rule's own, and {threads} becomes
+# ${WORKZ_THREADS}, its threads when it runs. Other braces,
 # such as awk's {print $1} or ${HOME}, stay as written.
 
 [workflow]

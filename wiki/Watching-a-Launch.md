@@ -88,7 +88,7 @@ A launch that completed lists its three slowest rules instead of failures. Off a
 While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state:
 
 ```json
-{"engine":"workz 0.5.0 sha256:...","engine_key":4,"launch":"20261027T225229.160-ba6a63f2","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.978690066,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261027T225229.160-ba6a63f2","failures":[],"changed_outputs":[],"previous_bytes":0}
+{"engine":"workz 0.6.0 sha256:...","engine_key":4,"launch":"20261027T225229.160-ba6a63f2","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.978690066,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261027T225229.160-ba6a63f2","failures":[],"changed_outputs":[],"previous_bytes":0}
 ```
 
 `workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
@@ -118,6 +118,6 @@ trim: temporary failure writing trimmed/S4.fq
 
 - `--stderr` or `--stdout` prints one stream, without the headers.
 - `--attempt N` picks attempt N in the newest launch that ran the rule, and `--launch ID` looks in that launch instead.
-- `--follow` (`-f`) keeps printing a running attempt's output until it ends.
+- `--follow` (`-f`) prints the output as it grows until the attempt ends, or its launch stops running.
 
 Every attempt's files stay in its attempt directory, `.workz/launches/<ID>/attempts/<rule>/<NNN>/`, until you remove the launch ([Records](Records.md)).

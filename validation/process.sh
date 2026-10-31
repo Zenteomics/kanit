@@ -1,8 +1,37 @@
 #!/usr/bin/env bash
 # Process checks for the workz binary with real child processes, cgroups and
-# signals. Usage: validation/process.sh WORKZ_BINARY OUTPUT_DIR
+# signals. Usage: validation/process.sh WORKZ_BINARY OUTPUT_DIR [SECTION...]
 # OUTPUT_DIR must not exist; every check gets its own working directory there.
+# A SECTION is the first word of a section heading below, such as reuse,
+# container or monitoring; without one, every section runs. Exit status: 0
+# when every check passed, 1 when one failed, 3 when none failed but some
+# were skipped for a missing tool or image.
 set -uo pipefail
+
+# A selection runs a copy of this script without the other sections: the
+# setup before the first section, every helper function, the gates of the
+# optional tools, and the selected sections.
+if [ $# -gt 2 ]; then
+  sel=" ${*:3} "
+  copy=$(mktemp /var/tmp/workz-process.XXXXXX)
+  awk -v sel="$sel" '
+    /^# -{64} / { name = $3; sub(/,$/, "", name); inside = name == "summary" || index(sel, " " name " ") > 0; started = 1; if (inside) print; next }
+    !started { print; next }
+    /^[a-z_]+\(\) \{ .*\}$/ { print; next }
+    /^[a-z_]+\(\) \{ *(#.*)?$/ { fn = "block" }
+    !fn && /^[a-z_]+\(\) \{ / { fn = "line" }
+    fn == "block" { print; if ($0 ~ /^\}$/) fn = ""; next }
+    fn == "line" { print; if ($0 ~ /; \}$/) fn = ""; next }
+    /^else skip / { print (inside ? $0 : "fi"); next }
+    /^(if have_images |if command -v tmux )/ { print; print "  :"; next }
+    /^trap / { print; next }
+    inside { print }
+  ' "$0" > "$copy"
+  bash "$copy" "$1" "$2"
+  rc=$?
+  rm "$copy"
+  exit $rc
+fi
 
 workz=$(realpath "$1")
 out=$2
@@ -153,6 +182,10 @@ new threads-override
 "$workz" plan wf.toml --threads wrk=2 > /dev/null 2> err.txt
 rc=$?
 check "--threads gives a step's rules another thread count for one launch, keyed by that request" 'grep -q "run   work_s1  (resource request changed)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(jq .request.threads "$(last_launch)/attempts/work_s1/001/record.json")" = 2 ] && grep -q "threads 1 against 2" compare.txt && [ $rc = 2 ] && grep -q "did you mean .work." err.txt'
+printf '[workflow]\nname = "t"\n[[steps]]\nname = "count"\noutput = ["n.txt"]\nshell = "echo {threads} > n.txt"\nmemory = "1M"\n' > pipeline.toml
+"$workz" prepare -o prepared.toml > /dev/null
+"$workz" run prepared.toml "${iso[@]}" --threads count=3 -q > s3.json
+check "a prepared {threads} reaches the command with a --threads override" 'grep -q "\${WORKZ_THREADS}" prepared.toml && [ "$(cat n.txt)" = 3 ]'
 
 new dir-input
 { header dir-input
@@ -197,6 +230,17 @@ v2=$?
 "$workz" validate root.toml 2> e3.txt
 v3=$?
 check "validation refuses writes through a symlinked directory and writes inside the rule's own directory input" '[ $v1 = 2 ] && grep -q "rule a: .alias/x.txt. passes through a symlinked directory" e1.txt && [ $v2 = 2 ] && grep -q "rule c: .rec/o.txt. passes through a symlinked directory" e2.txt && [ $v3 = 2 ] && grep -q "rule d: .d.txt. is inside its directory input" e3.txt && [ ! -e .workz/o.txt ]'
+mkdir -p far/deep && ln -s far/deep lnk && echo decoy > y.txt && ln -s gone-dir dangling
+{ header path-alias
+  rule e '[]' '["far/y.txt"]' '"echo e > far/y.txt"'
+  rule f '["lnk/../y.txt"]' '["f.txt"]' '"cat lnk/../y.txt > f.txt"'
+} > dotdot.toml
+{ header path-alias; rule g '[]' '["dangling/q.txt"]' '"mkdir -p dangling; echo g > dangling/q.txt"'; } > dangling.toml
+"$workz" validate dotdot.toml 2> e4.txt
+v4=$?
+"$workz" validate dangling.toml 2> e5.txt
+v5=$?
+check "validation refuses a '..' that a symlink sends elsewhere and an output below a dangling symlink" '[ $v4 = 2 ] && grep -q "rule f: input .lnk/../y.txt. names another file than it spells" e4.txt && [ $v5 = 2 ] && grep -q "rule g: .dangling/q.txt. passes through a symlinked directory" e5.txt'
 
 new workdir
 mkdir data && echo hello > data/in.txt
@@ -257,6 +301,28 @@ check "turning cutoff on reruns only the direct consumers, once" '[ "$c6_runs" =
 cp up.txt up.copy && mv up.copy up.txt
 "$workz" run wf.toml "${iso[@]}" -q > c8.json
 check "a cutoff output copied back with the same bytes keeps everything reused" '[ "$(status_of c8.json reused)" = 4 ]'
+touch -d '2001-01-01' up.txt
+"$workz" plan wf.toml > p9.txt 2> p9.err
+prc9=$?
+"$workz" verify wf.toml > v9.txt 2>&1
+vrc9=$?
+"$workz" run wf.toml "${iso[@]}" -q > c9.json
+check "a touched cutoff output with the same bytes is planned, verified and run as reused" '[ $prc9 = 0 ] && grep -q "^reuse down " p9.txt && [ $vrc9 = 0 ] && [ "$(status_of c9.json reused)" = 4 ]'
+
+new cutoff-partial
+echo data > in.txt
+write_two() {
+  { header cutoff-partial
+    rule two '["in.txt"]' '["a.txt", "b.txt"]' "\"cp in.txt a.txt; echo $1 > b.txt\"" 'cutoff = true'
+    rule ra '["a.txt"]' '["ra.txt"]' '"cat a.txt > ra.txt"'
+    rule rb '["b.txt"]' '["rb.txt"]' '"cat b.txt > rb.txt"'
+  } > wf.toml
+}
+write_two one
+"$workz" run wf.toml "${iso[@]}" -q > p1.json
+write_two two
+"$workz" run wf.toml "${iso[@]}" -q > p2.json
+check "a cutoff consumer reruns only when an output it reads changed" '[ "$(status_of p2.json completed)" = 2 ] && [ "$(status_of p2.json reused)" = 1 ] && jq -e "select(.event == \"task_reused\") | select(.rule == \"ra\")" "$(last_launch)/events.jsonl" > /dev/null'
 
 # ---------------------------------------------------------------- container rules
 if have_images "$img" && have_images "$img2"; then
@@ -298,15 +364,27 @@ drop_alias
 rc=$?
 check "a missing image refuses the launch without pulling" '[ $rc = 2 ] && jq -e ".status == \"refused\" and (.error | test(\"not available locally\"))" s4.json > /dev/null'
 
+new container-records
+{ header container-records; crule w '[]' '["top.txt"]' '"if touch .workz/planted 2> /dev/null; then echo wrote; else echo denied; fi > top.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "a container rule writing at the top of the working directory cannot write the records" '[ "$(cat top.txt)" = denied ] && [ ! -e .workz/planted ]'
+
 new container-secret
-{ header container-secret; crule s '[]' '["s.txt"]' '"sleep 2; printf %s \"$AUDIT_SECRET\" > s.txt"'; } > wf.toml
-AUDIT_SECRET=audit-secret-value "$workz" run wf.toml "${iso[@]}" --pass-env AUDIT_SECRET -q > s.json &
+{ header container-secret; crule s '[]' '["s.txt"]' '"sleep 2; printf %s \"$PASSED_SECRET\" > s.txt"'; } > wf.toml
+PASSED_SECRET=passed-secret-value "$workz" run wf.toml "${iso[@]}" --pass-env PASSED_SECRET -q > s.json &
 runner=$!
-# The pattern does not match itself in this grep's own arguments.
+# The pattern does not match itself in this grep's own arguments. A
+# process that does carry the value shows the scan can see one.
+bash -c 'sleep 3; :' passed-secret-value &
+decoy=$!
+control=0
+grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q "/proc/$decoy/" && control=1
+kill $decoy
+wait $decoy 2> /dev/null
 seen=0
-for _ in $(seq 25); do grep -l "audit-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q . && seen=1; sleep 0.1; done
+for _ in $(seq 25); do grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q . && seen=1; sleep 0.1; done
 wait $runner
-check "a passed variable reaches a container rule without its value in Podman's arguments" '[ "$(status_of s.json completed)" = 1 ] && [ "$(cat s.txt)" = audit-secret-value ] && [ $seen = 0 ]'
+check "a passed variable reaches a container rule without its value in Podman's arguments" '[ $control = 1 ] && [ "$(status_of s.json completed)" = 1 ] && [ "$(cat s.txt)" = passed-secret-value ] && [ $seen = 0 ]'
 
 new container-workdir
 echo inside > in.txt
@@ -392,7 +470,7 @@ waits2=$(grep -c '"reason":"memory"' "$(last_launch)/events.jsonl")
 "$workz" run wf.toml --max-threads 2 --max-memory 95M --rerun -q > s3.json 2> err3.txt
 rc=$?
 check "admission counts each container rule's Podman client in the memory budget" '[ "$(status_of s1.json completed)" = 2 ] && [ "$waits1" = 1 ] && [ "$(status_of s2.json completed)" = 2 ] && [ "$waits2" = 0 ] && [ $rc = 2 ] && grep -q "rule c1 needs 96 MiB with its Podman client; the run allows 95 MiB" err3.txt'
-check "a version command runs once per image in the image, and the record names the image ID" 'jq -e "length == 1 and (.[0].output | startswith(\"sort (GNU coreutils)\")) and .[0].image == \"$(jq -r .image .workz/launches/$(jq -r .launch s2.json)/attempts/c1/001/record.json)\"" ".workz/launches/$(jq -r .launch s2.json)/versions.json" > /dev/null'
+check "a version command runs once per image in the image, and the record names the image ID" 'jq -e ".v == 1 and (.commands | length) == 1 and (.commands[0].output | startswith(\"sort (GNU coreutils)\")) and .commands[0].image == \"$(jq -r .image .workz/launches/$(jq -r .launch s2.json)/attempts/c1/001/record.json)\"" ".workz/launches/$(jq -r .launch s2.json)/versions.json" > /dev/null'
 
 # ---------------------------------------------------------------- shared services
 # srule NAME INPUTS OUTPUTS SHELL SERVICE: a container rule that joins SERVICE.
@@ -632,14 +710,21 @@ new methods
 "$workz" run wf.toml "${iso[@]}" -q --rerun-rule join > s2.json
 "$workz" report wf.toml --methods > methods.txt
 "$workz" report wf.toml --methods --format json > methods.json
-check "a version command runs once per launch, and none runs when its rules are reused" '[ "$(jq -c "[.[] | .output]" .workz/launches/$(jq -r .launch s1.json)/versions.json)" = "[\"upper 1.4.2\"]" ] && [ ! -e "$(last_launch)/versions.json" ]'
+check "a version command runs once per launch, and none runs when its rules are reused" '[ "$(jq -c "[.commands[] | .output]" .workz/launches/$(jq -r .launch s1.json)/versions.json)" = "[\"upper 1.4.2\"]" ] && [ ! -e "$(last_launch)/versions.json" ]'
 check "report --methods names the workflow, the tools with their versions and each step's command across launches" 'grep -q "^  methods 2.1, file sha256:" methods.txt && grep -q "^  upper: upper 1.4.2$" methods.txt && grep -q "^    up_s1: echo one > s1.txt$" methods.txt && jq -e ".rules == 3 and (.launches | length) == 2 and .steps[0].step == \"up\" and .steps[0].rules == 2" methods.json > /dev/null'
 
 new version-fail
 { header version-fail; rule t '[]' '["t.txt"]' '"touch t.txt"' $'tool = "t"\nversion = "no_such_tool_xyz --version"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report wf.toml --methods > methods.txt
-check "a version command that fails records no version" 'jq -e ".[0].status == \"failed\" and .[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
+check "a version command that fails records no version" 'jq -e ".commands[0].status == \"failed\" and .commands[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
+
+new utf8-output
+# Bytes that are not UTF-8 in a tool's error and version stay strings in the records.
+{ header utf8-output; rule bad '[]' '["b.txt"]' "\"printf 'bad \\\\377 byte\\\\n' >&2; exit 1\"" $'version = "printf \'v1 \\\\377\'"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json 2> /dev/null
+l="$(last_launch)"
+check "a tool's output that is not UTF-8 stays a string in the records" 'jq -e ".reason | type == \"string\" and test(\"bad .* byte\")" "$l/attempts/bad/001/record.json" > /dev/null && jq -e ".commands[0].output | type == \"string\"" "$l/versions.json" > /dev/null && jq -e ".failures[0].reason | type == \"string\"" s.json > /dev/null'
 
 new prepare
 mkdir reads && echo one > reads/a.txt && echo two > reads/b.txt
@@ -712,6 +797,15 @@ check "an output written as a symlink fails its attempt" '[ "$(status_of s3.json
 vnrc=$?
 check "verify fails when a selected rule has no record to check" '[ $vnrc = 1 ] && grep -q "1 selected rule has no record to check" vn.txt'
 
+new failed-fresh
+echo s > src.txt
+{ header failed-fresh; rule make '["src.txt"]' '["o.txt"]' '"if [ -f fail ]; then echo partial > o.txt; exit 1; fi; cat src.txt > o.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s1.json
+rm o.txt && touch fail
+"$workz" run wf.toml --no-isolation -q > s2.json 2> /dev/null
+"$workz" plan wf.toml > p.txt 2> /dev/null
+check "a failed attempt's partial output with no earlier copy goes to failed/, so the rule reads as missing, not changed" '[ ! -e o.txt ] && [ "$(cat "$(last_launch)/attempts/make/001/failed/0-o.txt")" = partial ] && grep -q "run   make  (output missing: " p.txt && jq -e "select(.event == \"output_failed\")" "$(last_launch)/events.jsonl" > /dev/null'
+
 new mutate-input
 echo 1 > in.txt
 { header mutate-input; rule r '["in.txt"]' '["out.txt"]' '"cat in.txt > out.txt; echo 2 >> in.txt"'; } > wf.toml
@@ -730,6 +824,10 @@ check "an attempt that cannot start ends with its record, and logs --follow retu
 sed -i 's/^workdir = "work"$/&\nretries = 1/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json 2> /dev/null
 check "an attempt that cannot start uses the rule's retries, and each attempt keeps its record" 'l="$(last_launch)/attempts/w"; [ "$(status_of s2.json failed)" = 1 ] && [ "$(jq -r .status "$l/001/record.json")" = failed ] && [ "$(jq -r .status "$l/002/record.json")" = failed ] && jq -e "select(.event == \"task_retry\")" "$(last_launch)/events.jsonl" > /dev/null'
+echo ref > ref.txt
+printf '[workflow]\nname = "start-record"\nversion = "1"\n\n[shared.ref]\npath = "ref.txt"\n\n[[rules]]\nname = "w"\ninput = ["in.txt"]\noutput = ["work/o.txt"]\nshell = "true"\nworkdir = "work"\nlinks = { "i" = "in.txt" }\nretries = 1\n[rules.resources]\nmemory = "64M"\nshared = ["ref"]\n' > shared.toml
+"$workz" run shared.toml "${iso[@]}" -q > s3.json 2> /dev/null
+check "a retry after a failed start keeps its shared input loaded" '[ "$(status_of s3.json failed)" = 1 ] && [ "$(grep -c "\"shared_loaded\"" "$(last_launch)/events.jsonl")" = 1 ] && [ -f "$(last_launch)/attempts/w/002/record.json" ]'
 
 new retry
 { header retry
@@ -737,6 +835,20 @@ new retry
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "a retried rule completes and keeps both attempts" '[ "$(status_of s.json completed)" = 1 ] && [ -f "$(last_launch)/attempts/flaky/001/record.json" ] && [ -f "$(last_launch)/attempts/flaky/002/record.json" ]'
+
+new logs-wait
+# logs --follow during a launch that has yet to start the rule follows its new attempt.
+write_logs() { { header logs-wait; rule a '[]' '["a.txt"]' "\"$1; echo a > a.txt\""; rule b '["a.txt"]' '["b.txt"]' "\"echo $2 >&2; touch b.txt\""; } > wf.toml; }
+write_logs "true" first-b
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+write_logs "sleep 2" second-b
+"$workz" run wf.toml "${iso[@]}" -q > s2.json &
+engine=$!
+for _ in $(seq 100); do [ "$(ls .workz/launches | wc -l)" = 2 ] && break; sleep 0.05; done
+timeout 30 "$workz" logs b --follow > f.txt 2> f.err
+frc=$?
+wait $engine
+check "logs --follow waits for the running launch to start the rule and follows that attempt" '[ $frc = 0 ] && grep -q second-b f.txt && ! grep -q first-b f.txt'
 
 # ---------------------------------------------------------------- time limits and termination
 new timeout
@@ -748,6 +860,18 @@ start=$(date +%s)
 "$workz" run wf.toml "${iso[@]}" -k --grace 2 -q > s.json 2> err.txt
 took=$(( $(date +%s) - start ))
 check "timeouts end both tasks within the grace period" '[ "$(status_of s.json failed)" = 2 ] && [ $took -le 8 ] && grep -q "timed out after 1 s" err.txt'
+{ header timeout; rule quick '[]' '["q.txt"]' '"touch q.txt"' 'timeout = "18446744073709551615"'; } > far.toml
+"$workz" run far.toml "${iso[@]}" --grace 18446744073709551615 -q > f.json 2> f.err
+check "the largest timeout and grace end a launch with its summary" '[ "$(status_of f.json completed)" = 1 ] && [ ! -s f.err ]'
+
+new grace-children
+# The rule's shell dies at SIGTERM; the tool it started tidies up first.
+printf '%s\n' "trap 'sleep 1; echo tidied > \"\$1\"; exit 0' TERM" 'while :; do sleep 0.1; done' > tool.sh
+{ header grace-children; rule tidy '[]' '["t.txt"]' '"bash tool.sh tidied.txt; touch t.txt"' 'timeout = "1s"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" --grace 5 -q > s.json 2> err.txt
+{ header grace-children; rule tidy '[]' '["t.txt"]' '"bash tool.sh bare.txt; touch t.txt"' 'timeout = "1s"'; } > bare.toml
+"$workz" run bare.toml --no-isolation --grace 5 -q > b.json 2> /dev/null
+check "a stopped rule's tool gets the grace period after its shell exits, with and without isolation" '[ "$(status_of s.json failed)" = 1 ] && grep -q "timed out after 1 s" err.txt && [ "$(cat tidied.txt 2>/dev/null)" = tidied ] && [ "$(status_of b.json failed)" = 1 ] && [ "$(cat bare.txt 2>/dev/null)" = tidied ]'
 
 new escaped
 { header escaped
@@ -756,7 +880,7 @@ new escaped
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 sleep 0.5
 pid=$(cat ../escaped.pid)
-check "a process that leaves the task's session is ended with its cgroup" '! alive $pid'
+check "a process that leaves the task's session is ended with its cgroup" '[ -n "$pid" ] && ! alive $pid'
 
 new oom
 { header oom; rule hog '[]' '["h.txt"]' '"python3 -I -c \"b = bytearray(300 * 1024 * 1024)\"; touch h.txt"'; } > wf.toml
@@ -795,7 +919,9 @@ new crash
 } > wf.toml
 "$workz" run wf.toml --no-isolation -q > s1.json &
 engine=$!
-sleep 2
+for _ in $(seq 100); do jq -e .rules.first .workz/state.json > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" plan wf.toml > live.txt 2> live.err
+"$workz" report -d . > live-report.tsv 2> live-report.err
 kill -KILL $engine
 wait $engine 2>/dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
@@ -809,8 +935,61 @@ crc=$?
 timeout 10 "$workz" watch -d . --interval 200 > w.txt 2> w.err
 wrc=$?
 check "status, control and watch see that a killed engine's launch did not finish" '[ $src = 1 ] && [ "$(jq -r .status st.json)" = unfinished ] && grep -q "did not finish" st.err && [ $crc = 1 ] && grep -q "no engine runs it" ctl.err && [ $wrc = 1 ] && grep -q "did not finish" w.err'
-"$workz" plan wf.toml > plan.txt
-check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
+"$workz" watch -d . --once > once.txt 2> once.err
+orc=$?
+check "watch --once and report see a running launch as running and a killed one as unfinished" '[ $orc = 1 ] && head -1 once.txt | grep -q "unfinished: its engine ended without recording its end" && ! grep -q RUNNING once.txt && grep -q "did not finish" once.err && grep -q "is still running; its attempts that have not ended have no record yet" live-report.err'
+"$workz" plan wf.toml > plan.txt 2> plan.err
+check "after a killed engine, finished rules are reused and interrupted ones rerun, and plan notes a running launch" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt && grep -q "a launch is running in" live.err && ! grep -q "a launch is running" plan.err'
+
+new crash-previous
+{ header crash-previous; rule r '[]' '["out.txt"]' '"echo A > out.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s1.json
+sed -i 's|"echo A > out.txt"|"sleep 30; echo B > out.txt"|' wf.toml
+"$workz" run wf.toml --no-isolation -q > s2.json 2> /dev/null &
+engine=$!
+for _ in $(seq 50); do [ -e out.txt ] || break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2> /dev/null
+moved=$([ -e out.txt ] && echo no || echo yes)
+"$workz" clean -d . --keep 0 > ck.txt
+"$workz" clean -d . --previous > cp.txt
+copy=$(cat "$(last_launch)/attempts/r/001/previous/0-out.txt" 2> /dev/null)
+check "clean keeps the only copy of an output a killed launch moved aside" '[ $moved = yes ] && [ "$copy" = A ] && grep -q "hold outputs a killed launch moved aside" ck.txt && grep -q "it holds outputs the next launch puts back" cp.txt'
+sed -i 's|"sleep 30; echo B > out.txt"|"echo partial > out.txt; exit 3"|' wf.toml
+"$workz" run wf.toml --no-isolation -q > s3.json 2> /dev/null
+"$workz" clean -d . --keep 1 > /dev/null
+check "a killed launch's earlier output comes back before the next launch, and survives clean --keep" '[ "$(cat out.txt)" = A ] && [ "$(jq -c "select(.event == \"output_restored\")" "$(last_launch)/events.jsonl" | wc -l)" = 2 ]'
+
+new cancel-interrupt
+{ header cancel-interrupt; rule t '[]' '["t.txt"]' '"trap \"\" TERM; sleep 4; touch t.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation --grace 3 > s.json 2> err.txt &
+engine=$!
+for _ in $(seq 50); do jq -e 'select(.event == "task_started")' "$(last_launch)/events.jsonl" > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" control -d . cancel > /dev/null
+sleep 1.2
+kill -INT $engine
+wait $engine
+check "an interrupt after control cancel keeps the grace period" 'grep -q "the launch is already stopping" err.txt && ! grep -q "killing running tasks" err.txt'
+
+new control-startup
+{ header control-startup; rule s '[]' '["s.txt"]' '"sleep 3; touch s.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s.json 2> /dev/null &
+engine=$!
+for _ in $(seq 400); do "$workz" control -d . cancel > /dev/null 2>&1 && break; done
+wait $engine
+check "a cancel sent while the launch starts is applied" '[ ! -e s.txt ] && [ "$(jq -r .status s.json)" = interrupted ]'
+
+new control-ending
+# The version command keeps the launch open after its only rule ended.
+{ header control-ending; rule v '[]' '["v.txt"]' '"touch v.txt"' 'version = "sleep 3; echo v1"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s.json 2> /dev/null &
+engine=$!
+for _ in $(seq 50); do jq -e 'select(.event == "launch_ending")' .workz/launches/*/events.jsonl > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" control -d . cancel > c.out 2> c.err
+crc=$?
+echo "stop v" >> "$(last_launch)/control"
+wait $engine
+check "a command sent while the launch ends is refused or answered, never applied" '[ $crc = 1 ] && grep -q "the newest launch is ending and applies no more commands" c.err && [ "$(jq -r .status s.json)" = completed ] && jq -e "select(.event == \"control\" and .command == \"stop\" and .result == \"the launch is ending\")" "$(last_launch)/events.jsonl" > /dev/null'
 
 new crash-isolated
 { header crash-isolated; rule long '[]' '["l.txt"]' '"echo $$ > pid.txt; sleep 30; touch l.txt"'; } > wf.toml
@@ -930,7 +1109,7 @@ vrc=$?
 rrc=$?
 "$workz" run wf.toml --no-isolation --max-memory 1024T -q > s.json 2> /dev/null
 mrc=$?
-check "sizes above 1024T are refused before any arithmetic, and 1024T is accepted" '[ $vrc = 2 ] && grep -q "invalid memory .18446744073709551615M." v.err && [ $rrc = 2 ] && grep -q "at most 1024T" r.err && [ $mrc = 0 ]'
+check "sizes above 1024T are refused before any arithmetic, and 1024T is accepted" '[ $vrc = 2 ] && grep -q "invalid memory .18446744073709551615M." v.err && [ $rrc = 2 ] && grep -q "from 1M to 1024T" r.err && [ $mrc = 0 ]'
 
 new input-errors
 mkdir -p deep && p=deep && for i in $(seq 70); do p="$p/d"; done && mkdir -p "$p"
@@ -977,6 +1156,12 @@ peak=$(jq -r '.cgroup.file' "$(last_launch)/attempts/use1/001/record.json")
 check "a user task is not charged for the shared pages" '[ "$peak" -lt $((8 * 1024 * 1024)) ]'
 # The run's scope protects the shared pages: memory.low of their size.
 check "the run's scope protects the shared input's size from reclaim" 'jq -e "select(.event == \"memory_protected\") | select(.ok and .memory_low_mib == 64)" "$ev" > /dev/null && [ "$(cat u1.low)" = $((64 * 1024 * 1024)) ]'
+# A FIFO cannot be mapped, and opening one would wait for a writer.
+mkdir piped && echo x > piped/a.txt && mkfifo piped/pipe
+printf '[workflow]\nname = "shared"\nversion = "1"\n\n[shared.piped]\npath = "piped"\n\n[[rules]]\nname = "p"\noutput = ["p.txt"]\nshell = "touch p.txt"\n[rules.resources]\nmemory = "64M"\nshared = ["piped"]\n' > fifo.toml
+timeout 20 "$workz" run fifo.toml "${iso[@]}" -q > f.json 2> f.err
+frc=$?
+check "a FIFO in a shared input refuses the launch with its path" '[ $frc = 2 ] && grep -q "shared input piped (piped): $PWD/piped/pipe is not a regular file" f.err'
 
 new samples
 { header samples; rule busy '[]' '["b.txt"]' '"timeout 6 sh -c \"while :; do :; done\" || true; touch b.txt"'; } > wf.toml
@@ -1025,7 +1210,7 @@ rrc=$?
 echo 'garbage' > "$l/events.jsonl"
 rm "$l/summary.json"
 "$workz" watch -d . --once > w.out 2> /dev/null
-check "a truncated summary, a corrupt record and a corrupt event stream are named, never shown as results" '[ $src = 1 ] && grep -q "summary.json is not valid JSON" st.err && [ ! -s st.out ] && [ $rrc = 1 ] && grep -q "record.json is not valid JSON; the report leaves it out" r.err && grep -q "started at an unknown time" w.out && grep -q "1 line of events.jsonl could not be read" w.out'
+check "a truncated summary, a corrupt record and a corrupt event stream are named, never shown as results" '[ $src = 1 ] && grep -q "summary.json is not valid JSON" st.err && [ ! -s st.out ] && [ $rrc = 1 ] && grep -q "record.json is not valid JSON; the report leaves it out" r.err && grep -q "unfinished: its engine ended without recording its end" w.out && grep -q "1 line of events.jsonl could not be read" w.out'
 echo garbage > .workz/state.json
 "$workz" plan wf.toml > /dev/null 2> p.err
 prc=$?
@@ -1067,8 +1252,12 @@ check "report --compare marks a step with no completed run on one side" 'grep -q
 # ---------------------------------------------------------------- inputs and formats
 new plan-missing
 { header plan-missing; rule count '["reads/s9.txt"]' '["c.txt"]' '"wc -l reads/s9.txt > c.txt"'; } > wf.toml
-"$workz" plan wf.toml > plan.txt
-check "plan names an input that is missing and that no rule makes" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt'
+"$workz" plan wf.toml > plan.txt 2> plan.err
+prc=$?
+check "plan names an input that is missing and that no rule makes, and fails as run would" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt && [ $prc = 1 ] && grep -q "run would refuse this launch: 1 rule with a missing input" plan.err'
+"$workz" plan wf.toml --budget > pb.txt 2> pb.err
+pbrc=$?
+check "plan --budget fails as run would for a missing input" '[ $pbrc = 1 ] && grep -q "run would refuse this launch: 1 rule with a missing input" pb.err'
 
 new manifest
 echo data > ext.txt
@@ -1084,6 +1273,13 @@ check "a matching manifest digest runs" '[ "$(status_of s.json completed)" = 1 ]
 touch ext.txt
 "$workz" run wf.toml "${iso[@]}" -q --input-manifest good.json > touched.json
 check "a touched manifest input with the same bytes is read once and its rule reused" '[ "$(status_of touched.json reused)" = 1 ] && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" "$(last_launch)/events.jsonl" > /dev/null'
+touch ext.txt
+"$workz" plan wf.toml --input-manifest good.json > pg.txt 2> pg.err
+pgrc=$?
+"$workz" plan wf.toml --input-manifest bad.json > pbad.txt 2> pbad.err
+pbadrc=$?
+"$workz" plan wf.toml > pn.txt
+check "plan checks an input manifest as run does, without recording its digests" '[ $pgrc = 0 ] && grep -q "^reuse m " pg.txt && [ $pbadrc = 1 ] && grep -q "inputs do not match the input manifest" pbad.err && grep -q "^run   m " pn.txt'
 stamp() { stat -c '{"dev": %d, "ino": %i, "size": %s, "mtime_ns": %.9Y, "ctime_ns": %.9Z}' "$1" | sed 's/\.//g'; }
 echo stamped > st.txt
 { header stamped; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stamped.toml
@@ -1181,7 +1377,7 @@ done
 check "every help text fits in 80 columns ($widest)" '[ "$widest" -le 80 ]'
 "$workz" status --history x 2> hist-x.txt
 rc=$?
-check "a WORKFLOW that does not exist is refused, as --history x is" '[ $rc = 2 ] && grep -q "no workflow file x; -d DIR names a working directory" hist-x.txt'
+check "a WORKFLOW that does not exist is refused, and --history x says it takes a number" '[ $rc = 2 ] && grep -q "history takes a whole number of launches, and no workflow file x exists" hist-x.txt'
 "$workz" run wf.toml --max-thread 4 2> typo.txt
 rc=$?
 check "a mistyped option is named with the one probably meant" '[ $rc = 2 ] && grep -q "did you mean .--max-threads.?" typo.txt'
@@ -1204,12 +1400,34 @@ rc1=$?
 rc2=$?
 "$workz" run wf.toml -r -1 2> negative.txt
 rc3=$?
-check "an option the command does not take, a bad variable name and a negative count are refused" '[ $rc1 = 2 ] && grep -q "unknown option .-t. for status" status-t.txt && [ $rc2 = 2 ] && grep -q "invalid value .. (use a variable name" pass-env.txt && [ $rc3 = 2 ] && grep -q "invalid value .-1. (use 0 to 3)" negative.txt'
+check "an option the command does not take, a bad variable name and a negative count are refused" '[ $rc1 = 2 ] && grep -q "unknown option .-t. for status" status-t.txt && [ $rc2 = 2 ] && grep -q "pass-env needs a value" pass-env.txt && [ $rc3 = 2 ] && grep -q "invalid value .-1. (use 0 to 3)" negative.txt'
 "$workz" version extra 2> ver.txt
 vrc=$?
 "$workz" run wf.toml --no-isolation --slice x.slice 2> slice.txt
 src=$?
 check "version takes no words, and --slice needs the scope --no-isolation leaves out" '[ $vrc = 2 ] && grep -q "version takes no arguments" ver.txt && [ $src = 2 ] && grep -q "which --no-isolation does not make" slice.txt'
+mkdir cl && cd cl && touch afile
+{ header cl; rule a '[]' '["a.txt"]' '"touch a.txt"'; rule b '["a.txt"]' '["b.txt"]' '"touch b.txt"'; } > wf.toml
+"$workz" plan -d "" wf.toml 2> empty-d.txt; r1=$?
+"$workz" plan .. 2> dir-wf.txt; r2=$?
+"$workz" plan wf.toml -d afile 2> file-d.txt; r3=$?
+"$workz" watch --once --launch .. 2> launch-dot.txt; r4=$?
+check "an empty -d, a directory as WORKFLOW, -d naming a file and a launch ID that is a path are refused with a message" '[ $r1 = 2 ] && grep -q "^workz: -d needs a value" empty-d.txt && [ $r2 = 2 ] && grep -q "is a directory; name the workflow file in it" dir-wf.txt && [ $r3 = 2 ] && grep -q "names a file, not a directory" file-d.txt && [ $r4 = 2 ] && grep -q "use a launch ID" launch-dot.txt && ! grep -q "error:" empty-d.txt dir-wf.txt file-d.txt launch-dot.txt && [ ! -e .workz ]'
+"$workz" plan --target=a -- wf.toml > eq.txt 2> eq.err; r1=$?
+"$workz" plan wf.toml --summary=yes 2> flag-eq.txt; r2=$?
+check "an option takes its value after =, a flag takes none, and -- ends the options" '[ $r1 = 0 ] && grep -q "^run   a " eq.txt && ! grep -q " b " eq.txt && [ $r2 = 2 ] && grep -q "summary takes no value" flag-eq.txt'
+"$workz" prepare -o --check 2> prep-o.txt; r1=$?
+"$workz" init "" 2> init-empty.txt; r2=$?
+"$workz" init - 2> init-dash.txt; r3=$?
+check "prepare -o and init refuse an option or an empty word as a file name" '[ $r1 = 2 ] && grep -q "needs a value" prep-o.txt && [ ! -e ./--check ] && [ $r2 = 2 ] && [ $r3 = 2 ] && grep -q "init needs a file name" init-dash.txt && [ ! -e ./- ]'
+"$workz" verify wf.toml > verify.txt; r1=$?
+check "verify without records reports every rule unrecorded and leaves no .workz behind" '[ $r1 = 1 ] && grep -q "unrecorded a" verify.txt && [ ! -e .workz ]'
+"$workz" run wf.toml --no-isolation -q --grace 0s > grace.json; r1=$?
+"$workz" report -d . --json --format tsv 2> formats.txt; r2=$?
+"$workz" run wf.toml --max-memory 512K 2> small.txt; r3=$?
+"$workz" graph wf.toml --why a:b -t a 2> why.txt; r4=$?
+check "--grace 0s is zero, two report formats are refused, a size names its range, and --why follows --target" '[ $r1 = 0 ] && [ $r2 = 2 ] && grep -q "give one format" formats.txt && [ $r3 = 2 ] && grep -q "from 1M to 1024T" small.txt && [ $r4 = 2 ] && grep -q "b is not among the rules --target selects" why.txt'
+cd ..
 
 new snippet
 { header snippet; rule a '[]' '["a.txt"]' '"true"' 'memroy = "1G"'; } > wf.toml
@@ -1426,7 +1644,7 @@ new retry-evidence
   rule child '["out.txt"]' '["child.txt"]' '"cat out.txt > child.txt"'
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" --retry 1 -q > s.json 2> err.txt
-check "a retry keeps both attempts and the partial output of the first" '[ "$(status_of s.json completed)" = 2 ] && grep -rq partial "$(last_launch)/attempts/fail_once/002/previous/" && [ "$(cat child.txt)" = recovered ]'
+check "a retry keeps both attempts, and the first one keeps its partial output in failed/" '[ "$(status_of s.json completed)" = 2 ] && grep -rq partial "$(last_launch)/attempts/fail_once/001/failed/" && [ "$(cat child.txt)" = recovered ]'
 
 new failed-branch
 echo fail > flag
@@ -1499,7 +1717,7 @@ wait $launcher
 rc=$?
 sleep 0.5
 child=$(cat child.pid)
-check "SIGTERM to the launcher stops the run and its children" '[ $rc = 130 ] && [ ! -e done.txt ] && ! alive $child'
+check "SIGTERM to the launcher stops the run and its children" '[ $rc = 130 ] && [ ! -e done.txt ] && [ -n "$child" ] && ! alive $child'
 { header terminate; rule slow '[]' '["done.txt"]' '"echo resumed > done.txt"'; } > wf.toml
 "$workz" run wf.toml --max-threads 2 --max-memory 256M -q > s2.json
 check "a later run completes the interrupted rule" '[ "$(cat done.txt)" = resumed ]'
@@ -1535,6 +1753,10 @@ for name in ordinary shared_inputs log_is_input log_hardlink relative_alias log_
   check "alias case $name is $([ $want = 0 ] && echo accepted || echo rejected)" '[ $rc = $want ]'
 done
 
+# ---------------------------------------------------------------- summary
 echo
 echo "$pass passed, $failed failed, $skipped skipped"
-[ $failed = 0 ]
+# A run that skipped checks did not test everything, so it cannot pass for
+# a complete one.
+[ $failed = 0 ] || exit 1
+[ $skipped = 0 ] || exit 3
