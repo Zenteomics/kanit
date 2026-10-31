@@ -41,6 +41,7 @@ const target_opt: Opt = .{ .flag = "-t, --target RULE", .desc = "select RULE and
 const rerun_opts = [_]Opt{
     .{ .flag = "--rerun", .desc = "decide as 'run --rerun' would" },
     .{ .flag = "--rerun-rule RULE", .desc = "decide as 'run --rerun-rule RULE' would (repeatable)" },
+    .{ .flag = "--input-manifest FILE", .desc = "decide as 'run --input-manifest FILE' would" },
     .{ .flag = "--pass-env NAME", .desc = "decide as 'run --pass-env NAME' would (repeatable)" },
     .{ .flag = "--threads STEP=N", .desc = "decide as 'run --threads STEP=N' would (repeatable)" },
 };
@@ -132,7 +133,8 @@ const commands = [_]Command{
         .about =
         \\Prints, for every selected rule, whether a run would run it or reuse it and
         \\why, then how many of each. Nothing runs. It exits 1 when run would refuse
-        \\the launch: a missing input, or an output changed outside workz.
+        \\the launch: a missing input, an output changed outside workz, or an input
+        \\that does not match --input-manifest.
         \\'dry-run' is another name for it.
         ,
         .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
@@ -880,6 +882,8 @@ const PlanExtra = struct {
     budget: ?*bool = null,
     max_threads: ?*?u32 = null,
     max_memory: ?*?u64 = null,
+    /// `--input-manifest`, for `plan` only.
+    manifest: ?*?[]const u8 = null,
     pass: *std.ArrayList([]const u8),
     threads: *std.ArrayList([]const u8),
     reruns: *std.ArrayList([]const u8),
@@ -916,6 +920,10 @@ const PlanExtra = struct {
             m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G, at most 1024T");
             return 2;
         };
+        if (self.manifest) |m| if (std.mem.eql(u8, arg, "--input-manifest")) {
+            m.* = value orelse return missingValue(arg);
+            return 2;
+        };
         if (std.mem.eql(u8, arg, "--pass-env")) {
             const v = value orelse return missingValue(arg);
             if (!envName(v)) return invalidValue(arg, v, "use a variable name such as HOME");
@@ -925,6 +933,22 @@ const PlanExtra = struct {
         return 0;
     }
 };
+
+/// Checks `--input-manifest` as `run` would, without writing the digests it
+/// computes: they decide the keys of the inputs they cover. Whether every
+/// input matches; null when the manifest cannot be used.
+fn checkPlanManifest(c: Ctx, st: *state.State, ids: *state.Identities, manifest: ?[]const u8) !?bool {
+    const m = manifest orelse return true;
+    const check = try run.checkManifest(c.gpa, st, ids, try sys.absolute(c.a, try sys.cwd(c.a), m), false);
+    return if (check.usable) check.ok else null;
+}
+
+/// Decisions read the records as they are; a launch still running records
+/// each rule only once it ends.
+fn noteLiveLaunch(c: Ctx, root: []const u8) !void {
+    const rec = try workz.records.recordsDir(c.a, root);
+    if (workz.records.running(c.gpa, rec)) std.debug.print("workz: a launch is running in {s}; rules it has not finished show their earlier records\n", .{root});
+}
 
 fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
     var ctx = try plan.Context.init(c.gpa, c.a, &l.wf, &l.g, st, ids, try state.envText(c.a, c.env, pass), c.env);
@@ -942,7 +966,8 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var budget = false;
     var max_threads: ?u32 = null;
     var max_memory: ?u64 = null;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory })) |e| return e;
+    var manifest: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory, .manifest = &manifest })) |e| return e;
     if (!budget and (max_threads != null or max_memory != null))
         return fail("{s} sets the budget --budget checks; give --budget too", .{if (max_threads != null) "--max-threads" else "--max-memory"});
     if (extraArgs(c, &common)) |e| return e;
@@ -954,14 +979,16 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
     var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    try noteLiveLaunch(c, l.wf.root);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
+    const manifest_ok = (try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    (if (summary) plan.printSummary(&w.interface, &ctx, l.mask) else plan.printPlan(&w.interface, &ctx, l.mask)) catch |err| return unreadable(err, &ids);
-    var refused: usize = 0;
     const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
+    try (if (summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
+    var refused: usize = 0;
     // What `run` would refuse makes the plan fail too, so `plan && run`
     // stops at the plan.
     var missing: usize = 0;
@@ -974,6 +1001,10 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
         refused += missing + changed;
         std.debug.print("workz: run would refuse this launch: {d} {s} with a missing input, {d} with an output changed outside workz\n", .{ missing, if (missing == 1) "rule" else "rules", changed });
     }
+    if (!manifest_ok) {
+        refused += 1;
+        std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
+    }
     if (budget) {
         const runs = try c.a.alloc(bool, l.wf.rules.len);
         var reused: usize = 0;
@@ -981,7 +1012,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
             r.* = m and d.run;
             reused += @intFromBool(m and !d.run);
         }
-        refused = try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
+        refused += try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
             .threads = max_threads orelse run.defaultThreads(),
             .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
             .defaults = max_threads == null and max_memory == null,
@@ -997,7 +1028,8 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var pass: std.ArrayList([]const u8) = .empty;
     var reruns: std.ArrayList([]const u8) = .empty;
     var threads: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
+    var manifest: ?[]const u8 = null;
+    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .manifest = &manifest })) |e| return e;
     // `explain RULE` reads workflow.toml; `explain WORKFLOW RULE` names the file.
     if (common.positional.items.len == 0) if (common.workflow) |name| {
         try common.positional.append(c.a, name);
@@ -1013,9 +1045,11 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
     var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    try noteLiveLaunch(c, l.wf.root);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
+    if (!((try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage)) std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const found = plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]) catch |err| return unreadable(err, &ids);

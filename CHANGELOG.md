@@ -29,11 +29,12 @@ Three changes need action:
   - `summary.json`, `launch.json` and `request.json` add `v`, and `versions.json` becomes `{"v": 1, "commands": [...]}` instead of a bare list. A record or event with a newer `v` is left out and named, never misread.
   - `.workz/` is made readable by its owner alone; another user who read the records needs to be given access again.
   - `run` refuses `--slice` with `--no-isolation`, which ignored it, and `version` refuses words after it.
-  - `plan` exits 1 when `run` would refuse the launch, for a missing input or an output changed outside workz, and says so on standard error.
+  - `plan` exits 1 when `run` would refuse the launch, for a missing input, an output changed outside workz or an input that does not match `--input-manifest`, also with `--budget`, and says so on standard error.
   - `workz prepare` writes `{threads}` as `${WORKZ_THREADS}`, so the command reads the threads the rule gets, a `--threads` override included; prepare again to pick this up.
 
 ### Changed
 
+- **Early cutoff.** A consumer of a cutoff rule reruns only when an output it reads changed, not when another output of that rule did.
 - **Speed.** Reports and the live launch page find reused rules' runs by listing each earlier launch once, instead of probing every rule in every launch: a 200-rule report after 100 reused launches takes 15 ms instead of 54 ms.
 
 ### Fixed
@@ -65,6 +66,11 @@ Three changes need action:
   - A shared input that no running rule uses is no longer measured, so a missing one no longer refuses an unrelated launch.
   - `plan --budget` refuses a used shared input it cannot measure, as `run` does, instead of counting it as empty.
   - A rule that lists one shared input twice is refused, instead of counting it twice.
+- **`workz plan`, `explain` and `verify`.**
+  - `plan --budget` exits 1 when `run` would refuse the launch for a missing input or a changed output, also when the budget fits.
+  - A cutoff output touched with the same bytes is planned and verified as `run` treats it: its consumers are reused and it matches, instead of running them and counting as changed.
+  - `plan` and `explain` take `--input-manifest`, so their decisions use the digests `run` would check; they write nothing.
+  - `plan` and `explain` say when a launch is running in the working directory, since the rules it has not finished show their earlier records.
 - **Sizes.** Requests and budgets above 1024T are refused when read, instead of aborting on overflow, and a `K` size rounds up, so a request never shrinks.
 - **Input errors.** An unreadable or too deeply nested input names its path, a manifest entry that is not a file is refused, and `validate --inputs` reports a dangling symlink as missing, as `run` does.
 - **`workz prepare`.**

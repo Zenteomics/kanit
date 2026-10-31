@@ -74,7 +74,7 @@ Some files are keyed on a SHA-256 digest of their bytes instead of their identit
 
 ### Cutoff
 
-`cutoff = true` on a rule hashes its outputs after it succeeds. Consumers are keyed on those digests instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order:
+`cutoff = true` on a rule hashes its outputs after it succeeds. Each consumer is keyed on the digests of the outputs it reads instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused, and when one output changes, only the rules that read it run. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order:
 
 ```sh
 workz plan workflow.toml

@@ -48,31 +48,32 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 ## plan
 
 ```text
-workz plan [WORKFLOW] [--summary] [--budget] [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
+workz plan [WORKFLOW] [--summary] [--budget] [--rerun] [--rerun-rule RULE] [--input-manifest FILE] [--pass-env NAME] [--threads STEP=N]
 ```
 
-Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, or an output changed outside workz without `--rerun`, which it names on standard error. `dry-run` is another name for `plan`.
+Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, an output changed outside workz without `--rerun`, or an input that does not match `--input-manifest`, which it names on standard error. While a launch runs in the working directory, it says so: the rules that launch has not finished show their earlier records. `dry-run` is another name for `plan`.
 
-| Option          | Argument | Meaning                                         |
-| --------------- | -------- | ----------------------------------------------- |
-| `--summary`     |          | count the decisions by reason instead           |
-| `--budget`      |          | check every request against the budget          |
-| `--max-threads` | N        | with `--budget`: its threads; online CPUs       |
-| `--max-memory`  | SIZE     | with `--budget`: its memory; 3/4 of memory      |
-| `--rerun`       |          | as `run --rerun` would                          |
-| `--rerun-rule`  | RULE     | as `run --rerun-rule` would; repeatable         |
-| `--pass-env`    | NAME     | as `run --pass-env` would; repeatable           |
-| `--threads`     | STEP=N   | as `run --threads` would; repeatable            |
+| Option             | Argument | Meaning                                    |
+| ------------------ | -------- | ------------------------------------------ |
+| `--summary`        |          | count the decisions by reason instead      |
+| `--budget`         |          | check every request against the budget     |
+| `--max-threads`    | N        | with `--budget`: its threads; online CPUs  |
+| `--max-memory`     | SIZE     | with `--budget`: its memory; 3/4 of memory |
+| `--rerun`          |          | as `run --rerun` would                     |
+| `--rerun-rule`     | RULE     | as `run --rerun-rule` would; repeatable    |
+| `--input-manifest` | FILE     | as `run --input-manifest` would            |
+| `--pass-env`       | NAME     | as `run --pass-env` would; repeatable      |
+| `--threads`        | STEP=N   | as `run --threads` would; repeatable       |
 
 `--budget` then checks the threads of each rule that would run, a reused rule needing none, and its memory with its shared inputs, each counted once, and a container rule's Podman client, against the budget a launch with the same `--max-threads` and `--max-memory` would have: it names each rule that does not fit, a shared input it cannot measure, and the largest need, and exits 1 when `run` would refuse the launch.
 
 ## explain
 
 ```text
-workz explain [WORKFLOW] RULE [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
+workz explain [WORKFLOW] RULE [--rerun] [--rerun-rule RULE] [--input-manifest FILE] [--pass-env NAME] [--threads STEP=N]
 ```
 
-Shows one rule's decision. For a rule that has a record and whose producers do not run, it also shows each part of its key against the record: `command`, `environment`, `request`, `writes`, `inputs`, `producers` and `engine key`, each `same` or `changed`, then what changed: the environment variables, the request, the inputs with their old and new identities, or the producers that run. It takes the options of `plan` that change a decision: `--rerun`, `--rerun-rule`, `--pass-env` and `--threads`.
+Shows one rule's decision. For a rule that has a record and whose producers do not run, it also shows each part of its key against the record: `command`, `environment`, `request`, `writes`, `inputs`, `producers` and `engine key`, each `same` or `changed`, then what changed: the environment variables, the request, the inputs with their old and new identities, or the producers that run. It takes the options of `plan` that change a decision: `--rerun`, `--rerun-rule`, `--input-manifest`, `--pass-env` and `--threads`.
 
 ## graph
 

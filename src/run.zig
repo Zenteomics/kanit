@@ -2761,7 +2761,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     // Input manifest: authoritative digests for external inputs.
     if (opts.input_manifest) |mpath| {
-        const m = try checkManifest(gpa, &st, &ids, mpath);
+        const m = try checkManifest(gpa, &st, &ids, mpath, true);
         events.emit("inputs_checked", .{ .manifest = mpath, .files = m.files, .files_read = m.read, .bytes_read = m.bytes_read, .seconds = m.seconds, .ok = m.ok });
         if (!m.usable) return refusal.refuse(.invalid, "the input manifest cannot be used");
         if (!m.ok) return refusal.refuse(.failed, "inputs do not match the input manifest");
@@ -3104,7 +3104,9 @@ pub const ManifestCheck = struct { ok: bool, usable: bool = true, files: usize =
 /// A file is read only when neither the cached identity nor the stamp equals
 /// its current identity; a matching stamp is trusted as the identity the
 /// manifest's writer hashed.
-fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8) !ManifestCheck {
+/// With `save`, digests it computed are kept in the state file for the next
+/// launch; `plan` checks without writing.
+pub fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath: []const u8, save: bool) !ManifestCheck {
     const t0 = sys.monoNs();
     var res: ManifestCheck = .{ .ok = true };
     const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
@@ -3186,7 +3188,7 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
             res.ok = false;
         }
     }
-    if (res.ok and hashed_any) try st.save(gpa);
+    if (save and res.ok and hashed_any) try st.save(gpa);
     res.seconds = @as(f64, @floatFromInt(sys.monoNs() - t0)) / 1e9;
     return res;
 }

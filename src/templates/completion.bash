@@ -48,8 +48,8 @@ _workz() {
     local opts="-h --help -d --workdir"
     case $cmd in
         run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet --json --no-color" ;;
-        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --pass-env --threads" ;;
-        explain) opts="$opts -t --target --rerun --rerun-rule --pass-env --threads" ;;
+        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
+        explain) opts="$opts -t --target --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
         validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
         prepare) opts="-h --help -o --output --check" ;;

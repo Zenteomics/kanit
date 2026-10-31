@@ -301,6 +301,28 @@ check "turning cutoff on reruns only the direct consumers, once" '[ "$c6_runs" =
 cp up.txt up.copy && mv up.copy up.txt
 "$workz" run wf.toml "${iso[@]}" -q > c8.json
 check "a cutoff output copied back with the same bytes keeps everything reused" '[ "$(status_of c8.json reused)" = 4 ]'
+touch -d '2001-01-01' up.txt
+"$workz" plan wf.toml > p9.txt 2> p9.err
+prc9=$?
+"$workz" verify wf.toml > v9.txt 2>&1
+vrc9=$?
+"$workz" run wf.toml "${iso[@]}" -q > c9.json
+check "a touched cutoff output with the same bytes is planned, verified and run as reused" '[ $prc9 = 0 ] && grep -q "^reuse down " p9.txt && [ $vrc9 = 0 ] && [ "$(status_of c9.json reused)" = 4 ]'
+
+new cutoff-partial
+echo data > in.txt
+write_two() {
+  { header cutoff-partial
+    rule two '["in.txt"]' '["a.txt", "b.txt"]' "\"cp in.txt a.txt; echo $1 > b.txt\"" 'cutoff = true'
+    rule ra '["a.txt"]' '["ra.txt"]' '"cat a.txt > ra.txt"'
+    rule rb '["b.txt"]' '["rb.txt"]' '"cat b.txt > rb.txt"'
+  } > wf.toml
+}
+write_two one
+"$workz" run wf.toml "${iso[@]}" -q > p1.json
+write_two two
+"$workz" run wf.toml "${iso[@]}" -q > p2.json
+check "a cutoff consumer reruns only when an output it reads changed" '[ "$(status_of p2.json completed)" = 2 ] && [ "$(status_of p2.json reused)" = 1 ] && jq -e "select(.event == \"task_reused\") | select(.rule == \"ra\")" "$(last_launch)/events.jsonl" > /dev/null'
 
 # ---------------------------------------------------------------- container rules
 if have_images "$img" && have_images "$img2"; then
@@ -877,6 +899,7 @@ new crash
 "$workz" run wf.toml --no-isolation -q > s1.json &
 engine=$!
 for _ in $(seq 100); do jq -e .rules.first .workz/state.json > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" plan wf.toml > live.txt 2> live.err
 kill -KILL $engine
 wait $engine 2>/dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
@@ -890,8 +913,8 @@ crc=$?
 timeout 10 "$workz" watch -d . --interval 200 > w.txt 2> w.err
 wrc=$?
 check "status, control and watch see that a killed engine's launch did not finish" '[ $src = 1 ] && [ "$(jq -r .status st.json)" = unfinished ] && grep -q "did not finish" st.err && [ $crc = 1 ] && grep -q "no engine runs it" ctl.err && [ $wrc = 1 ] && grep -q "did not finish" w.err'
-"$workz" plan wf.toml > plan.txt
-check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
+"$workz" plan wf.toml > plan.txt 2> plan.err
+check "after a killed engine, finished rules are reused and interrupted ones rerun, and plan notes a running launch" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt && grep -q "a launch is running in" live.err && ! grep -q "a launch is running" plan.err'
 
 new crash-previous
 { header crash-previous; rule r '[]' '["out.txt"]' '"echo A > out.txt"'; } > wf.toml
@@ -1207,6 +1230,9 @@ new plan-missing
 "$workz" plan wf.toml > plan.txt 2> plan.err
 prc=$?
 check "plan names an input that is missing and that no rule makes, and fails as run would" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt && [ $prc = 1 ] && grep -q "run would refuse this launch: 1 rule with a missing input" plan.err'
+"$workz" plan wf.toml --budget > pb.txt 2> pb.err
+pbrc=$?
+check "plan --budget fails as run would for a missing input" '[ $pbrc = 1 ] && grep -q "run would refuse this launch: 1 rule with a missing input" pb.err'
 
 new manifest
 echo data > ext.txt
@@ -1222,6 +1248,13 @@ check "a matching manifest digest runs" '[ "$(status_of s.json completed)" = 1 ]
 touch ext.txt
 "$workz" run wf.toml "${iso[@]}" -q --input-manifest good.json > touched.json
 check "a touched manifest input with the same bytes is read once and its rule reused" '[ "$(status_of touched.json reused)" = 1 ] && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" "$(last_launch)/events.jsonl" > /dev/null'
+touch ext.txt
+"$workz" plan wf.toml --input-manifest good.json > pg.txt 2> pg.err
+pgrc=$?
+"$workz" plan wf.toml --input-manifest bad.json > pbad.txt 2> pbad.err
+pbadrc=$?
+"$workz" plan wf.toml > pn.txt
+check "plan checks an input manifest as run does, without recording its digests" '[ $pgrc = 0 ] && grep -q "^reuse m " pg.txt && [ $pbadrc = 1 ] && grep -q "inputs do not match the input manifest" pbad.err && grep -q "^run   m " pn.txt'
 stamp() { stat -c '{"dev": %d, "ino": %i, "size": %s, "mtime_ns": %.9Y, "ctime_ns": %.9Z}' "$1" | sed 's/\.//g'; }
 echo stamped > st.txt
 { header stamped; rule s '["st.txt"]' '["s.txt"]' '"cp st.txt s.txt"'; } > stamped.toml

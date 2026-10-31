@@ -496,20 +496,24 @@ fn lessConst(_: void, x: []const u8, y: []const u8) bool {
 ///
 /// Early cutoff. A rule marked `cutoff = true` has its outputs hashed after
 /// success. A consumer then keys such an input on its content digest, and the
-/// producer contributes its output digests instead of its rule key, so a
-/// producer that reruns and writes the same bytes leaves its consumers reused.
-/// A digest is used only while the file's identity equals the recorded one.
+/// producer contributes the digests of the outputs the consumer reads instead
+/// of its rule key, so a producer that reruns and writes the same bytes
+/// leaves its consumers reused, and a changed output reruns only its readers.
+/// A digest is used while the file's identity equals the recorded one, or
+/// while its bytes still match the digest, as `checkOutput` decides.
 pub const Cutoff = struct {
     /// Output path to "sha256:<hex>".
     digests: std.StringHashMapUnmanaged([]const u8) = .empty,
-    /// Per rule: what a cutoff producer contributes to its consumers' keys.
-    parent: []?[]const u8,
+    /// Per rule: the outputs of a cutoff producer, with their digests, when
+    /// every one is intact.
+    outputs: []?[]const Output,
 
     /// Builds the view from the recorded state. Outputs recorded without a
-    /// digest are hashed once; with `store`, the digest is kept in the state.
+    /// digest are hashed once; with `store`, the digest, and the identity of
+    /// an output whose bytes still match, are kept in the state.
     pub fn init(a: Allocator, gpa: Allocator, wf: *const workflow.Workflow, st: *State, ids: *Identities, store: bool) !Cutoff {
-        var c: Cutoff = .{ .parent = try a.alloc(?[]const u8, wf.rules.len) };
-        @memset(c.parent, null);
+        var c: Cutoff = .{ .outputs = try a.alloc(?[]const Output, wf.rules.len) };
+        @memset(c.outputs, null);
         var mit = st.data.manifest.map.iterator();
         while (mit.next()) |m| {
             const now = (try ids.get(m.key_ptr.*)) orelse continue;
@@ -521,19 +525,19 @@ pub const Cutoff = struct {
             const outs = try st.allocator().dupe(Output, e.outputs);
             var complete = true;
             for (outs) |*o| {
-                const now = (try ids.get(o.path)) orelse {
-                    complete = false;
-                    continue;
-                };
-                if (!std.mem.eql(u8, now, o.id)) {
-                    complete = false;
-                    continue;
+                switch (try checkOutput(gpa, ids, o.*)) {
+                    .intact => {},
+                    .refreshed => |now| o.id = try st.allocator().dupe(u8, now),
+                    .missing, .changed => {
+                        complete = false;
+                        continue;
+                    },
                 }
                 if (o.sha256 == null) o.sha256 = try st.allocator().dupe(u8, &try sys.sha256File(gpa, o.path));
                 try c.digests.put(a, o.path, try std.fmt.allocPrint(a, "sha256:{s}", .{o.sha256.?}));
             }
             if (store) e.outputs = outs;
-            if (complete) c.parent[i] = try parentText(a, outs);
+            if (complete) c.outputs[i] = outs;
         }
         return c;
     }
@@ -541,21 +545,25 @@ pub const Cutoff = struct {
     /// Records the digests of a cutoff rule that just completed.
     pub fn record(self: *Cutoff, a: Allocator, i: usize, outputs: []const Output) !void {
         for (outputs) |o| try self.digests.put(a, o.path, try std.fmt.allocPrint(a, "sha256:{s}", .{o.sha256.?}));
-        self.parent[i] = try parentText(a, outputs);
+        self.outputs[i] = try a.dupe(Output, outputs);
     }
 
-    /// A producer's contribution to a consumer's key.
-    pub fn parentKey(self: *const Cutoff, i: usize, rule_key: []const u8) []const u8 {
-        return self.parent[i] orelse rule_key;
+    /// What producer `p` contributes to the key of `consumer`: for a cutoff
+    /// producer, the digests of the outputs the consumer reads, as an input
+    /// or inside a directory input; else `rule_key`.
+    pub fn parentKey(self: *const Cutoff, a: Allocator, p: usize, consumer: *const workflow.Rule, rule_key: []const u8) ![]const u8 {
+        const outs = self.outputs[p] orelse return rule_key;
+        var w: std.Io.Writer.Allocating = .init(a);
+        try w.writer.writeAll("cutoff");
+        for (outs) |o| {
+            const read = for (consumer.input_abs) |in| {
+                if (workflow.within(in, o.path)) break true;
+            } else false;
+            if (read) try w.writer.print(" {s}", .{o.sha256.?});
+        }
+        return w.written();
     }
 };
-
-fn parentText(a: Allocator, outputs: []const Output) ![]const u8 {
-    var w: std.Io.Writer.Allocating = .init(a);
-    try w.writer.writeAll("cutoff");
-    for (outputs) |o| try w.writer.print(" {s}", .{o.sha256.?});
-    return w.toOwnedSlice();
-}
 
 pub const Key = struct {
     command: []const u8,
@@ -695,7 +703,7 @@ pub fn checkOutput(gpa: Allocator, ids: *Identities, o: Output) !OutputCheck {
 
 /// The key of rule `i`. Each producer contributes the key it has in this
 /// launch (`launch.get(p)`), else its recorded key, else "none"; a cutoff
-/// producer contributes the digests of its outputs instead.
+/// producer contributes the digests of the outputs rule `i` reads instead.
 pub fn ruleKey(
     a: Allocator,
     ids: *Identities,
@@ -715,7 +723,7 @@ pub fn ruleKey(
     for (parents, names, keys) |p, *n, *k| {
         n.* = wf.rules[p].name;
         const recorded = if (st.data.rules.map.get(n.*)) |e| e.key else "none";
-        k.* = cut.parentKey(p, launch.get(p) orelse recorded);
+        k.* = try cut.parentKey(a, p, &wf.rules[i], launch.get(p) orelse recorded);
     }
     return computeKey(a, ids, &wf.rules[i], wf.root, env_text, names, keys, engine, cut, extra, missing);
 }
