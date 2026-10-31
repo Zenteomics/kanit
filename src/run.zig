@@ -92,6 +92,9 @@ const Task = struct {
     started_real: i128 = 0,
     deadline_ns: ?i128 = null,
     kill_at: ?i128 = null,
+    /// The exit of a stopped attempt's shell, kept while processes it
+    /// started still run: they get the rest of the grace period to end.
+    ended: ?process.Reaped = null,
     timed_out: bool = false,
     cancelled: bool = false,
     /// Why the shared service the attempt joined failed while it ran; the
@@ -345,6 +348,9 @@ const Engine = struct {
     sigfd: sys.Fd,
 
     stopping: bool = false,
+    /// No rule starts or stops any more: the launch writes its records, and
+    /// control commands are answered without being applied.
+    ending: bool = false,
     interrupted: bool = false,
     interrupted_at: i128 = 0,
     /// When the first INT, TERM or HUP arrived; a `control cancel` is not one.
@@ -863,6 +869,7 @@ const Engine = struct {
         t.lost_service = null;
         t.spawned = false;
         t.kill_at = null;
+        t.ended = null;
         try self.endWait(i);
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
 
@@ -1007,8 +1014,10 @@ const Engine = struct {
             if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
             t.cg = null;
             self.reserve(i, false);
-            self.releaseShared(i);
+            // Ready before its shared inputs are given back, so their holders
+            // stay loaded for the next attempt.
             t.status = .ready;
+            self.releaseShared(i);
             self.ready_counter += 1;
             t.ready_seq = self.ready_counter;
             t.ready_ns = sys.monoNs();
@@ -1230,6 +1239,10 @@ const Engine = struct {
         errdefer sys.close(stop_fd);
 
         var procs: sys.Fd = -1;
+        errdefer if (h.cg) |cg| {
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            h.cg = null;
+        };
         if (self.tree) |tree| {
             h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{ .memory_bytes = h.mib * 1024 * 1024, .oom_group = true });
             procs = try cgroup.openProcs(self.gpa, self.containers_cg.?);
@@ -1260,6 +1273,7 @@ const Engine = struct {
         var out: [2]i32 = undefined;
         _ = try sys.check(linux.pipe2(&out, .{ .CLOEXEC = true }));
         defer sys.close(out[1]);
+        errdefer sys.close(out[0]);
         const spec: process.Spec = .{
             .path = (try self.a.dupeZ(u8, self.podman.?)).ptr,
             .argv = (try process.Vec.init(self.a, argv)).items.ptr,
@@ -1270,12 +1284,7 @@ const Engine = struct {
             .stderr = log_fd,
             .cgroup_procs = procs,
         };
-        h.pid = process.spawn(&spec) catch |err| {
-            sys.close(out[0]);
-            if (h.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
-            h.cg = null;
-            return err;
-        };
+        h.pid = try process.spawn(&spec);
         if (self.guard) |gd| gd.note('+', h.pid);
         h.pipe = out[0];
         h.stop_fd = stop_fd;
@@ -1867,6 +1876,7 @@ const Engine = struct {
 
     fn control(self: *Engine, cmd: []const u8, name: []const u8) ![]const u8 {
         const eql = std.mem.eql;
+        if (self.ending) return "the launch is ending";
         if (eql(u8, cmd, "cancel")) {
             if (self.stopping) return "already stopping";
             self.interrupted = true;
@@ -1918,6 +1928,14 @@ const Engine = struct {
 
     // ---- stopping ----
 
+    /// Marks the end of the run loop in the event stream, which `workz
+    /// control` reads to refuse commands that would not be applied.
+    fn beginEnding(self: *Engine) void {
+        if (self.ending) return;
+        self.ending = true;
+        self.events.emit("launch_ending", .{});
+    }
+
     fn beginStop(self: *Engine) void {
         if (self.stopping) return;
         self.stopping = true;
@@ -1940,7 +1958,9 @@ const Engine = struct {
     /// a container `podman stop`, which kills every container process after
     /// the grace period. The group is killed later if the attempt is still
     /// running: after the grace period, or ten seconds more for a container.
+    /// An attempt already stopping keeps its first deadline.
     fn terminate(self: *Engine, t: *Task, grace: i128) void {
+        if (t.kill_at != null) return;
         // A stopped attempt can no longer time out.
         t.deadline_ns = null;
         process.signalGroup(t.pid, .TERM);
@@ -1984,6 +2004,25 @@ const Engine = struct {
         }
     }
 
+    /// Whether processes of a running attempt remain: its cgroup is
+    /// populated, or without one, its process group has a member.
+    fn stillRuns(self: *Engine, t: *const Task) bool {
+        if (t.cg) |cg| return cgroup.populated(self.gpa, cg);
+        return process.groupAlive(t.pid);
+    }
+
+    /// Ends each stopped attempt whose shell has exited once the processes
+    /// it left have ended too, or have been killed after the grace period.
+    fn finishEnded(self: *Engine) !void {
+        for (self.tasks, 0..) |*t, i| {
+            if (t.status != .running) continue;
+            const rp = t.ended orelse continue;
+            if (t.kill_at != null and self.stillRuns(t)) continue;
+            t.ended = null;
+            try self.finish(i, rp);
+        }
+    }
+
     fn nextDeadline(self: *Engine) ?i128 {
         var best: ?i128 = null;
         for (self.holders) |h| for ([_]?i128{ h.kill_at, h.ready_deadline }) |d| if (d) |v| {
@@ -1991,7 +2030,10 @@ const Engine = struct {
         };
         for (self.tasks) |t| {
             if (t.status != .running) continue;
-            for ([_]?i128{ t.deadline_ns, t.kill_at }) |d| if (d) |v| {
+            // The processes a stopped attempt's shell left have no event for
+            // their end: they are checked every 20 ms.
+            const drain: ?i128 = if (t.ended != null) sys.monoNs() + 20 * std.time.ns_per_ms else null;
+            for ([_]?i128{ t.deadline_ns, t.kill_at, drain }) |d| if (d) |v| {
                 best = if (best) |b| @min(b, v) else v;
             };
         }
@@ -2234,8 +2276,10 @@ const Engine = struct {
     fn reapAll(self: *Engine) !void {
         while (process.reap()) |rp| {
             for (self.tasks, 0..) |*t, i| {
-                if (t.status == .running and t.pid == rp.pid) {
-                    try self.finish(i, rp);
+                if (t.status == .running and t.ended == null and t.pid == rp.pid) {
+                    // A stopped attempt's shell often dies at SIGTERM before
+                    // the tool it ran: the tool keeps its grace period.
+                    if (t.kill_at != null and self.stillRuns(t)) t.ended = rp else try self.finish(i, rp);
                     break;
                 }
             } else for (self.holders, 0..) |*h, hi| {
@@ -2324,6 +2368,7 @@ const Engine = struct {
             };
             try self.reapAll();
             self.checkTimers();
+            try self.finishEnded();
             self.sample();
             if (self.page_path != null and sys.monoNs() >= self.next_page_ns) self.drawPage();
             self.drawStatus(false);
@@ -2396,10 +2441,15 @@ pub fn sharedSizes(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, r
                 out[hi] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
                 continue;
             }
-            const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err| switch (err) {
+            var failed: ?[]u8 = null;
+            defer if (failed) |f| gpa.free(f);
+            const bytes = state.pageBytes(gpa, s.path_abs.?, &failed) catch |err| switch (err) {
                 error.OutOfMemory => return err,
                 else => {
-                    failure.* = try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) });
+                    const why = if (err == error.NotRegularFile)
+                        try std.fmt.allocPrint(a, "{s} is not a regular file, and a shared input maps every file it holds", .{failed.?})
+                    else if (failed) |f| try std.fmt.allocPrint(a, "{s}: {s}", .{ f, sys.errorText(err) }) else sys.errorText(err);
+                    failure.* = try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, why });
                     return error.Unmeasurable;
                 },
             };
@@ -2870,6 +2920,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     defer if (engine.guard) |gd| gd.stop();
     defer engine.pending_done.deinit(gpa);
     defer engine.leftover_cgroups.deinit(gpa);
+    defer engine.helpers.deinit(gpa);
     @memset(engine.group_used, 0);
     for (engine.tasks, 0..) |*t, i| {
         t.* = .{};
@@ -2926,6 +2977,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.loop() catch |err| {
         engine.fatal = sys.errorText(err);
         engine.beginStop();
+        engine.beginEnding();
         // Wait for running tasks to end before writing the final records.
         while (engine.running() > 0) {
             var fds = [_]linux.pollfd{.{ .fd = sigfd, .events = linux.POLL.IN, .revents = 0 }};
@@ -2933,10 +2985,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             _ = process.readSignals(sigfd);
             engine.reapAll() catch {};
             engine.checkTimers();
+            engine.finishEnded() catch {};
         }
     };
+    engine.beginEnding();
     engine.awaitVersions(10);
-    engine.awaitHelpers(engine.opts.grace_s + 10);
+    engine.awaitHelpers(engine.opts.grace_s +| 10);
     engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{sys.errorText(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
@@ -2975,6 +3029,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try engine.saveState(true);
     try records.Journal.reset(gpa, rec);
     for (engine.leftover_cgroups.items) |cg| cgroup.remove(gpa, cg) catch {};
+    // Commands sent while the launch ended are answered in its events.
+    if (engine.control_watch >= 0) engine.readControl() catch {};
 
     var counts: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0);
     for (engine.tasks) |t| counts[@intFromEnum(t.status)] += 1;

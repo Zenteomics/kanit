@@ -84,6 +84,8 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 - `missing input of rule NAME: PATH`: An input that no rule produces does not exist. Create it, fix the path, or add the rule that makes it.
 
+- `shared input NAME (PATH): FILE is not a regular file, and a shared input maps every file it holds`: A file input holds a FIFO, socket or device, which cannot be mapped and could block the holder. Move it out of the shared directory.
+
 - `output of completed rule NAME changed since it was recorded: PATH`: A recorded output was changed outside workz, and workz will not overwrite it silently. Run the rule again with `--rerun-rule NAME`, which keeps the changed bytes in `previous/`, or restore the file ([Changed outputs](Reuse-and-Resume.md#changed-outputs)). The launch exits with status 1.
 
 - `input does not match its manifest digest: PATH` and `input manifest file is missing: PATH`: An input differs from the input manifest. Fix the input or the manifest. The launch exits with status 1.

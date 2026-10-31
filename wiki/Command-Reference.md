@@ -187,7 +187,7 @@ workz control [WORKFLOW] retry RULE
 workz control [WORKFLOW] cancel
 ```
 
-Sends a command to the running launch ([Steering a running launch](Running-Workflows.md#steering-a-running-launch)). It fails if the newest launch has ended, if no engine runs it any longer, or if RULE is not one of the rules the launch runs.
+Sends a command to the running launch ([Steering a running launch](Running-Workflows.md#steering-a-running-launch)). It fails if the newest launch has ended or is ending, if no engine runs it any longer, or if RULE is not one of the rules the launch runs.
 
 ## report
 

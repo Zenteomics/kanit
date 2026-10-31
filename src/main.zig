@@ -1086,12 +1086,11 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; workz run starts another", .{dir});
     if (!workz.records.launchActive(c.gpa, dir)) return failed("the newest launch did not finish, and no engine runs it: {s}; its engine ended without recording its end", .{dir});
-    if (words.items.len == 2) {
-        var tr = try workz.tracker.Tracker.init(c.gpa, dir);
-        defer tr.deinit();
-        _ = try tr.update();
-        if (!tr.index.contains(words.items[1])) return failed("rule {s} is not part of the running launch", .{words.items[1]});
-    }
+    var tr = try workz.tracker.Tracker.init(c.gpa, dir);
+    defer tr.deinit();
+    _ = try tr.update();
+    if (tr.ending) return failed("the newest launch is ending and applies no more commands: {s}", .{dir});
+    if (words.items.len == 2 and !tr.index.contains(words.items[1])) return failed("rule {s} is not part of the running launch", .{words.items[1]});
     const line = if (words.items.len == 2) try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ words.items[0], words.items[1] }) else "cancel\n";
     const fd = try sys.openWrite(c.gpa, try std.fs.path.join(c.a, &.{ dir, "control" }), .append);
     defer sys.close(fd);
@@ -1895,15 +1894,18 @@ fn writeProc(path: [*:0]const u8, text: []const u8) !void {
 fn hold(paths: []const [:0]const u8) Exit {
     const gpa = std.heap.page_allocator;
     var files: std.ArrayList([]u8) = .empty;
-    for (paths) |p| workz.state.listFiles(gpa, p, &files) catch return fail("cannot list shared input {s}", .{p});
+    var entry: ?[]u8 = null;
+    for (paths) |p| workz.state.listFiles(gpa, p, &files, &entry) catch return fail("cannot list shared input {s}", .{entry orelse p});
     var total: u64 = 0;
     for (files.items) |file| {
         const p = gpa.dupeZ(u8, file) catch return fail("out of memory listing shared input {s}", .{file});
-        const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
+        // Without O_NONBLOCK, opening a FIFO waits for a writer forever.
+        const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
         if (linux.errno(fd_rc) != .SUCCESS) return fail("cannot open shared input {s}", .{p});
         const fd: i32 = @intCast(fd_rc);
         var s: linux.Statx = undefined;
-        _ = linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .SIZE = true }, &s);
+        if (linux.errno(linux.statx(fd, "", linux.AT.EMPTY_PATH, .{ .TYPE = true, .SIZE = true }, &s)) != .SUCCESS) return fail("cannot read shared input {s}", .{p});
+        if (s.mode & linux.S.IFMT != linux.S.IFREG) return fail("shared input {s} is not a regular file", .{p});
         if (s.size == 0) continue;
         const len: usize = @intCast(s.size);
         const m = linux.mmap(null, len, .{ .READ = true }, .{ .TYPE = .SHARED }, fd, 0);

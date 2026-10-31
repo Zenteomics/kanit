@@ -144,6 +144,8 @@ pub const Tracker = struct {
     max_jobs: u32 = 0,
     /// The run's cgroup, when isolated.
     run_cg: ?[]const u8 = null,
+    /// The engine left its run loop and applies no more control commands.
+    ending: bool = false,
     finished: bool = false,
     finished_ns: i128 = 0,
     final_status: []const u8 = "",
@@ -271,6 +273,8 @@ pub const Tracker = struct {
                 const r = try self.rule(n.string);
                 r.status = .pending;
             };
+        } else if (eql(u8, ev, "launch_ending")) {
+            self.ending = true;
         } else if (eql(u8, ev, "launch_finished")) {
             self.finished = true;
             self.finished_ns = at;

@@ -172,14 +172,14 @@ pub fn median(xs: []const f64) f64 {
 }
 
 /// Reads every attempt record of a launch, in rule and attempt order:
-/// `attempts/<rule>/<NNN>/record.json`, where NNN is zero-padded so the
-/// names sort by number. An attempt still running has no record yet.
+/// `attempts/<rule>/<NNN>/record.json`, attempts sorted by number. An attempt
+/// still running has no record yet.
 pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     const dir = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
     var out: std.ArrayList(Attempt) = .empty;
     for ((try sys.dirNames(gpa, a, dir)) orelse &.{}) |rule| {
         const rule_dir = try std.fs.path.join(a, &.{ dir, rule });
-        for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
+        for ((try records.attemptNames(gpa, a, rule_dir)) orelse &.{}) |n| {
             if (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, n, "record.json" }), unreadable)) |r| try out.append(a, r);
         }
     }
@@ -285,7 +285,7 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
             const i = wanted.getIndex(rule) orelse continue;
             // The rule's last completed attempt in that launch, if any.
             const rule_dir = try std.fs.path.join(a, &.{ attempts_dir, rule });
-            const numbers = (try sys.dirNames(gpa, a, rule_dir)) orelse &.{};
+            const numbers = (try records.attemptNames(gpa, a, rule_dir)) orelse &.{};
             var j = numbers.len;
             const found = while (j > 0) {
                 j -= 1;

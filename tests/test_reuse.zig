@@ -572,3 +572,22 @@ test "[unit] - [records]: a killed launch's unfinished attempt is the newest one
     try testing.expectEqualStrings("A", pending[0].launch);
     try testing.expect(std.mem.endsWith(u8, pending[0].dir, "/attempts/r/1000"));
 }
+
+test "[unit] - [records]: logs and reports take attempt 1000 as the one after 999" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/A", ".workz/launches/A/attempts", ".workz/launches/A/attempts/r", ".workz/launches/A/attempts/r/999", ".workz/launches/A/attempts/r/1000" }) |d| _ = try s.dir(d);
+    const tail = ",\"status\":\"failed\",\"started\":\"2026-01-01T00:00:00.000Z\",\"request\":{\"threads\":1,\"memory_mib\":64}}";
+    _ = try s.file(".workz/launches/A/attempts/r/999/record.json", "{\"rule\":\"r\",\"attempt\":999" ++ tail);
+    _ = try s.file(".workz/launches/A/attempts/r/1000/record.json", "{\"rule\":\"r\",\"attempt\":1000" ++ tail);
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const dir = (try workz.logs.find(testing.allocator, a, s.path, "r", .{})).?;
+    try testing.expect(std.mem.endsWith(u8, dir, "/attempts/r/1000"));
+
+    const list = try workz.model.attempts(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, ".workz/launches/A" }), null);
+    try testing.expectEqual(@as(usize, 2), list.len);
+    try testing.expectEqual(@as(i64, 1000), list[1].attempt);
+}

@@ -350,24 +350,32 @@ fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList(
 }
 
 /// Total bytes of a file or of every file below a directory, each rounded
-/// up to whole 4 KiB pages; used to reserve shared inputs.
-pub fn pageBytes(gpa: Allocator, path: []const u8) !u64 {
+/// up to whole 4 KiB pages; used to reserve shared inputs. Every entry must
+/// be a regular file, or a symlink to one, since a holder maps them: a FIFO
+/// or device returns `error.NotRegularFile`. On an error, `failed` names the
+/// entry when it is known.
+pub fn pageBytes(gpa: Allocator, path: []const u8, failed: *?[]u8) !u64 {
     var files: std.ArrayList([]u8) = .empty;
     defer {
         for (files.items) |f| gpa.free(f);
         files.deinit(gpa);
     }
-    try listFiles(gpa, path, &files);
+    try listFiles(gpa, path, &files, failed);
     var total: u64 = 0;
     for (files.items) |f| {
         const id = (try sys.stat(gpa, f)) orelse continue;
+        if (!id.isReg()) {
+            failed.* = try gpa.dupe(u8, f);
+            return error.NotRegularFile;
+        }
         total += std.mem.alignForward(u64, id.size, 4096);
     }
     return total;
 }
 
-/// Every regular file at or below `path`.
-pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !void {
+/// Every entry other than a directory at or below `path`. On an error,
+/// `failed` names the entry when it is known.
+pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8), failed: *?[]u8) !void {
     const id = (try sys.stat(gpa, path)) orelse return error.FileNotFound;
     if (!id.isDir()) {
         try out.append(gpa, try gpa.dupe(u8, path));
@@ -378,9 +386,7 @@ pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !v
         for (lines.items) |l| gpa.free(l);
         lines.deinit(gpa);
     }
-    var failed: ?[]u8 = null;
-    defer if (failed) |f| gpa.free(f);
-    try walk(gpa, path, path.len, &lines, 0, false, &failed);
+    try walk(gpa, path, path.len, &lines, 0, false, failed);
     for (lines.items) |l| {
         const rel = l[0..std.mem.indexOfScalar(u8, l, '\t').?];
         try out.append(gpa, try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, rel }));

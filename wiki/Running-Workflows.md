@@ -92,7 +92,7 @@ The rule `after` depends on `exits`, so it is blocked: it never starts, and the 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.
 - **With `--keep-going`**, independent rules go on; only the rules that depend on a failed one are blocked.
-- **Stopping an attempt** sends its process group `SIGTERM`, waits the grace period (`--grace`, default 10 s), then kills everything left in its cgroup. Container rules get 10 s more for Podman.
+- **Stopping an attempt** sends its process group `SIGTERM`, waits the grace period (`--grace`, default 10 s), then kills everything left in its cgroup. The attempt ends when every process it started has ended, so a tool that tidies up after `SIGTERM` keeps the grace period when the rule's shell exits first. Container rules get 10 s more for Podman.
 
 A failed rule has no completed record, so the next launch runs it again; everything that completed is reused.
 

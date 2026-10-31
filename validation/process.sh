@@ -795,6 +795,10 @@ check "an attempt that cannot start ends with its record, and logs --follow retu
 sed -i 's/^workdir = "work"$/&\nretries = 1/' wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s2.json 2> /dev/null
 check "an attempt that cannot start uses the rule's retries, and each attempt keeps its record" 'l="$(last_launch)/attempts/w"; [ "$(status_of s2.json failed)" = 1 ] && [ "$(jq -r .status "$l/001/record.json")" = failed ] && [ "$(jq -r .status "$l/002/record.json")" = failed ] && jq -e "select(.event == \"task_retry\")" "$(last_launch)/events.jsonl" > /dev/null'
+echo ref > ref.txt
+printf '[workflow]\nname = "start-record"\nversion = "1"\n\n[shared.ref]\npath = "ref.txt"\n\n[[rules]]\nname = "w"\ninput = ["in.txt"]\noutput = ["work/o.txt"]\nshell = "true"\nworkdir = "work"\nlinks = { "i" = "in.txt" }\nretries = 1\n[rules.resources]\nmemory = "64M"\nshared = ["ref"]\n' > shared.toml
+"$workz" run shared.toml "${iso[@]}" -q > s3.json 2> /dev/null
+check "a retry after a failed start keeps its shared input loaded" '[ "$(status_of s3.json failed)" = 1 ] && [ "$(grep -c "\"shared_loaded\"" "$(last_launch)/events.jsonl")" = 1 ] && [ -f "$(last_launch)/attempts/w/002/record.json" ]'
 
 new retry
 { header retry
@@ -813,6 +817,18 @@ start=$(date +%s)
 "$workz" run wf.toml "${iso[@]}" -k --grace 2 -q > s.json 2> err.txt
 took=$(( $(date +%s) - start ))
 check "timeouts end both tasks within the grace period" '[ "$(status_of s.json failed)" = 2 ] && [ $took -le 8 ] && grep -q "timed out after 1 s" err.txt'
+{ header timeout; rule quick '[]' '["q.txt"]' '"touch q.txt"' 'timeout = "18446744073709551615"'; } > far.toml
+"$workz" run far.toml "${iso[@]}" --grace 18446744073709551615 -q > f.json 2> f.err
+check "the largest timeout and grace end a launch with its summary" '[ "$(status_of f.json completed)" = 1 ] && [ ! -s f.err ]'
+
+new grace-children
+# The rule's shell dies at SIGTERM; the tool it started tidies up first.
+printf '%s\n' "trap 'sleep 1; echo tidied > \"\$1\"; exit 0' TERM" 'while :; do sleep 0.1; done' > tool.sh
+{ header grace-children; rule tidy '[]' '["t.txt"]' '"bash tool.sh tidied.txt; touch t.txt"' 'timeout = "1s"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" --grace 5 -q > s.json 2> err.txt
+{ header grace-children; rule tidy '[]' '["t.txt"]' '"bash tool.sh bare.txt; touch t.txt"' 'timeout = "1s"'; } > bare.toml
+"$workz" run bare.toml --no-isolation --grace 5 -q > b.json 2> /dev/null
+check "a stopped rule's tool gets the grace period after its shell exits, with and without isolation" '[ "$(status_of s.json failed)" = 1 ] && grep -q "timed out after 1 s" err.txt && [ "$(cat tidied.txt 2>/dev/null)" = tidied ] && [ "$(status_of b.json failed)" = 1 ] && [ "$(cat bare.txt 2>/dev/null)" = tidied ]'
 
 new escaped
 { header escaped
@@ -914,6 +930,18 @@ engine=$!
 for _ in $(seq 400); do "$workz" control -d . cancel > /dev/null 2>&1 && break; done
 wait $engine
 check "a cancel sent while the launch starts is applied" '[ ! -e s.txt ] && [ "$(jq -r .status s.json)" = interrupted ]'
+
+new control-ending
+# The version command keeps the launch open after its only rule ended.
+{ header control-ending; rule v '[]' '["v.txt"]' '"touch v.txt"' 'version = "sleep 3; echo v1"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s.json 2> /dev/null &
+engine=$!
+for _ in $(seq 50); do jq -e 'select(.event == "launch_ending")' .workz/launches/*/events.jsonl > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" control -d . cancel > c.out 2> c.err
+crc=$?
+echo "stop v" >> "$(last_launch)/control"
+wait $engine
+check "a command sent while the launch ends is refused or answered, never applied" '[ $crc = 1 ] && grep -q "the newest launch is ending and applies no more commands" c.err && [ "$(jq -r .status s.json)" = completed ] && jq -e "select(.event == \"control\" and .command == \"stop\" and .result == \"the launch is ending\")" "$(last_launch)/events.jsonl" > /dev/null'
 
 new crash-isolated
 { header crash-isolated; rule long '[]' '["l.txt"]' '"echo $$ > pid.txt; sleep 30; touch l.txt"'; } > wf.toml
@@ -1080,6 +1108,12 @@ peak=$(jq -r '.cgroup.file' "$(last_launch)/attempts/use1/001/record.json")
 check "a user task is not charged for the shared pages" '[ "$peak" -lt $((8 * 1024 * 1024)) ]'
 # The run's scope protects the shared pages: memory.low of their size.
 check "the run's scope protects the shared input's size from reclaim" 'jq -e "select(.event == \"memory_protected\") | select(.ok and .memory_low_mib == 64)" "$ev" > /dev/null && [ "$(cat u1.low)" = $((64 * 1024 * 1024)) ]'
+# A FIFO cannot be mapped, and opening one would wait for a writer.
+mkdir piped && echo x > piped/a.txt && mkfifo piped/pipe
+printf '[workflow]\nname = "shared"\nversion = "1"\n\n[shared.piped]\npath = "piped"\n\n[[rules]]\nname = "p"\noutput = ["p.txt"]\nshell = "touch p.txt"\n[rules.resources]\nmemory = "64M"\nshared = ["piped"]\n' > fifo.toml
+timeout 20 "$workz" run fifo.toml "${iso[@]}" -q > f.json 2> f.err
+frc=$?
+check "a FIFO in a shared input refuses the launch with its path" '[ $frc = 2 ] && grep -q "shared input piped (piped): $PWD/piped/pipe is not a regular file" f.err'
 
 new samples
 { header samples; rule busy '[]' '["b.txt"]' '"timeout 6 sh -c \"while :; do :; done\" || true; touch b.txt"'; } > wf.toml

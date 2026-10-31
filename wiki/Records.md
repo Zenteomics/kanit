@@ -147,6 +147,7 @@ Launch events:
 
 - `launch_started`: `launch`, `selected`, `rules`, `max_threads`, `max_memory_mib`, `jobs`, `isolation`, `cgroup`, `shared`, `checks_s`.
 - `launch_refused`: `reason`.
+- `launch_ending`: no fields. Every rule has ended, and the launch writes its records; `control` commands sent from here on are answered with `the launch is ending` and not applied.
 - `launch_finished`: `status`, `counts`, `elapsed_s`, `error`; a refused launch counts every selected rule as `not_started`.
 - `inputs_checked`: `manifest`, `files`, `files_read`, `bytes_read`, `seconds`, `ok`.
 - `containers_checked`: `images`, `leftovers_removed`, `seconds`.

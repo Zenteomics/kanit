@@ -46,12 +46,17 @@ Three changes need action:
 - **Symlinked paths.** Two spellings of one output, a write into `.workz/` or a workdir outside the working directory through a symlink, and a consumer hidden from its producer by a directory alias are refused by validation.
 - **Failed reruns.** An attempt that fails, is stopped or cannot start moves the earlier outputs back from `previous/`, and the rule keeps its record; what the attempt wrote goes to its `failed/` directory, also when there was no earlier output. After an engine killed during an attempt, the next launch moves them back before it starts, and until then `clean --keep` and `clean --previous` keep them.
 - **Container records.** A container rule with an output directly in the working directory can no longer write `.workz/`.
-- **`workz control`.** A command sent while a launch is still starting is applied instead of erased, and after `control cancel` the first interrupt keeps the grace period instead of killing at once.
+- **`workz control`.** A command sent while a launch is still starting is applied instead of erased, and after `control cancel` the first interrupt keeps the grace period instead of killing at once. Once every rule has ended, `control` refuses the launch as ending, and a command that still reaches the engine is answered in the event stream instead of dropped.
+- **Stopping.** A tool that handles `SIGTERM` keeps the grace period after a timeout, `control stop`, cancel or interrupt, also when the rule's shell exits first, and a second request to stop an attempt keeps the first deadline.
+- **Limits.** The largest `--grace` and `timeout` values end a launch with its summary, instead of aborting on overflow.
+- **Attempt numbers.** `logs` and reports take attempt 1000 as the one after 999.
 - **Out of memory.** A state file read while memory runs out reports the shortage, instead of calling the file damaged and telling you to move it aside; loading a workflow frees what it held when an allocation fails.
 - **Lock probes.** A `run` started while `status` or `watch` checks the lock is no longer refused as if another launch were running.
 - **Shared services.**
   - A service that dies after it was ready fails the rules running against it, instead of letting them complete.
   - Files mounted into a service are inputs of the rules that join it, so changing one reruns them.
+  - A FIFO, socket or device inside a shared file input refuses the launch with its path, instead of hanging it.
+  - An attempt retried after it could not start keeps its shared inputs loaded, and a service whose setup fails before it starts leaves no cgroup behind.
 - **Results.**
   - A rule whose input changed while it ran counts as failed, with a reason, instead of completed.
   - An output written as a symlink fails its attempt, as validation would refuse it on the next command.

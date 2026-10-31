@@ -127,6 +127,7 @@ An entry with `container` is a service:
 
 - `path` is also an input of every rule that uses the shared input.
 - A file input's `path` may not hold the output of a rule, since its pages are measured when a launch starts.
+- Every file in a file input is mapped: a FIFO, socket or device in it refuses the launch.
 - A service's `path` may: the rules writing there run before the service's users, which may not write there themselves.
 - `command`, `memory`, `timeout`, `retries` and `mounts` belong to services only.
 - See [Shared inputs](Resources-and-Scheduling.md#shared-inputs) and [Shared services](Containers-and-Services.md#shared-services).

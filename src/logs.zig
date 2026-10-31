@@ -32,15 +32,8 @@ pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, op
             const dir = try std.fmt.allocPrint(a, "{s}/{d:0>3}", .{ rule_dir, n });
             return if (sys.exists(gpa, dir)) dir else null;
         }
-        // Attempt directories are numbered 001, 002, ...: the last that exists.
-        var n: u32 = 1;
-        var last: ?[]const u8 = null;
-        while (n < 1000) : (n += 1) {
-            const dir = try std.fmt.allocPrint(a, "{s}/{d:0>3}", .{ rule_dir, n });
-            if (!sys.exists(gpa, dir)) break;
-            last = dir;
-        }
-        if (last) |d| return d;
+        const numbers = (try records.attemptNames(gpa, a, rule_dir)) orelse continue;
+        if (numbers.len > 0) return try std.fs.path.join(a, &.{ rule_dir, numbers[numbers.len - 1] });
     }
     if (opts.launch != null) return null;
     var st = try state.load(gpa, rec);
