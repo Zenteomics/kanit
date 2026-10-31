@@ -4,6 +4,14 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
+## Unreleased
+
+workz reads workflows with z-toml 0.4.1.
+
+### Fixed
+
+- **Malformed workflows.** A comment with a control character after an array element or an inline-table entry is reported at its line and column, instead of freeing a parsed value twice.
+
 ## [0.5.0] - 2026-10-27
 
 0.5.0 is about writing pipelines and seeing them. `workz prepare` writes the explicit workflow from a template that describes each step once over a sample sheet, and `workz graph` shows it in layers: rules, files, and each shared input held once with the rules that write and use it. Results become citable, a failed tool's own log is kept, a moved project keeps its results, and the memory budget counts container clients and shared inputs honestly.

@@ -2,7 +2,7 @@
 
 workz links the following library into its binary.
 
-## z-toml 0.4.0
+## z-toml 0.4.1
 
 TOML parser, <https://github.com/eneskemalergin/z-toml>
 
