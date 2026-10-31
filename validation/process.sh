@@ -757,6 +757,15 @@ check "an output written as a symlink fails its attempt" '[ "$(status_of s3.json
 vnrc=$?
 check "verify fails when a selected rule has no record to check" '[ $vnrc = 1 ] && grep -q "1 selected rule has no record to check" vn.txt'
 
+new failed-fresh
+echo s > src.txt
+{ header failed-fresh; rule make '["src.txt"]' '["o.txt"]' '"if [ -f fail ]; then echo partial > o.txt; exit 1; fi; cat src.txt > o.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s1.json
+rm o.txt && touch fail
+"$workz" run wf.toml --no-isolation -q > s2.json 2> /dev/null
+"$workz" plan wf.toml > p.txt 2> /dev/null
+check "a failed attempt's partial output with no earlier copy goes to failed/, so the rule reads as missing, not changed" '[ ! -e o.txt ] && [ "$(cat "$(last_launch)/attempts/make/001/failed/0-o.txt")" = partial ] && grep -q "run   make  (output missing: " p.txt && jq -e "select(.event == \"output_failed\")" "$(last_launch)/events.jsonl" > /dev/null'
+
 new mutate-input
 echo 1 > in.txt
 { header mutate-input; rule r '["in.txt"]' '["out.txt"]' '"cat in.txt > out.txt; echo 2 >> in.txt"'; } > wf.toml
@@ -867,10 +876,14 @@ for _ in $(seq 50); do [ -e out.txt ] || break; sleep 0.1; done
 kill -KILL $engine
 wait $engine 2> /dev/null
 moved=$([ -e out.txt ] && echo no || echo yes)
+"$workz" clean -d . --keep 0 > ck.txt
+"$workz" clean -d . --previous > cp.txt
+copy=$(cat "$(last_launch)/attempts/r/001/previous/0-out.txt" 2> /dev/null)
+check "clean keeps the only copy of an output a killed launch moved aside" '[ $moved = yes ] && [ "$copy" = A ] && grep -q "hold outputs a killed launch moved aside" ck.txt && grep -q "it holds outputs the next launch puts back" cp.txt'
 sed -i 's|"sleep 30; echo B > out.txt"|"echo partial > out.txt; exit 3"|' wf.toml
 "$workz" run wf.toml --no-isolation -q > s3.json 2> /dev/null
 "$workz" clean -d . --keep 1 > /dev/null
-check "a killed launch's earlier output comes back before the next launch, and survives clean --keep" '[ $moved = yes ] && [ "$(cat out.txt)" = A ] && [ "$(jq -c "select(.event == \"output_restored\")" "$(last_launch)/events.jsonl" | wc -l)" = 2 ]'
+check "a killed launch's earlier output comes back before the next launch, and survives clean --keep" '[ "$(cat out.txt)" = A ] && [ "$(jq -c "select(.event == \"output_restored\")" "$(last_launch)/events.jsonl" | wc -l)" = 2 ]'
 
 new cancel-interrupt
 { header cancel-interrupt; rule t '[]' '["t.txt"]' '"trap \"\" TERM; sleep 4; touch t.txt"'; } > wf.toml
@@ -1506,7 +1519,7 @@ new retry-evidence
   rule child '["out.txt"]' '["child.txt"]' '"cat out.txt > child.txt"'
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" --retry 1 -q > s.json 2> err.txt
-check "a retry keeps both attempts and the partial output of the first" '[ "$(status_of s.json completed)" = 2 ] && grep -rq partial "$(last_launch)/attempts/fail_once/002/previous/" && [ "$(cat child.txt)" = recovered ]'
+check "a retry keeps both attempts, and the first one keeps its partial output in failed/" '[ "$(status_of s.json completed)" = 2 ] && grep -rq partial "$(last_launch)/attempts/fail_once/001/failed/" && [ "$(cat child.txt)" = recovered ]'
 
 new failed-branch
 echo fail > flag

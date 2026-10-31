@@ -224,7 +224,7 @@ Checks that every recorded output of the selected rules still has its recorded i
 workz clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
 ```
 
-Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. `--dry-run` removes nothing: it names each launch directory `--keep` would remove, and each launch whose `previous/` directories `--previous` would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
+Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. Both keep what a launch killed during an attempt moved aside, which the next launch puts back, and say so. `--dry-run` removes nothing: it names each launch directory `--keep` would remove, and each launch whose `previous/` directories `--previous` would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
 
 ## completion
 

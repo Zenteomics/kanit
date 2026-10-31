@@ -129,6 +129,47 @@ pub fn latestLaunch(gpa: Allocator, a: Allocator, records: []const u8) !?[]const
     return try std.fs.path.join(a, &.{ records, "launches", names[names.len - 1] });
 }
 
+/// The attempt directories of a rule's directory `rule_dir`, oldest first:
+/// sorted by number, so attempt 1000 follows 999. Null when there is none.
+pub fn attemptNames(gpa: Allocator, a: Allocator, rule_dir: []const u8) !?[]const []const u8 {
+    const names = try a.dupe([]const u8, (try sys.dirNames(gpa, a, rule_dir)) orelse return null);
+    std.mem.sort([]const u8, names, {}, struct {
+        fn less(_: void, x: []const u8, y: []const u8) bool {
+            const nx = std.fmt.parseInt(u64, x, 10) catch return std.mem.lessThan(u8, x, y);
+            const ny = std.fmt.parseInt(u64, y, 10) catch return std.mem.lessThan(u8, x, y);
+            return nx < ny;
+        }
+    }.less);
+    return names;
+}
+
+/// An attempt a killed launch left unfinished: its `previous/` may hold the
+/// only copy of the rule's earlier outputs until the next launch moves them
+/// back.
+pub const Pending = struct { rule: []const u8, launch: []const u8, dir: []const u8 };
+
+/// For each rule the journal shows dispatched and never finished, its newest
+/// attempt in the newest launch that ran it, other than `current`.
+pub fn pendingAttempts(gpa: Allocator, a: Allocator, records: []const u8, current: ?[]const u8) ![]const Pending {
+    const open = try Journal.unfinished(gpa, a, records);
+    if (open.len == 0) return &.{};
+    const launches = try launchNames(gpa, a, records);
+    var out: std.ArrayList(Pending) = .empty;
+    for (open) |rule| {
+        var k = launches.len;
+        while (k > 0) {
+            k -= 1;
+            if (current) |c| if (std.mem.eql(u8, launches[k], c)) continue;
+            const rule_dir = try std.fs.path.join(a, &.{ records, "launches", launches[k], "attempts", rule });
+            const numbers = (try attemptNames(gpa, a, rule_dir)) orelse continue;
+            if (numbers.len == 0) continue;
+            try out.append(a, .{ .rule = rule, .launch = launches[k], .dir = try std.fs.path.join(a, &.{ rule_dir, numbers[numbers.len - 1] }) });
+            break;
+        }
+    }
+    return out.items;
+}
+
 /// Whether the launch in `launch_dir` (`<records>/launches/<id>`) can still
 /// change: it has no summary, an engine holds the working directory's lock,
 /// and it is the newest launch, the only one a held lock can belong to. A

@@ -166,6 +166,7 @@ Rule events:
 - `task_timeout`: `rule`, `attempt`.
 - `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
 - `output_restored`: `rule`, `path`, `moved_from`, `bytes`, for an earlier output put back after an attempt that did not complete.
+- `output_failed`: `rule`, `path`, `moved_to`, `bytes`, for what an attempt that did not complete left at an output path, moved into its `failed/`.
 - `output_changed`, `output_identity_refreshed`: `rule`, `path`.
 
 Shared input events:
@@ -195,8 +196,8 @@ would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) t
 ```
 
 - Without options, `workz clean` removes only the containers earlier launches left behind.
-- `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to.
-- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays.
+- `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to, and a launch whose engine was killed during an attempt: its `previous/` holds the only copy of that rule's earlier outputs until the next launch puts them back.
+- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--dry-run` lists what would go.
 - It takes the working directory's lock, so it never removes anything while a launch runs.

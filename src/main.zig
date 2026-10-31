@@ -1368,6 +1368,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     const verb = if (opts.dry_run) "would remove" else "removed";
     try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
     if (r.kept_for_records > 0) try w.interface.print("; kept {d} older launch(es) that hold recorded attempts", .{r.kept_for_records});
+    if (r.kept_for_recovery > 0) try w.interface.print("; kept {d} that hold outputs a killed launch moved aside, which the next launch puts back", .{r.kept_for_recovery});
     if (opts.previous) try w.interface.print("; previous/ of {d} attempt(s), {d:.1} MiB", .{ r.previous, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0 });
     if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");

@@ -97,6 +97,9 @@ const Task = struct {
     /// Why the shared service the attempt joined failed while it ran; the
     /// attempt is stopped and fails without a retry.
     lost_service: ?[]const u8 = null,
+    /// The current attempt's process started: what is at its output paths
+    /// after it ends may be its own.
+    spawned: bool = false,
     reason: []const u8 = "",
     /// The diagnostics kept from the last attempt, as the rule wrote them.
     diagnostics: []const []const u8 = &.{},
@@ -858,6 +861,7 @@ const Engine = struct {
         t.timed_out = false;
         t.cancelled = false;
         t.lost_service = null;
+        t.spawned = false;
         t.kill_at = null;
         try self.endWait(i);
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
@@ -882,6 +886,13 @@ const Engine = struct {
             .timeout_s = self.timeoutOf(r),
         });
 
+        // The rule's record stays until an attempt replaces it: a failed
+        // attempt gives the outputs back, and the journal drops the record
+        // if the engine dies while the attempt runs. The mark comes before
+        // any output moves, so a killed engine leaves no moved output that
+        // the next launch would not look for.
+        try self.journal.mark(self.gpa, "dispatch", r.name);
+
         // Keep earlier bytes of every output: move them into previous/.
         for (r.output_abs, 0..) |o, k| {
             if (try sys.lstat(self.gpa, o)) |id| {
@@ -897,10 +908,6 @@ const Engine = struct {
             if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(self.gpa, d);
         }
 
-        // The rule's record stays until an attempt replaces it: a failed
-        // attempt gives the outputs back, and the journal drops the record
-        // if the engine dies while the attempt runs.
-        try self.journal.mark(self.gpa, "dispatch", r.name);
         if (r.workdir_abs) |d| if (try self.prepareWorkdir(r, d)) |why| return self.failToStart(i, why);
 
         const out_fd = try sys.openWrite(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stdout.log", .{t.dir}), .truncate);
@@ -971,6 +978,7 @@ const Engine = struct {
         t.pid = process.spawn(&spec) catch |err| {
             return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
         };
+        t.spawned = true;
         t.status = .running;
         if (self.guard) |gd| gd.note('+', t.pid);
         self.queueVersion(r) catch {};
@@ -1048,16 +1056,24 @@ const Engine = struct {
         for (r.output_abs, r.output, 0..) |o, written, k| {
             const name = try std.fmt.allocPrint(self.a, "{d}-{s}", .{ k, std.fs.path.basename(o) });
             const prev = try std.fs.path.join(self.a, &.{ t.dir, "previous", name });
-            const kept = (try sys.lstat(self.gpa, prev)) orelse continue;
-            if (try sys.lstat(self.gpa, o)) |_| {
+            const kept = try sys.lstat(self.gpa, prev);
+            // What the attempt left at the path goes to failed/, also when no
+            // earlier output comes back: left there, a partial file would
+            // read as the rule's output, changed outside workz. Before the
+            // process started, a file at the path is the earlier output.
+            if (kept != null or t.spawned) if (try sys.lstat(self.gpa, o)) |left| {
                 const failed_dir = try std.fs.path.join(self.a, &.{ t.dir, "failed" });
                 sys.mkdir(self.gpa, failed_dir) catch |err| if (err != error.PathAlreadyExists) return err;
-                try sys.rename(self.gpa, o, try std.fs.path.join(self.a, &.{ failed_dir, name }));
-            }
+                const dest = try std.fs.path.join(self.a, &.{ failed_dir, name });
+                try sys.rename(self.gpa, o, dest);
+                self.ids.forget(o);
+                self.events.emit("output_failed", .{ .rule = r.name, .path = written, .moved_to = dest, .bytes = left.size });
+            };
+            const kept_id = kept orelse continue;
             try sys.rename(self.gpa, prev, o);
             self.ids.forget(o);
-            self.previous_bytes -|= kept.size;
-            self.events.emit("output_restored", .{ .rule = r.name, .path = written, .moved_from = prev, .bytes = kept.size });
+            self.previous_bytes -|= kept_id.size;
+            self.events.emit("output_restored", .{ .rule = r.name, .path = written, .moved_from = prev, .bytes = kept_id.size });
             const e = entry orelse continue;
             const sa = self.st.allocator();
             const outs = try sa.dupe(state.Output, e.outputs);
@@ -2335,27 +2351,15 @@ pub fn reservedMib(r: *const workflow.Rule) u64 {
     return r.memory_mib + if (r.container != null) container_client_mib else 0;
 }
 
-/// For each rule an earlier launch dispatched and never finished (the
-/// journal's open entries), moves the outputs its last attempt put in
-/// `previous/` back to their paths, and what that attempt left there into
-/// its `failed/`, as a failed attempt does in its own launch. The attempt is
-/// the rule's newest in the newest other launch that ran it.
+/// Moves the outputs of every attempt a killed launch left unfinished
+/// (`records.pendingAttempts`) back from its `previous/`, and what that
+/// attempt left at their paths into its `failed/`, as a failed attempt does
+/// in its own launch.
 fn recoverPrevious(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, rec: []const u8, current: []const u8, events: *records.Events) !void {
-    const open = try records.Journal.unfinished(gpa, a, rec);
-    if (open.len == 0) return;
-    const launches = try records.launchNames(gpa, a, rec);
-    for (open) |name| {
-        const ri = wf.ruleIndex(name) orelse continue;
-        const r = &wf.rules[ri];
-        var k = launches.len;
-        const dir = while (k > 0) {
-            k -= 1;
-            if (std.mem.eql(u8, launches[k], current)) continue;
-            const rule_dir = try std.fs.path.join(a, &.{ rec, "launches", launches[k], "attempts", name });
-            const numbers = (try sys.dirNames(gpa, a, rule_dir)) orelse continue;
-            if (numbers.len == 0) continue;
-            break try std.fs.path.join(a, &.{ rule_dir, numbers[numbers.len - 1] });
-        } else continue;
+    for (try records.pendingAttempts(gpa, a, rec, current)) |p| {
+        const name = p.rule;
+        const dir = p.dir;
+        const r = &wf.rules[wf.ruleIndex(name) orelse continue];
         for (r.output_abs, r.output, 0..) |o, written, n| {
             const file = try std.fmt.allocPrint(a, "{d}-{s}", .{ n, std.fs.path.basename(o) });
             const prev = try std.fs.path.join(a, &.{ dir, "previous", file });

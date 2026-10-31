@@ -554,3 +554,21 @@ test "[unit] - [state]: the state file keeps its bytes for a fixed record" {
         return error.TestUnexpectedResult;
     }
 }
+
+test "[unit] - [records]: a killed launch's unfinished attempt is the newest one, numbered past 999" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const rec = try s.dir(".workz");
+    for ([_][]const u8{ ".workz/launches", ".workz/launches/A", ".workz/launches/A/attempts", ".workz/launches/A/attempts/r", ".workz/launches/A/attempts/r/999", ".workz/launches/A/attempts/r/1000", ".workz/launches/B" }) |d| _ = try s.dir(d);
+    _ = try s.file(".workz/journal", "dispatch\tr\ndispatch\tq\ndone\tq\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    const pending = try workz.records.pendingAttempts(testing.allocator, a, rec, "B");
+
+    try testing.expectEqual(@as(usize, 1), pending.len);
+    try testing.expectEqualStrings("r", pending[0].rule);
+    try testing.expectEqualStrings("A", pending[0].launch);
+    try testing.expect(std.mem.endsWith(u8, pending[0].dir, "/attempts/r/1000"));
+}
