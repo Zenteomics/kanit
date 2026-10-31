@@ -202,9 +202,9 @@ The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare
 | `[[steps]]`    | `for_each` | string | `"sample"`: one rule per sample            |
 | `[[steps]]`    | rule keys  |        | as in `[[rules]]`                          |
 
-- The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow the [rules for names](#conventions).
+- `[samples]` takes `sheet` or `names`, not both. The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped, and a UTF-8 byte order mark at the start is ignored. In a CSV sheet, a field in double quotes may hold commas, and `""` in it is one quote; a quoted field ends on its line. Sample names follow the [rules for names](#conventions).
 - A step takes every `[[rules]]` key except `step` and `sample`, which `prepare` sets, and `name`, which names the step. A template has no `[[rules]]`: a step without `for_each` is one rule.
-- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. `{threads}` becomes `${WORKZ_THREADS}`, which expands when the rule runs to the threads it gets, a `--threads` override included. A param may not share a column's name.
+- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. `{threads}` becomes `${WORKZ_THREADS}`, which expands when the rule runs to the threads it gets, a `--threads` override included. A param may not share a column's name, and neither may be named `step`, `input`, `output` or `threads`, which `prepare` fills itself.
 - In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.
 - An unknown `{name}` is an error except in `shell` and a service's `command`, where it stays as written.
 

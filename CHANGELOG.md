@@ -20,6 +20,7 @@ Three changes need action:
   - An output below a symlink that points nowhere: write its real path.
   - A size or duration with a sign or `_`, such as `"+512M"`: write digits and a unit. A `K` size rounds up to whole MiB.
   - A `[defaults]` value out of range, which is checked even when every rule sets its own.
+  - A pipeline template with an unknown `{name}` in `[workflow]` or `[defaults]`, or a sheet column or param named `step`, `input`, `output` or `threads`: rename it, since `prepare` refuses it.
 - **Update scripts that read records or exit statuses.**
   - `verify` exits 1 when a selected rule has no record to check.
   - `status` exits 1 for a launch whose engine ended without recording its end, and prints it with `"status": "unfinished"`.
@@ -78,6 +79,9 @@ Three changes need action:
   - Dotted resource group and shared input names, such as `"disk.io"`, stay quoted, so the prepared workflow is valid.
   - `{threads}` in `shell` follows the threads the rule gets at run time, instead of staying a literal or taking the step's own value.
   - A step whose `input` or `output` is not a list is named, instead of aborting.
+  - `[workflow]` and `[defaults]` values name params as the other tables do, instead of keeping `{name}` as written, and an unknown `{name}` there is an error.
+  - A sample sheet that starts with a UTF-8 byte order mark reads, and a CSV field in double quotes may hold commas and doubled quotes.
+  - `[samples]` with both `sheet` and `names`, and a column or param named `step`, `input`, `output` or `threads`, which would hide the placeholder `prepare` fills, are refused instead of one being ignored.
 - **Validation.**
   - An empty `workflow.name` or `shell` is refused.
   - A path written as a file and also needed as a directory by another output, log, benchmark or workdir is refused.
