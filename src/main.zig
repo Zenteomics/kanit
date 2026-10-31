@@ -277,7 +277,8 @@ const commands = [_]Command{
         \\--history counts, per launch, the rules DONE (completed or reused),
         \\FAILED (failed or blocked) and CANCELLED (stopped or never started).
         \\
-        \\status exits 0 whatever the outcome it shows; run exits 1 on a failure.
+        \\status exits 0 for any outcome it shows, and 1 when it has none to show: no
+        \\launch, a summary that cannot be read, or a launch whose engine died.
         ,
         .options = &.{
             .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default: 10)" },
@@ -354,7 +355,8 @@ const commands = [_]Command{
         .about =
         \\Checks that every recorded output of the selected rules still has the
         \\identity workz recorded. With --content it also compares the bytes with
-        \\stored digests, and stores a digest for every output that has none.
+        \\stored digests, and stores a digest for every output that has none. It
+        \\exits 1 on a difference, or when a selected rule has no record to check.
         ,
         .options = &.{.{ .flag = "--content", .desc = "also compare and store content digests" }},
         .examples = "workz verify workflow.toml --content",
