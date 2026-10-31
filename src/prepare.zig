@@ -88,8 +88,6 @@ const Scope = struct {
     input: ?[]const u8 = null,
     output: ?[]const u8 = null,
     threads: ?[]const u8 = null,
-    /// `[defaults] threads` of the template, for a step that sets none.
-    default_threads: ?toml.Value = null,
 
     fn get(self: Scope, name: []const u8) ?[]const u8 {
         if (self.row) |row| if (self.sheet.?.column(name)) |c| return row[c];
@@ -271,14 +269,6 @@ fn joined(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v:
     return out.items;
 }
 
-/// The threads of a rule as the workflow parser settles them: its resources'
-/// threads, else its own, else the template's defaults, else one.
-fn effectiveThreads(a: Allocator, values: *const std.StringArrayHashMapUnmanaged(toml.Value), default_threads: ?toml.Value) ![]const u8 {
-    const res_threads = if (values.get("resources")) |res| (if (res == .table) res.table.get("threads") else null) else null;
-    const t = res_threads orelse values.get("threads") orelse default_threads orelse return "1";
-    return if (t == .integer) try std.fmt.allocPrint(a, "{d}", .{t.integer.value}) else "1";
-}
-
 /// Writes the rule of step `name` for one sample (`row`), or the step's
 /// single rule.
 fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const toml.Table, name: []const u8, scope: Scope) !void {
@@ -294,7 +284,9 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
         var s = scope;
         s.input = try joined(a, problem, name, "input", values.get("input"));
         s.output = try joined(a, problem, name, "output", values.get("output"));
-        s.threads = try effectiveThreads(a, &values, scope.default_threads);
+        // The variable, not a number: a `--threads` override reaches the
+        // command as it reaches the rule's request.
+        s.threads = "${WORKZ_THREADS}";
         try values.put(a, "shell", try ruleValue(a, problem, s, "shell", sh));
     }
     const sample: ?[]const u8 = if (scope.row) |row| row[scope.sheet.?.column("sample").?] else null;
@@ -415,8 +407,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
             if (workflow.closest(&workflow.rule_keys, key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
             return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });
         }
-        const defaults = if (doc.get("defaults")) |d| (if (d == .table) d.table.get("threads") else null) else null;
-        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .step = name, .default_threads = defaults };
+        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .step = name };
         if (step.get("for_each")) |fe| {
             if (fe != .string or !eql(u8, fe.string, "sample")) return fail(a, problem, "step {s}: for_each takes \"sample\"", .{name});
             const sh = sheet orelse return fail(a, problem, "step {s}: for_each = \"sample\" needs a [samples] table", .{name});

@@ -131,7 +131,9 @@ const commands = [_]Command{
         .group = .write,
         .about =
         \\Prints, for every selected rule, whether a run would run it or reuse it and
-        \\why, then how many of each. Nothing runs. 'dry-run' is another name for it.
+        \\why, then how many of each. Nothing runs. It exits 1 when run would refuse
+        \\the launch: a missing input, or an output changed outside workz.
+        \\'dry-run' is another name for it.
         ,
         .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
@@ -957,8 +959,20 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     (if (summary) plan.printSummary(&w.interface, &ctx, l.mask) else plan.printPlan(&w.interface, &ctx, l.mask)) catch |err| return unreadable(err, &ids);
     var refused: usize = 0;
+    const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
+    // What `run` would refuse makes the plan fail too, so `plan && run`
+    // stops at the plan.
+    var missing: usize = 0;
+    var changed: usize = 0;
+    for (ds, l.mask) |d, m| if (m and d.run) {
+        if (std.mem.startsWith(u8, d.reason, "input missing")) missing += 1;
+        if (std.mem.startsWith(u8, d.reason, "output changed")) changed += 1;
+    };
+    if (missing + changed > 0) {
+        refused += missing + changed;
+        std.debug.print("workz: run would refuse this launch: {d} {s} with a missing input, {d} with an output changed outside workz\n", .{ missing, if (missing == 1) "rule" else "rules", changed });
+    }
     if (budget) {
-        const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
         const runs = try c.a.alloc(bool, l.wf.rules.len);
         var reused: usize = 0;
         for (runs, ds, l.mask) |*r, d, m| {

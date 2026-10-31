@@ -635,7 +635,7 @@ test "[unit] - [prepare]: a template becomes one rule per sample, with labels, g
     const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
     for ([_][]const u8{
         "name = \"S1__count\"\nstep = \"count\"\nsample = \"S1\"\ninput = [\"reads/a.fq\", \"ref/idx\"]",
-        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t 2\"",
+        "shell = \"awk '{print $1}' reads/b.fq > counts/S2.txt -t ${WORKZ_THREADS}\"",
         "input = [\"counts/S1.txt\", \"counts/S2.txt\"]",
         "shell = \"cat counts/S1.txt counts/S2.txt > all.txt\"",
     }) |want| if (std.mem.indexOf(u8, text, want) == null) {
@@ -671,7 +671,7 @@ test "[unit] - [prepare]: mistakes in a template are named" {
     }
 }
 
-test "[regression] - [prepare]: dotted names stay one table, and {threads} is the threads the rule gets" {
+test "[regression] - [prepare]: dotted names stay one table, and {threads} follows the rule's threads at run time" {
     var s = try Scratch.init();
     defer s.deinit();
     const path = try s.file("pipeline.toml", "[workflow]\nname = \"p\"\n[defaults]\nthreads = 2\nmemory = \"1M\"\n" ++
@@ -687,8 +687,8 @@ test "[regression] - [prepare]: dotted names stay one table, and {threads} is th
     try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.\"disk.io\"]\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.disk-2]\n") != null);
     try testing.expect(std.mem.indexOf(u8, text, "[shared.\"ref.index\"]\n") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 2 > d.txt\"") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 3 > r.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo ${WORKZ_THREADS} > d.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo ${WORKZ_THREADS} > r.txt\"") != null);
     var wproblem: workflow.Problem = .{};
     defer testing.allocator.free(wproblem.message);
     var wf = try loadText(&s, text, &wproblem);

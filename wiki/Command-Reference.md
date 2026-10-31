@@ -51,7 +51,7 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 workz plan [WORKFLOW] [--summary] [--budget] [--rerun] [--rerun-rule RULE] [--pass-env NAME] [--threads STEP=N]
 ```
 
-Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. `dry-run` is another name for `plan`.
+Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, or an output changed outside workz without `--rerun`, which it names on standard error. `dry-run` is another name for `plan`.
 
 | Option          | Argument | Meaning                                         |
 | --------------- | -------- | ----------------------------------------------- |
@@ -253,6 +253,6 @@ Run 'workz help run' for its options.
 ## Exit statuses
 
 - `0`: success. For `run`, no rule failed, was blocked or was left unstarted; a rule stopped with `workz control stop` that nothing depends on counts as `cancelled` and still allows 0.
-- `1`: `run` had a failed or blocked rule, or was refused by changed outputs, an input manifest mismatch or another running launch; `verify` found a difference; `validate --inputs` found a missing input, `plan --budget` a rule that does not fit, or `prepare --check` a change; a file could not be written; or there is nothing recorded to show or act on: no launch for `watch`, `status`, `report` or `control`, no attempt for `logs`, a launch that has ended or a rule it does not run for `control`, a launch holding the lock for `verify` or `clean`.
+- `1`: `run` had a failed or blocked rule, or was refused by changed outputs, an input manifest mismatch or another running launch; `verify` found a difference; `validate --inputs` found a missing input, `plan` a launch `run` would refuse, `plan --budget` a rule that does not fit, or `prepare --check` a change; a file could not be written; or there is nothing recorded to show or act on: no launch for `watch`, `status`, `report` or `control`, no attempt for `logs`, a launch that has ended or a rule it does not run for `control`, a launch holding the lock for `verify` or `clean`.
 - `2`: an invalid command line or workflow: an unknown command or option, a missing or invalid value, options that exclude each other, an argument the command does not take, a rule or target that does not exist, or a launch refused before it started because of the workflow or its budget.
 - `130`: `run` was interrupted, or cancelled with `workz control cancel`.

@@ -84,7 +84,7 @@ wrote .../workflow.toml: 3 rules from 2 steps. Next: workz graph --by step, then
 ```
 
 - A step with `for_each = "sample"` becomes one rule per row, named `SAMPLE__STEP` (`s1__trim`) and labelled with its `step` and `sample`, so every report and view groups by them. A step without it is one rule, named as the step.
-- `{name}` takes a column of the sheet, a `[params]` value, or `{step}`. In `shell`, `{input}`, `{output}` and `{threads}` are the rule's own inputs, outputs (space-separated) and threads, as the rule gets them: from `resources`, the step, or `[defaults]`.
+- `{name}` takes a column of the sheet, a `[params]` value, or `{step}`. In `shell`, `{input}` and `{output}` are the rule's own inputs and outputs (space-separated), and `{threads}` becomes `${WORKZ_THREADS}`, the threads the rule gets when it runs, so a `--threads` override reaches the tool.
 - In a step without `for_each`, a list element naming a sheet column becomes one element per sample: the report above reads every sample's file.
 - Only those names are replaced. Other braces stay as written, so awk's `{print $1}` and the shell's `${HOME}` need no escaping; in a path, an unknown `{name}` is an error, and so is a column used outside a `for_each` step.
 - The workflow is checked as `validate` would before it replaces `workflow.toml`; one that is not valid is left beside it to read, and `workflow.toml` is unchanged.

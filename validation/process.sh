@@ -153,6 +153,10 @@ new threads-override
 "$workz" plan wf.toml --threads wrk=2 > /dev/null 2> err.txt
 rc=$?
 check "--threads gives a step's rules another thread count for one launch, keyed by that request" 'grep -q "run   work_s1  (resource request changed)" plan.txt && [ "$(status_of s2.json completed)" = 2 ] && [ "$(jq .request.threads "$(last_launch)/attempts/work_s1/001/record.json")" = 2 ] && grep -q "threads 1 against 2" compare.txt && [ $rc = 2 ] && grep -q "did you mean .work." err.txt'
+printf '[workflow]\nname = "t"\n[[steps]]\nname = "count"\noutput = ["n.txt"]\nshell = "echo {threads} > n.txt"\nmemory = "1M"\n' > pipeline.toml
+"$workz" prepare -o prepared.toml > /dev/null
+"$workz" run prepared.toml "${iso[@]}" --threads count=3 -q > s3.json
+check "a prepared {threads} reaches the command with a --threads override" 'grep -q "\${WORKZ_THREADS}" prepared.toml && [ "$(cat n.txt)" = 3 ]'
 
 new dir-input
 { header dir-input
@@ -1106,8 +1110,9 @@ check "report --compare marks a step with no completed run on one side" 'grep -q
 # ---------------------------------------------------------------- inputs and formats
 new plan-missing
 { header plan-missing; rule count '["reads/s9.txt"]' '["c.txt"]' '"wc -l reads/s9.txt > c.txt"'; } > wf.toml
-"$workz" plan wf.toml > plan.txt
-check "plan names an input that is missing and that no rule makes" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt'
+"$workz" plan wf.toml > plan.txt 2> plan.err
+prc=$?
+check "plan names an input that is missing and that no rule makes, and fails as run would" 'grep -q "^run   count  (input missing: reads/s9.txt)$" plan.txt && [ $prc = 1 ] && grep -q "run would refuse this launch: 1 rule with a missing input" plan.err'
 
 new manifest
 echo data > ext.txt

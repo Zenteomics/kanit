@@ -24,6 +24,8 @@ Three changes need action:
   - `record.json` adds `request.reserved_mib`, and a service's `shared_loading` event adds `reserved_mib`.
   - `.workz/` is made readable by its owner alone; another user who read the records needs to be given access again.
   - `run` refuses `--slice` with `--no-isolation`, which ignored it, and `version` refuses words after it.
+  - `plan` exits 1 when `run` would refuse the launch, for a missing input or an output changed outside workz, and says so on standard error.
+  - `workz prepare` writes `{threads}` as `${WORKZ_THREADS}`, so the command reads the threads the rule gets, a `--threads` override included; prepare again to pick this up.
 
 ### Fixed
 
@@ -52,7 +54,7 @@ Three changes need action:
 - **Input errors.** An unreadable or too deeply nested input names its path, a manifest entry that is not a file is refused, and `validate --inputs` reports a dangling symlink as missing, as `run` does.
 - **`workz prepare`.**
   - Dotted resource group and shared input names, such as `"disk.io"`, stay quoted, so the prepared workflow is valid.
-  - `{threads}` is the number of threads the rule gets, from `resources`, the step or `[defaults]`, instead of a literal or the step's own value.
+  - `{threads}` in `shell` follows the threads the rule gets at run time, instead of staying a literal or taking the step's own value.
   - A step whose `input` or `output` is not a list is named, instead of aborting.
 - **Validation.**
   - An empty `workflow.name` or `shell` is refused.
