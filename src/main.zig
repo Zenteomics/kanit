@@ -308,7 +308,7 @@ const commands = [_]Command{
             .{ .flag = "--stderr", .desc = "standard error only" },
             .{ .flag = "--attempt N", .desc = "attempt N instead of the newest" },
             .{ .flag = "--launch ID", .desc = "look in this launch" },
-            .{ .flag = "-f, --follow", .desc = "keep printing until the attempt ends" },
+            .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
         },
         .examples =
         \\workz logs align_s1

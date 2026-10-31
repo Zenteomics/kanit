@@ -118,6 +118,6 @@ trim: temporary failure writing trimmed/S4.fq
 
 - `--stderr` or `--stdout` prints one stream, without the headers.
 - `--attempt N` picks attempt N in the newest launch that ran the rule, and `--launch ID` looks in that launch instead.
-- `--follow` (`-f`) keeps printing a running attempt's output until it ends.
+- `--follow` (`-f`) prints the output as it grows until the attempt ends, or its launch stops running.
 
 Every attempt's files stay in its attempt directory, `.workz/launches/<ID>/attempts/<rule>/<NNN>/`, until you remove the launch ([Records](Records.md)).

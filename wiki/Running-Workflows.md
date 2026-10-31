@@ -62,6 +62,7 @@ If the engine itself is killed, by `kill -9`, the out-of-memory killer or a clos
 - Nothing enforces requests: there is no memory limit, no out-of-memory kill of the whole attempt, no CPU quota, and no cgroup counters in the records.
 - Rules share the machine's network.
 - If the engine is killed, a guard process kills the process groups of the attempts that were running.
+- A process that leaves its attempt's process group, such as one started with `setsid`, outlives the attempt: without a cgroup, nothing finds it.
 
 ## Failures
 
