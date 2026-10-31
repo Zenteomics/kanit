@@ -28,6 +28,10 @@ Three changes need action:
   - `plan` exits 1 when `run` would refuse the launch, for a missing input or an output changed outside workz, and says so on standard error.
   - `workz prepare` writes `{threads}` as `${WORKZ_THREADS}`, so the command reads the threads the rule gets, a `--threads` override included; prepare again to pick this up.
 
+### Changed
+
+- **Speed.** Reports and the live launch page find reused rules' runs by listing each earlier launch once, instead of probing every rule in every launch: a 200-rule report after 100 reused launches takes 15 ms instead of 54 ms.
+
 ### Fixed
 
 - **Directory inputs.**

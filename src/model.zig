@@ -277,11 +277,14 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
         k -= 1;
         const launch = launches[k];
         if (!std.mem.lessThan(u8, launch, id)) continue;
-        var i: usize = 0;
-        while (i < wanted.count()) {
-            const rule = wanted.keys()[i];
+        // The rules that launch ran, listed once: probing every wanted rule
+        // in every earlier launch would cost rules times launches.
+        const attempts_dir = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts" });
+        const ran = (try sys.dirNames(gpa, a, attempts_dir)) orelse continue;
+        for (ran) |rule| {
+            const i = wanted.getIndex(rule) orelse continue;
             // The rule's last completed attempt in that launch, if any.
-            const rule_dir = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts", rule });
+            const rule_dir = try std.fs.path.join(a, &.{ attempts_dir, rule });
             const numbers = (try sys.dirNames(gpa, a, rule_dir)) orelse &.{};
             var j = numbers.len;
             const found = while (j > 0) {
@@ -294,7 +297,7 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
                 reused.reused_from = launch;
                 try out.append(a, reused);
                 wanted.swapRemoveAt(i);
-            } else i += 1;
+            }
         }
     }
     return out.items;
