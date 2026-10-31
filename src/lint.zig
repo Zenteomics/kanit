@@ -47,9 +47,19 @@ pub fn missingInputs(gpa: Allocator, w: *std.Io.Writer, wf: *const workflow.Work
         if (!mask[i]) continue;
         for (r.input_abs, r.input) |in, written| {
             if (g.produces(in)) continue;
-            if ((try sys.lstat(gpa, in)) != null) continue;
+            // As the launch does: a symlink counts by what it points at.
+            const found = sys.stat(gpa, in) catch |err| {
+                n += 1;
+                try w.print("input of rule {s}: {s} cannot be read: {s}\n", .{ r.name, written, sys.errorText(err) });
+                continue;
+            };
+            if (found != null) continue;
             n += 1;
-            try w.print("missing input of rule {s}: {s}\n", .{ r.name, written });
+            if (try sys.lstat(gpa, in) != null) {
+                const target = sys.readlink(gpa, in) catch "";
+                defer if (target.len > 0) gpa.free(target);
+                try w.print("missing input of rule {s}: {s} (a symlink to {s}, which does not exist)\n", .{ r.name, written, target });
+            } else try w.print("missing input of rule {s}: {s}\n", .{ r.name, written });
         }
     }
     if (n > 0) try w.print("{d} missing {s}: create {s}, or fix the {s}\n", .{ n, if (n == 1) "input" else "inputs", if (n == 1) "it" else "them", if (n == 1) "path" else "paths" });

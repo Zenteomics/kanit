@@ -75,7 +75,7 @@ shared = ["genome"]
 - **Unknown keys are errors**, in every table. The message names the line and, when one is close, the key you probably meant.
 - **Names** of rules and shared inputs have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - **Paths** name files or directories explicitly. They cannot be empty, contain control characters, `*`, `?`, `[`, `]`, `{` or `}`, contain `://`, or start with `gh:`. Relative paths resolve against the working directory.
-- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. A size below 1 MiB, such as `"512K"`, is refused.
+- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. A size below 1 MiB, such as `"512K"`, or above `"1024T"` is refused.
 - **Durations** are strings: a whole number of seconds, or numbers with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.
 
 ## [workflow]
@@ -160,10 +160,13 @@ An entry with `container` is a service:
 - Every rule needs a memory request: `memory`, in `resources`, or in `[defaults]`.
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
-- An input that is a directory depends on every rule that writes inside it, so it is read once they have completed.
+- A path one rule writes as a file cannot be a directory that another output, log, benchmark or workdir lies in, and two logs or benchmarks cannot be hard links to one file.
+- `workflow.name` and each rule's `shell` must not be empty.
+- `output`, `log`, `benchmark` and `workdir` name their real path: one that passes through a symlinked directory is an error, since the file would have a second name that the graph does not see.
+- An input that is a directory depends on every rule that writes inside it, so it is read once they have completed. A rule's own outputs, log, benchmark and workdir cannot lie inside its directory input, which they would change while it runs; an input of `.` is therefore an error for any rule.
 - `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
 - `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
-- An input that is a symlink to another rule's output is an error: declare the output's own path, so the dependency is visible.
+- An input that reaches another rule's output, or a directory it writes into, through a symlink is an error: declare the output's own path, so the dependency is visible.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
 - `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
 - `step`, `sample`, `category` and `tool` are labels of 1 to 200 characters without control characters. They are not part of the rule key, so changing one reruns nothing. [Concepts](Concepts.md#steps-samples-categories-and-tools) defines them and says how undeclared ones are derived.
@@ -197,7 +200,7 @@ The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare
 
 - The sheet has a header line with a `sample` column; each row has every column filled. Empty lines and lines starting with `#` are skipped. Sample names follow the [rules for names](#conventions).
 - A step takes every `[[rules]]` key except `step` and `sample`, which `prepare` sets, and `name`, which names the step. A template has no `[[rules]]`: a step without `for_each` is one rule.
-- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. A param may not share a column's name.
+- `{name}` takes, in order: the row's column (in a `for_each` step), a param, `{step}`, and in `shell` `{input}`, `{output}` and `{threads}`. `{threads}` is the number the rule gets: `resources.threads`, else the step's `threads`, else `[defaults] threads`, else 1. A param may not share a column's name.
 - In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.
 - An unknown `{name}` is an error except in `shell` and a service's `command`, where it stays as written.
 
@@ -208,4 +211,4 @@ The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare
 - An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `workz plan` shows `input missing: PATH`.
 - The path of every shared file input must exist and be readable; otherwise `workz run` refuses with `shared input NAME (PATH): ...`.
 - Every container image must be available locally; otherwise `workz run` refuses with `container image NAME is not available locally; workz does not pull images`.
-- Every rule's request must fit the budget of the launch; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.
+- Every rule that runs must fit the budget of the launch, while a rule that is reused needs none; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.

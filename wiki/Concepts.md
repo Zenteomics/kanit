@@ -21,7 +21,7 @@ workz reads the graph as written. Samples, parameters and file names are expande
 
 A **rule** has a name, a list of **input** files, a list of **output** files, one **shell** command and a **request** for threads and memory. Rule B depends on rule A when one of B's inputs is one of A's outputs; this is the only way rules are connected. An input that no rule produces is an **external input**, a file that must exist before the rule runs.
 
-A rule's outputs must be files inside the working directory. Inputs may be anywhere, including a reference directory elsewhere on the machine. A directory can be an input; its identity then covers every file below it, so a change to any of them counts as a change to the input.
+A rule's outputs must be files inside the working directory. Inputs may be anywhere, including a reference directory elsewhere on the machine. A directory can be an input; its identity then covers every file and directory below it, so a change to any of them counts as a change to the input.
 
 ## Steps, samples, categories and tools
 

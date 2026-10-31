@@ -88,6 +88,26 @@ test "the watch selection moves, scrolls and survives filters" {
     try testing.expect(ui.quit);
 }
 
+test "[regression] - [watch]: S then R act on the same rule after its row moves" {
+    const tui = workz.tui;
+    var ui: tui.Ui = .{};
+    // Rules a (0) and b (1) run; the top row is selected without a key.
+    const running = [_]usize{ 0, 1 };
+    ui.settle(&running, 10);
+    try testing.expectEqual(@as(?usize, 0), ui.selected);
+
+    ui.key(.{ .char = 'S' }, &running, 10);
+    try testing.expectEqualStrings("stop", ui.action.?.cmd);
+    try testing.expectEqual(@as(?usize, 0), ui.action.?.rule);
+    // a stops and sorts below b, which keeps running.
+    const after = [_]usize{ 1, 0 };
+    ui.settle(&after, 10);
+    ui.key(.{ .char = 'R' }, &after, 10);
+
+    try testing.expectEqualStrings("retry", ui.action.?.cmd);
+    try testing.expectEqual(@as(?usize, 0), ui.action.?.rule);
+}
+
 test "[unit] - [watch]: a frame fits the terminal width, shortens long names in the middle and lists running rules first" {
     var s = try Scratch.init();
     defer s.deinit();

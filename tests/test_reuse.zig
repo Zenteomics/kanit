@@ -146,8 +146,8 @@ test "the key of a fixed rule matches its pinned value" {
     defer ids.deinit();
     var missing: ?[]const u8 = null;
     const k = (try state.computeKey(arena.allocator(), &ids, &wf.rules[0], wf.root, "PATH=/usr/bin\n", &.{"producer"}, &.{"abc"}, state.engine_key_text, null, "", &missing)).?;
-    try testing.expectEqualStrings("workz-key 3", k.engine);
-    try testing.expectEqualStrings("0f80fc5a9c30961c380a885b9374fe954123c66b09a0fc820368ba7be745f830", k.key);
+    try testing.expectEqualStrings("workz-key 4", k.engine);
+    try testing.expectEqualStrings("6afec408f376515d3223d573bc55b4311397cd1c83257333f8e1a512b007af46", k.key);
 }
 
 test "the keyed environment lists PATH, locale, time zone and passed names in order" {
@@ -282,4 +282,101 @@ test "[unit] - [state]: manifest entries round-trip relative to the working dire
     defer testing.allocator.free(saved);
     try testing.expect(std.mem.indexOf(u8, saved, "\"in/r1.fq\"") != null);
     try testing.expect(std.mem.indexOf(u8, saved, "\"/data/r2.fq\"") != null);
+}
+
+/// The identity text of `path` as a fresh launch sees it; owned by the caller.
+fn freshIdentity(path: []const u8) ![]u8 {
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+    return testing.allocator.dupe(u8, (try ids.get(path)).?);
+}
+
+test "[regression] - [state]: a directory identity changes when an empty subdirectory is created, renamed or removed" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const d = try s.dir("d");
+    _ = try s.file("d/f", "x");
+    const empty = try std.fs.path.join(testing.allocator, &.{ d, "empty" });
+    defer testing.allocator.free(empty);
+    const other = try std.fs.path.join(testing.allocator, &.{ d, "other" });
+    defer testing.allocator.free(other);
+
+    const before = try freshIdentity(d);
+    defer testing.allocator.free(before);
+    try sys.mkdir(testing.allocator, empty);
+    const created = try freshIdentity(d);
+    defer testing.allocator.free(created);
+    try sys.rename(testing.allocator, empty, other);
+    const renamed = try freshIdentity(d);
+    defer testing.allocator.free(renamed);
+    try sys.rmdir(testing.allocator, other);
+    const removed = try freshIdentity(d);
+    defer testing.allocator.free(removed);
+
+    try testing.expect(!std.mem.eql(u8, before, created));
+    try testing.expect(!std.mem.eql(u8, created, renamed));
+    try testing.expectEqualStrings(before, removed);
+}
+
+test "[edge] - [state]: a dangling symlink in a directory input changes its identity when its target appears" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const d = try s.dir("d");
+    try s.link("d/link", "../target");
+
+    const dangling = try freshIdentity(d);
+    defer testing.allocator.free(dangling);
+    _ = try s.file("target", "x");
+    const resolved = try freshIdentity(d);
+    defer testing.allocator.free(resolved);
+
+    try testing.expect(!std.mem.eql(u8, dangling, resolved));
+}
+
+test "[unit] - [state]: a directory identity leaves out record directories" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const d = try s.dir("d");
+    _ = try s.file("d/f", "x");
+    _ = try s.dir("d/.workz");
+
+    const before = try freshIdentity(d);
+    defer testing.allocator.free(before);
+    _ = try s.file("d/.workz/events.jsonl", "{}\n");
+    const after = try freshIdentity(d);
+    defer testing.allocator.free(after);
+
+    try testing.expectEqualStrings(before, after);
+}
+
+test "[failure] - [state]: a symlink to a directory inside a directory input is refused and named" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const d = try s.dir("d");
+    _ = try s.dir("target");
+    _ = try s.file("target/input", "old");
+    try s.link("d/link", "../target");
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+
+    try testing.expectError(error.Unreadable, ids.get(d));
+    const want = try std.fmt.allocPrint(testing.allocator, "cannot read input {s}: {s}/link is a symlink to a directory; declare the directory it names as an input of its own", .{ d, d });
+    defer testing.allocator.free(want);
+    try testing.expectEqualStrings(want, ids.problem);
+}
+
+test "[failure] - [sys]: an exclusive write refuses a file or symlink planted at its path" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const target = try s.file("target", "keep");
+    try s.link("planted", target);
+    const planted = try std.fs.path.join(testing.allocator, &.{ s.path, "planted" });
+    defer testing.allocator.free(planted);
+
+    try testing.expectError(error.PathAlreadyExists, sys.openWrite(testing.allocator, planted, .exclusive));
+    try testing.expectError(error.PathAlreadyExists, sys.openWrite(testing.allocator, target, .exclusive));
+
+    const kept = try sys.readFile(testing.allocator, target, 64);
+    defer testing.allocator.free(kept);
+    try testing.expectEqualStrings("keep", kept);
 }

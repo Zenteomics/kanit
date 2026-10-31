@@ -10,7 +10,7 @@ A launch has three limits, set on the command line:
 | Memory  | `--max-memory`  | three quarters of the memory     |
 | Jobs    | `-j`, `--jobs`  | the thread budget                |
 
-Sizes take `K`, `M`, `G` or `T` (powers of 1024); a plain number is MiB. With isolation, the default, the run's systemd scope enforces the budget itself, so the whole run stays inside what you gave it even if a rule misbehaves ([Isolation](Running-Workflows.md#isolation)).
+Sizes take `K`, `M`, `G` or `T` (powers of 1024), up to `1024T`; a plain number is MiB. With isolation, the default, the run's systemd scope enforces the budget itself, so the whole run stays inside what you gave it even if a rule misbehaves ([Isolation](Running-Workflows.md#isolation)).
 
 A rule whose request alone exceeds the budget can never start, so the launch refuses to begin:
 
@@ -18,7 +18,7 @@ A rule whose request alone exceeds the budget can never start, so the launch ref
 workz: rule assemble requests 32 threads; the run allows 8: raise --max-threads, or lower the rule's threads
 ```
 
-`workz plan --budget` makes the same check, and the one for memory with shared inputs, before a launch ([Command reference](Command-Reference.md#plan)).
+The check covers the rules that will run, decided as `workz plan` decides them, and the shared inputs they use: a rule that is reused needs no budget, and a shared input that no running rule uses is not measured. `workz plan --budget` makes the same check, and the one for memory with shared inputs, before a launch ([Command reference](Command-Reference.md#plan)).
 
 ## When a rule starts
 

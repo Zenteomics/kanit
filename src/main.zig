@@ -203,7 +203,7 @@ const commands = [_]Command{
             .{ .flag = "--rerun", .desc = "run every selected rule, even when reusable" },
             .{ .flag = "--rerun-rule RULE", .desc = "run RULE even when reusable (repeatable)" },
             .{ .flag = "--input-manifest FILE", .desc = "check external inputs against digests first" },
-            .{ .flag = "--pass-env NAME", .desc = "pass and key an environment variable (repeatable)" },
+            .{ .flag = "--pass-env NAME", .desc = "pass and key a variable; recorded, so not for secrets" },
             .{ .flag = "--threads STEP=N", .desc = "N threads for STEP's rules, this launch (repeatable)" },
             .{ .flag = "--grace DURATION", .desc = "wait before killing a stopped rule (default: 10s)" },
             .{ .flag = "--slice NAME.slice", .desc = "place the run's scope in this systemd slice" },
@@ -528,6 +528,21 @@ fn failed(comptime fmt: []const u8, args: anytype) Exit {
     return .failed;
 }
 
+/// A `state.json` that cannot be used stops the command with what to do,
+/// exit status 1; any other error goes on.
+fn stateFailed(c: Ctx, err: anyerror, root: []const u8) !Exit {
+    const path = try std.fs.path.join(c.a, &.{ root, ".workz", "state.json" });
+    const why = (try state.loadErrorText(c.a, err, path)) orelse return err;
+    return failed("{s}", .{why});
+}
+
+/// An input whose identity cannot be read is a workflow problem, exit
+/// status 2; any other error goes on.
+fn unreadable(err: anyerror, ids: *const state.Identities) !Exit {
+    if (err == error.Unreadable) return fail("{s}", .{ids.problem});
+    return err;
+}
+
 const Ctx = struct {
     gpa: std.mem.Allocator,
     a: std.mem.Allocator,
@@ -557,7 +572,7 @@ pub fn main(init: std.process.Init) !u8 {
     if (command(cmd) != null) for (rest) |arg| {
         if (eq(u8, arg, "--help") or eq(u8, arg, "-h")) return @intFromEnum(try cmdHelp(ctx, &.{cmd}));
     };
-    const code: Exit = if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
+    const code: Exit = if ((eq(u8, cmd, "version") or eq(u8, cmd, "--version")) and rest.len > 0) fail("version takes no arguments; run workz version", .{}) else if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
         try out(init.io, "workz {s}\n", .{workz.version});
         break :blk .ok;
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "prepare")) try cmdPrepare(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
@@ -894,7 +909,7 @@ const PlanExtra = struct {
         };
         if (self.max_memory) |m| if (std.mem.eql(u8, arg, "--max-memory")) {
             const v = value orelse return missingValue(arg);
-            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G");
+            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G, at most 1024T");
             return 2;
         };
         if (std.mem.eql(u8, arg, "--pass-env")) {
@@ -930,23 +945,32 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     if (applyThreads(&l.wf, threads.items)) |e| return e;
-    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = try planContext(c, &l, &st, &ids, pass.items);
+    var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    if (summary) try plan.printSummary(&w.interface, &ctx, l.mask) else try plan.printPlan(&w.interface, &ctx, l.mask);
+    (if (summary) plan.printSummary(&w.interface, &ctx, l.mask) else plan.printPlan(&w.interface, &ctx, l.mask)) catch |err| return unreadable(err, &ids);
     var refused: usize = 0;
-    if (budget) refused = try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, l.mask, .{
-        .threads = max_threads orelse run.defaultThreads(),
-        .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
-        .defaults = max_threads == null and max_memory == null,
-    });
+    if (budget) {
+        const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
+        const runs = try c.a.alloc(bool, l.wf.rules.len);
+        var reused: usize = 0;
+        for (runs, ds, l.mask) |*r, d, m| {
+            r.* = m and d.run;
+            reused += @intFromBool(m and !d.run);
+        }
+        refused = try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
+            .threads = max_threads orelse run.defaultThreads(),
+            .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
+            .defaults = max_threads == null and max_memory == null,
+        });
+    }
     try w.interface.flush();
     return if (refused > 0) .failed else .ok;
 }
@@ -968,17 +992,17 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     if (applyThreads(&l.wf, threads.items)) |e| return e;
-    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = try planContext(c, &l, &st, &ids, pass.items);
+    var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    const found = try plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]);
+    const found = plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]) catch |err| return unreadable(err, &ids);
     try w.interface.flush();
     if (!found) {
         const name = common.positional.items[0];
@@ -1007,13 +1031,13 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     const rec = try workz.records.recordsDir(c.a, l.wf.root);
-    try sys.mkdirAll(c.gpa, rec);
+    try workz.records.makeRecordsDir(c.gpa, rec);
     const lock = workz.records.lock(c.gpa, rec) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; verify after it ends", .{l.wf.root}),
         else => return err,
     };
     defer sys.close(lock);
-    var st = try plan.loadState(c.gpa, l.wf.root, c.a);
+    var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
@@ -1045,6 +1069,7 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; workz run starts another", .{dir});
+    if (!workz.records.launchActive(c.gpa, dir)) return failed("the newest launch did not finish, and no engine runs it: {s}; its engine ended without recording its end", .{dir});
     if (words.items.len == 2) {
         var tr = try workz.tracker.Tracker.init(c.gpa, dir);
         defer tr.deinit();
@@ -1127,11 +1152,19 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     // replaces the current one.
     // A check leaves the directory alone: its copy goes to the temporary
     // directory, so it also works where the workflow cannot be written.
-    const tmp = if (check)
-        try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{d}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", std.os.linux.getpid() })
-    else
-        try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
-    sys.writeFile(c.gpa, tmp, text) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
+    const tmp = if (check) name: {
+        var rnd: [8]u8 = undefined;
+        sys.randomBytes(&rnd);
+        break :name try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{s}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", &std.fmt.bytesToHex(rnd, .lower) });
+    } else try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
+    if (check) {
+        // A shared temporary directory: the file is created anew under a
+        // random name, so a file or symlink planted there is refused, not
+        // followed.
+        const fd = sys.openWrite(c.gpa, tmp, .exclusive) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
+        defer sys.close(fd);
+        sys.writeAll(fd, text) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
+    } else sys.writeFile(c.gpa, tmp, text) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
     var keep_tmp = false;
     defer if (!keep_tmp) sys.unlink(c.gpa, tmp) catch {};
     const root = std.fs.path.dirname(out_path) orelse ".";
@@ -1310,6 +1343,10 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
         error.OutOfMemory => return err,
+        error.CorruptState, error.UnsupportedState => {
+            std.debug.print("workz: clean --keep cannot tell which launches hold recorded results\n", .{});
+            return stateFailed(c, err, root);
+        },
         else => return failed("cannot clean {s}: {s}", .{ root, sys.errorText(err) }),
     };
     const verb = if (opts.dry_run) "would remove" else "removed";
@@ -1491,7 +1528,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     if (methods) {
         if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; workz run starts one", .{rec});
         const m = workz.methods.collect(c.gpa, c.a, root) catch |err| switch (err) {
-            error.CorruptState, error.UnsupportedState => return failed("{s}/state.json cannot be read ({s})", .{ rec, sys.errorText(err) }),
+            error.CorruptState, error.UnsupportedState => return stateFailed(c, err, root),
             else => return err,
         };
         if (m.rules == 0) return failed("no rule has completed in {s}; there are no results to describe", .{root});
@@ -1508,9 +1545,13 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const w = &text.writer;
+    // Records that exist but do not parse are left out and named; the
+    // report exits 1.
+    var unread: std.ArrayList([]const u8) = .empty;
     if (suggest) {
         var l = try workz.model.load(c.gpa, c.a, dir);
         defer l.deinit();
+        unread = l.unreadable;
         // A terminal gets a table; a file or a pipe gets the TSV.
         const table = kind == .tsv and output == null and term.isTerminal(1);
         try report.writeSuggestions(w, &l, if (kind == .json) .json else if (table) .table else .tsv);
@@ -1522,17 +1563,19 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     } else switch (kind) {
         .html => try workz.html.write(c.gpa, c.a, w, dir),
         .json, .tsv => {
-            const rows = try workz.model.attempts(c.gpa, c.a, dir);
+            const rows = try workz.model.attempts(c.gpa, c.a, dir, &unread);
             if (kind == .json) try report.writeJson(c.a, w, rows) else try report.writeTsv(w, rows);
-            if (rows.len == 0) try noAttempts(c, rec, dir, launch == null);
+            if (rows.len == 0 and unread.items.len == 0) try noAttempts(c, rec, dir, launch == null);
         },
     }
+    for (unread.items) |p| std.debug.print("workz: {s} is not valid JSON; the report leaves it out\n", .{p});
+    const done: Exit = if (unread.items.len > 0) .failed else .ok;
     if (output) |path| {
         sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
-        return .ok;
+        return done;
     }
     try sys.writeAll(1, text.written());
-    return .ok;
+    return done;
 }
 
 const RunExtra = struct {
@@ -1585,7 +1628,7 @@ const RunExtra = struct {
             o.max_threads = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
             if (o.max_threads.? == 0) return invalidValue(arg, v, "use a whole number above 0");
         } else if (eq(u8, arg, "--max-memory")) {
-            o.max_memory_mib = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G");
+            o.max_memory_mib = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size such as 512M or 60G, at most 1024T");
         } else if (eq(u8, arg, "-r") or eq(u8, arg, "--retry")) {
             o.retry = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use 0 to 3");
             if (o.retry > 3) return invalidValue(arg, v, "use 0 to 3");
@@ -1621,8 +1664,8 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     opts.thread_overrides = threads.items;
     if (opts.input_manifest) |m| opts.input_manifest = try sys.absolute(c.a, try sys.cwd(c.a), m);
     // The launcher only starts the scope; the engine inside reads the workflow.
-    const inner = if (c.env.get("WORKZ_STAGE")) |s| std.mem.eql(u8, s, "inner") else false;
-    if (opts.isolation and !inner) return isolate(c, opts);
+    if (opts.slice != null and !opts.isolation) return fail("--slice places the run's scope, which --no-isolation does not make; give one of them", .{});
+    if (opts.isolation and !try insideOwnScope(c)) return isolate(c, opts);
     var l = (try load(c, &common)) orelse return .usage;
     defer l.deinit();
     if (applyThreads(&l.wf, threads.items)) |e| return e;
@@ -1690,6 +1733,20 @@ fn findProgram(c: Ctx, name: []const u8) !?[]const u8 {
 /// Re-executes the run inside a delegated systemd user scope: cgroup limits
 /// for the whole run, swap off. `systemd-run --scope` execs the engine in this
 /// same process, so interrupt signals reach the engine directly.
+/// Whether this process is the engine `isolate` started: `WORKZ_STAGE` names
+/// the scope it made, and this process runs in that scope. A marker
+/// inherited from elsewhere fails the second test, so the launch isolates.
+fn insideOwnScope(c: Ctx) !bool {
+    const stage = c.env.get("WORKZ_STAGE") orelse return false;
+    if (!std.mem.startsWith(u8, stage, "inner:")) return false;
+    const unit = stage["inner:".len..];
+    const text = sys.readFile(c.gpa, "/proc/self/cgroup", 1 << 16) catch return false;
+    defer c.gpa.free(text);
+    const line = std.mem.trimEnd(u8, text, "\n");
+    const scope = try std.fmt.allocPrint(c.a, "/{s}.scope", .{unit});
+    return std.mem.startsWith(u8, line, "0::") and std.mem.endsWith(u8, line, scope);
+}
+
 fn isolate(c: Ctx, opts: run.Options) !Exit {
     const systemd_run = (try findProgram(c, "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
     const threads = opts.max_threads orelse run.defaultThreads();
@@ -1702,7 +1759,8 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     // systemd-run names a scope after its own pid. When workz itself was
     // started by `systemd-run --scope`, that pid is ours and its scope is still
     // loaded, so the run's scope gets a name of its own.
-    try argv.append(c.a, try std.fmt.allocPrint(c.a, "--unit=workz-{d}-{x}", .{ linux.getpid(), sys.realNs() }));
+    const unit = try std.fmt.allocPrint(c.a, "workz-{d}-{x}", .{ linux.getpid(), sys.realNs() });
+    try argv.append(c.a, try std.fmt.allocPrint(c.a, "--unit={s}", .{unit}));
     // With --slice the scope becomes a child of the caller's slice, inside its limits.
     if (opts.slice) |slice| try argv.append(c.a, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
     try argv.appendSlice(c.a, &.{
@@ -1715,8 +1773,8 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     for (c.argv[1..]) |arg| try argv.append(c.a, arg);
     var env: std.ArrayList([]const u8) = .empty;
     var it = c.env.iterator();
-    while (it.next()) |e| try env.append(c.a, try std.fmt.allocPrint(c.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
-    try env.append(c.a, "WORKZ_STAGE=inner");
+    while (it.next()) |e| if (!std.mem.eql(u8, e.key_ptr.*, "WORKZ_STAGE")) try env.append(c.a, try std.fmt.allocPrint(c.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
+    try env.append(c.a, try std.fmt.allocPrint(c.a, "WORKZ_STAGE=inner:{s}", .{unit}));
     const argv_z = try workz.process.Vec.init(c.a, argv.items);
     const env_z = try workz.process.Vec.init(c.a, env.items);
     const rc = linux.execve(try c.a.dupeZ(u8, systemd_run), argv_z.items.ptr, env_z.items.ptr);

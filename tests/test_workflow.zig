@@ -5,6 +5,7 @@ const testing = std.testing;
 const workz = @import("workz");
 const workflow = workz.workflow;
 const state = workz.state;
+const sys = workz.sys;
 const helpers = @import("helpers.zig");
 const Scratch = helpers.Scratch;
 const loadText = helpers.loadText;
@@ -23,6 +24,14 @@ test "memory requests use K, M, G and T suffixes and default to MiB" {
     try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib(""));
     try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("lots"));
     try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("99999999999999999999G"));
+}
+
+test "[edge] - [workflow]: sizes stop at 1024T, so reservations cannot overflow" {
+    try testing.expectEqual(@as(?u64, 1 << 30), workflow.parseMemoryMib("1024T"));
+    try testing.expectEqual(@as(?u64, 1 << 30), workflow.parseMemoryMib("1073741824M"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1025T"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1073741825M"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("18446744073709551615M"));
 }
 
 test "durations accept bare seconds and unit sequences" {
@@ -298,18 +307,114 @@ test "rule line numbers stay right across many rules" {
         "[[rules]]\nname = \"t\"\noutput = [\"q\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++ rule, "line 20: duplicate rule name 'r'");
 }
 
-test "an input reaching a declared output through a symlinked directory is refused" {
+/// The problems of a workflow written into `s`, which must be invalid.
+fn problemsIn(s: *Scratch, text: []const u8) ![]const u8 {
+    var problem: workflow.Problem = .{};
+    errdefer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, loadText(s, text, &problem));
+    return problem.message;
+}
+
+inline fn rule1(comptime name: []const u8, comptime fields: []const u8) []const u8 {
+    return "[[rules]]\nname = \"" ++ name ++ "\"\n" ++ fields ++ "shell = \"true\"\nmemory = \"1M\"\n";
+}
+
+test "[failure] - [workflow]: an input reaching a declared output through a directory alias is refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("data");
+    try s.link("alias", "data");
+
+    // The consumer names the alias of a file not yet produced, of an existing
+    // one, and of the directory the producer writes into.
+    const msg = try problemsIn(&s, head ++ rule1("a", "output = [\"data/x.txt\", \"data/sub/y.txt\"]\n") ++
+        rule1("b", "input = [\"alias/x.txt\"]\noutput = [\"b.txt\"]\n") ++
+        rule1("c", "input = [\"alias\"]\noutput = [\"c.txt\"]\n"));
+    defer testing.allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, msg, "rule b: declare the producer path instead of the symlink 'alias/x.txt'") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule c: declare the producer path instead of the symlink 'alias'") != null);
+}
+
+test "[failure] - [workflow]: a writable path through a symlinked directory is refused" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.dir("real");
-    _ = try s.file("real/x", "x");
+    _ = try s.dir(".workz");
+    const outside = try s.dir("outside");
+    _ = try s.dir("w");
     try s.link("alias", "real");
-    var problem: workflow.Problem = .{};
-    defer testing.allocator.free(problem.message);
-    const text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"real/x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
-        "[[rules]]\nname = \"b\"\ninput = [\"alias/x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n";
-    try testing.expectError(error.Invalid, loadText(&s, text, &problem));
-    try testing.expect(std.mem.endsWith(u8, problem.message, ": rule b: declare the producer path instead of the symlink 'alias/x'"));
+    try s.link("rec", ".workz");
+    try s.link("w/out", outside);
+
+    const msg = try problemsIn(&s, head ++ rule1("a", "output = [\"real/o\"]\n") ++
+        rule1("b", "output = [\"alias/o\"]\n") ++
+        rule1("c", "output = [\"rec/o.txt\"]\nlog = \"rec/state.json\"\n") ++
+        rule1("d", "output = [\"d.txt\"]\nbenchmark = \"alias/d.tsv\"\nworkdir = \"w/out/sub\"\n"));
+    defer testing.allocator.free(msg);
+
+    // Two spellings of one file, an output and a log reaching the records,
+    // a benchmark through an alias and a workdir leaving the working directory.
+    try testing.expect(std.mem.indexOf(u8, msg, "rule b: 'alias/o' passes through a symlinked directory; name it by its real path") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule c: 'rec/o.txt' passes through a symlinked directory; name it by its real path") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule c: 'rec/state.json' passes through a symlinked directory; name it by its real path") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule d: 'alias/d.tsv' passes through a symlinked directory; name it by its real path") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule d: workdir 'w/out/sub' passes through a symlinked directory; name it by its real path") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule a") == null);
+}
+
+test "[failure] - [workflow]: declarations that cannot all hold are refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const a_log = try s.file("a.log", "");
+    const b_log = try std.fs.path.join(testing.allocator, &.{ s.path, "b.log" });
+    defer testing.allocator.free(b_log);
+    const linux = std.os.linux;
+    const az = try testing.allocator.dupeZ(u8, a_log);
+    defer testing.allocator.free(az);
+    const bz = try testing.allocator.dupeZ(u8, b_log);
+    defer testing.allocator.free(bz);
+    _ = try sys.check(linux.linkat(linux.AT.FDCWD, az, linux.AT.FDCWD, bz, 0));
+    defer _ = linux.unlinkat(linux.AT.FDCWD, bz, 0);
+
+    const empty = try problemsIn(&s, "[workflow]\nname = \" \"\n\n" ++
+        "[[rules]]\nname = \"empty\"\noutput = [\"e.txt\"]\nshell = \"  \"\nmemory = \"1M\"\n");
+    defer testing.allocator.free(empty);
+    const msg = try problemsIn(&s, head ++
+        rule1("files", "output = [\"a\", \"a/b\"]\nlog = \"a/c\"\n") ++
+        rule1("wd", "output = [\"w.txt\"]\nworkdir = \"w.txt\"\n") ++
+        rule1("la", "output = [\"la.txt\"]\nlog = \"a.log\"\n") ++
+        rule1("lb", "output = [\"lb.txt\"]\nlog = \"b.log\"\n"));
+    defer testing.allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, empty, "workflow.name must not be empty") != null);
+    try testing.expect(std.mem.indexOf(u8, empty, "rule empty: shell is empty") != null);
+    for ([_][]const u8{
+        "rule files: 'a/b' needs 'a' to be a directory, but rule files writes that path as a file",
+        "rule files: 'a/c' needs 'a' to be a directory, but rule files writes that path as a file",
+        "rule wd: workdir 'w.txt' is a directory, but rule wd writes that path as a file",
+        "a log or benchmark is a hard link to a log or benchmark of rule l",
+    }) |want| if (std.mem.indexOf(u8, msg, want) == null) {
+        std.debug.print("message: {s}\nexpected to contain: {s}\n", .{ msg, want });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "[failure] - [workflow]: a rule cannot write inside its own directory input" {
+    var s = try Scratch.init();
+    defer s.deinit();
+
+    const msg = try problemsIn(&s, head ++ rule1("a", "input = [\"d\"]\noutput = [\"d/result\"]\n") ++
+        rule1("b", "input = [\".\"]\noutput = [\"b.txt\"]\nlog = \"logs/b.log\"\n") ++
+        rule1("c", "input = [\"e\"]\noutput = [\"c.txt\"]\nworkdir = \"e/tmp\"\n") ++
+        rule1("ok", "input = [\"d-other\"]\noutput = [\"d-other.txt\"]\n"));
+    defer testing.allocator.free(msg);
+
+    try testing.expect(std.mem.indexOf(u8, msg, "rule a: 'd/result' is inside its directory input 'd'; write it outside that directory") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule b: 'b.txt' is inside its directory input '.'; write it outside that directory") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule b: 'logs/b.log' is inside its directory input '.'; write it outside that directory") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule c: workdir 'e/tmp' is inside its directory input 'e'; write it outside that directory") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule ok") == null);
 }
 
 test "a shared timeout belongs to a service" {
@@ -491,6 +596,10 @@ test "[unit] - [schema]: every key the parser accepts has a type in the schema" 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text.written(), .{});
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("properties").?.object.get("rules") != null);
+    // The parser reads `description` and `author` only to ignore them.
+    const meta = parsed.value.object.get("properties").?.object.get("workflow").?.object.get("properties").?.object;
+    for ([_][]const u8{ "description", "author" }) |k| try testing.expect(meta.get(k).?.object.get("type") == null);
+    try testing.expectEqualStrings("string", meta.get("name").?.object.get("type").?.string);
 }
 
 test "[unit] - [prepare]: a template becomes one rule per sample, with labels, gathers and literal braces" {
@@ -546,6 +655,8 @@ test "[unit] - [prepare]: mistakes in a template are named" {
         .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"dup.tsv\"\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "lists sample S1 twice" },
         .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutputs = [\"a.txt\"]\nshell = \"true\"\n", .want = "unknown key 'outputs'; did you mean 'output'?" },
         .{ .text = "[workflow]\nname = \"p\"\n[[rules]]\nname = \"a\"\n", .want = "write rules as [[steps]]" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\ninput = \"in.txt\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "step a: input must be a list of paths" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [1]\nshell = \"cat {output}\"\n", .want = "step a: output must be a list of paths" },
     }, 0..) |c, k| {
         var name_buf: [16]u8 = undefined;
         const path = try s.file(try std.fmt.bufPrint(&name_buf, "t{d}.toml", .{k}), c.text);
@@ -558,6 +669,32 @@ test "[unit] - [prepare]: mistakes in a template are named" {
             return error.TestUnexpectedResult;
         }
     }
+}
+
+test "[regression] - [prepare]: dotted names stay one table, and {threads} is the threads the rule gets" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.file("pipeline.toml", "[workflow]\nname = \"p\"\n[defaults]\nthreads = 2\nmemory = \"1M\"\n" ++
+        "[resource_groups.\"disk.io\"]\nmax = 1\n[resource_groups.disk-2]\nmax = 1\n[shared.\"ref.index\"]\npath = \"ref\"\n" ++
+        "[[steps]]\nname = \"d\"\noutput = [\"d.txt\"]\nshell = \"echo {threads} > d.txt\"\n" ++
+        "[[steps]]\nname = \"r\"\noutput = [\"r.txt\"]\nthreads = 1\nresources = { threads = 3 }\nshell = \"echo {threads} > r.txt\"\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+
+    try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.\"disk.io\"]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[resource_groups.disk-2]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "[shared.\"ref.index\"]\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 2 > d.txt\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"echo 3 > r.txt\"") != null);
+    var wproblem: workflow.Problem = .{};
+    defer testing.allocator.free(wproblem.message);
+    var wf = try loadText(&s, text, &wproblem);
+    defer wf.deinit();
+    try testing.expectEqualStrings("disk.io", wf.groups[0].name);
+    try testing.expectEqualStrings("ref.index", wf.shared[0].name);
 }
 
 test "[unit] - [prepare]: --check reads rule names that a comment follows" {

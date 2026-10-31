@@ -88,6 +88,8 @@ const Scope = struct {
     input: ?[]const u8 = null,
     output: ?[]const u8 = null,
     threads: ?[]const u8 = null,
+    /// `[defaults] threads` of the template, for a step that sets none.
+    default_threads: ?toml.Value = null,
 
     fn get(self: Scope, name: []const u8) ?[]const u8 {
         if (self.row) |row| if (self.sheet.?.column(name)) |c| return row[c];
@@ -201,9 +203,15 @@ fn writeValue(w: *std.Io.Writer, v: toml.Value) !void {
     }
 }
 
-/// A table of the template copied as written, under its header.
-fn writeTable(w: *std.Io.Writer, header: []const u8, t: *const toml.Table) !void {
-    try w.print("[{s}]\n", .{header});
+/// A table of the template copied as written, under its header `[name]`,
+/// or `[name.key]` with `key` quoted as a key must be.
+fn writeTable(w: *std.Io.Writer, name: []const u8, key: ?[]const u8, t: *const toml.Table) !void {
+    try w.print("[{s}", .{name});
+    if (key) |k| {
+        try w.writeByte('.');
+        try writeKey(w, k);
+    }
+    try w.writeAll("]\n");
     var it = t.iterator();
     while (it.next()) |e| {
         try writeKey(w, e.key_ptr.*);
@@ -249,14 +257,26 @@ fn ruleValue(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, v: 
     }
 }
 
-fn joined(a: Allocator, v: ?toml.Value) ![]const u8 {
-    const arr = (v orelse return "").array;
+/// A step's `input` or `output` list as the shell's `{input}` or
+/// `{output}`: its paths joined by spaces.
+fn joined(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v: ?toml.Value) Error![]const u8 {
+    const list = v orelse return "";
+    if (list != .array) return fail(a, problem, "step {s}: {s} must be a list of paths", .{ step, key });
     var out: std.ArrayList(u8) = .empty;
-    for (arr.items, 0..) |item, k| {
+    for (list.array.items, 0..) |item, k| {
+        if (item != .string) return fail(a, problem, "step {s}: {s} must be a list of paths", .{ step, key });
         if (k > 0) try out.append(a, ' ');
-        if (item == .string) try out.appendSlice(a, item.string);
+        try out.appendSlice(a, item.string);
     }
     return out.items;
+}
+
+/// The threads of a rule as the workflow parser settles them: its resources'
+/// threads, else its own, else the template's defaults, else one.
+fn effectiveThreads(a: Allocator, values: *const std.StringArrayHashMapUnmanaged(toml.Value), default_threads: ?toml.Value) ![]const u8 {
+    const res_threads = if (values.get("resources")) |res| (if (res == .table) res.table.get("threads") else null) else null;
+    const t = res_threads orelse values.get("threads") orelse default_threads orelse return "1";
+    return if (t == .integer) try std.fmt.allocPrint(a, "{d}", .{t.integer.value}) else "1";
 }
 
 /// Writes the rule of step `name` for one sample (`row`), or the step's
@@ -272,9 +292,9 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
     // `shell` last: {input}, {output} and {threads} name the rule's own.
     if (step.get("shell")) |sh| {
         var s = scope;
-        s.input = try joined(a, values.get("input"));
-        s.output = try joined(a, values.get("output"));
-        s.threads = if (values.get("threads")) |t| (if (t == .integer) try std.fmt.allocPrint(a, "{d}", .{t.integer.value}) else null) else null;
+        s.input = try joined(a, problem, name, "input", values.get("input"));
+        s.output = try joined(a, problem, name, "output", values.get("output"));
+        s.threads = try effectiveThreads(a, &values, scope.default_threads);
         try values.put(a, "shell", try ruleValue(a, problem, s, "shell", sh));
     }
     const sample: ?[]const u8 = if (scope.row) |row| row[scope.sheet.?.column("sample").?] else null;
@@ -362,7 +382,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
     try w.print("# Written by `workz prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
     for ([_][]const u8{ "workflow", "defaults" }) |name| if (doc.get(name)) |v| {
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
-        try writeTable(w, name, v.table);
+        try writeTable(w, name, null, v.table);
     };
     for ([_][]const u8{ "resource_groups", "shared" }) |name| if (doc.get(name)) |v| {
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
@@ -372,7 +392,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
             // A shared input may use the params, such as an index's path.
             const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .step = e.key_ptr.* };
             const filled = try ruleValue(a, problem, scope, name, e.value_ptr.*);
-            try writeTable(w, try std.fmt.allocPrint(a, "{s}.{s}", .{ name, e.key_ptr.* }), filled.table);
+            try writeTable(w, name, e.key_ptr.*, filled.table);
         }
     };
 
@@ -395,7 +415,8 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
             if (workflow.closest(&workflow.rule_keys, key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
             return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });
         }
-        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .step = name };
+        const defaults = if (doc.get("defaults")) |d| (if (d == .table) d.table.get("threads") else null) else null;
+        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .step = name, .default_threads = defaults };
         if (step.get("for_each")) |fe| {
             if (fe != .string or !eql(u8, fe.string, "sample")) return fail(a, problem, "step {s}: for_each takes \"sample\"", .{name});
             const sh = sheet orelse return fail(a, problem, "step {s}: for_each = \"sample\" needs a [samples] table", .{name});

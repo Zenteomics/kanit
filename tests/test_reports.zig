@@ -141,7 +141,7 @@ test "[regression] - [report]: a launch that reused rules shows them with the ru
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const launch = try std.fs.path.join(arena.allocator(), &.{ s.path, second });
-    const reused = try workz.model.reusedAttempts(testing.allocator, arena.allocator(), launch, &.{"s1__ALIGN"});
+    const reused = try workz.model.reusedAttempts(testing.allocator, arena.allocator(), launch, &.{"s1__ALIGN"}, null);
     try testing.expectEqual(@as(usize, 1), reused.len);
     try testing.expectEqualStrings("s1__ALIGN", reused[0].rule);
     try testing.expectEqual(@as(i64, 2), reused[0].attempt);
@@ -181,11 +181,11 @@ test "[regression] - [report]: a reused rule's run may be a retry beyond its dec
         _ = try s.file(try std.fmt.allocPrint(a, "{s}/record.json", .{dir}), try std.fmt.allocPrint(a, "{{\"rule\":\"sort\",\"attempt\":{d},\"status\":\"{s}\",\"wall_s\":1.0,\"cpu_s\":1.0,\"request\":{{\"threads\":1,\"memory_mib\":64}}}}", .{ n, status }));
     }
     const launch = try std.fs.path.join(a, &.{ s.path, second });
-    const reused = try workz.model.reusedAttempts(testing.allocator, a, launch, &.{"sort"});
+    const reused = try workz.model.reusedAttempts(testing.allocator, a, launch, &.{"sort"}, null);
     try testing.expectEqual(@as(usize, 1), reused.len);
     try testing.expectEqual(@as(i64, 5), reused[0].attempt);
     // The launch that made it lists all five, in order.
-    const rows = try workz.model.attempts(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, first }));
+    const rows = try workz.model.attempts(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, first }), null);
     try testing.expectEqual(@as(usize, 5), rows.len);
     for (rows, 1..) |r, n| try testing.expectEqual(@as(i64, @intCast(n)), r.attempt);
 }
@@ -225,6 +225,48 @@ test "[regression] - [report]: a step killed for its memory is sized above the r
             try testing.expectEqual(@as(f64, 128), st.sizing.memory_mib);
         }
     }
+}
+
+test "[regression] - [report]: memory sizes and bounds follow what was held and reserved, and an unreadable record is counted" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/sort", "launch/attempts/sort/001", "launch/attempts/c1", "launch/attempts/c1/001", "launch/attempts/c2", "launch/attempts/c2/001", "launch/attempts/bad", "launch/attempts/bad/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":96}
+        \\
+    );
+    // Several processes at once: 64 MiB in the largest, 256 MiB anonymous
+    // memory in the cgroup, 300 MiB with page cache.
+    _ = try s.file("launch/attempts/sort/001/record.json",
+        \\{"rule":"sort","attempt":1,"status":"completed","reason":"","wall_s":1.0,"cpu_s":1.0,"request":{"threads":1,"memory_mib":512},
+        \\"rusage":{"maxrss_kib":65536},"cgroup":{"memory_peak":314572800,"anon_peak":268435456,"oom_kill":0}}
+    );
+    // Two container rules of 64 MiB that each reserved 96 MiB with their client.
+    for ([_][]const u8{ "launch/attempts/c1/001/record.json", "launch/attempts/c2/001/record.json" }, [_][]const u8{ "c1", "c2" }) |p, name| {
+        const text = try std.fmt.allocPrint(testing.allocator, "{{\"rule\":\"{s}\",\"attempt\":1,\"status\":\"completed\",\"reason\":\"\",\"wall_s\":3.0,\"cpu_s\":0.0,\"request\":{{\"threads\":1,\"memory_mib\":64,\"reserved_mib\":96}},\"rusage\":{{\"maxrss_kib\":1024}}}}", .{name});
+        defer testing.allocator.free(text);
+        _ = try s.file(p, text);
+    }
+    _ = try s.file("launch/attempts/bad/001/record.json", "{\"rule\":");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+
+    try testing.expectEqual(@as(usize, 1), l.unreadable.items.len);
+    try testing.expect(std.mem.endsWith(u8, l.unreadable.items[0], "/attempts/bad/001/record.json"));
+    for (l.steps) |st| if (std.mem.eql(u8, st.name, "sort")) {
+        try testing.expect(st.used_is_peak);
+        try testing.expectEqual(@as(f64, 256), st.used_mib);
+        try testing.expect(st.sizing.memory_mib >= 256);
+    };
+    const memory = for (l.bounds) |b| {
+        if (b.kind == .memory) break b;
+    } else return error.TestUnexpectedResult;
+    // 2 x 96 MiB for 3 s, and 512 MiB for 1 s, on a 96 MiB budget.
+    try testing.expectApproxEqAbs(@as(f64, (2.0 * 96.0 * 3.0 + 512.0) / 96.0), memory.seconds, 1e-6);
 }
 
 /// Writes a launch of three rules into `name`: p1 and p2 make the inputs
@@ -442,7 +484,7 @@ test "[unit] - [report]: the attempt table, its JSON and the suggestions keep th
     const a = arena.allocator();
     try chainLaunch(&s, a, "launch", 1);
     const dir = try std.fs.path.join(a, &.{ s.path, "launch" });
-    const rows = try workz.model.attempts(testing.allocator, a, dir);
+    const rows = try workz.model.attempts(testing.allocator, a, dir, null);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try workz.report.writeTsv(&out.writer, rows);

@@ -54,7 +54,8 @@ pub const Context = struct {
     /// come out the same.
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
-        self.extras = try self.resolveExtras(mask);
+        // A launch passes the extras of the images it resolved.
+        if (self.extras.len == 0) self.extras = try self.resolveExtras(mask);
         const out = try self.a.alloc(Decision, self.wf.rules.len);
         for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
         for (self.g.order) |i| {
@@ -239,7 +240,8 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
 }
 
 /// Checks recorded outputs of the selected rules. With `content`, hashes
-/// them, compares against stored digests and stores missing ones.
+/// them, compares against stored digests and stores missing ones. False
+/// when an output differs or a selected rule has no record to check.
 pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.Identities, wf: *const workflow.Workflow, mask: []const bool, content: bool) !bool {
     var ok = true;
     var checked: usize = 0;
@@ -286,7 +288,7 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
     if (unrecorded > 0) try w.print("; {d} selected {s} no record to check", .{ unrecorded, if (unrecorded == 1) "rule has" else "rules have" });
     try w.writeAll("\n");
     if (stored > 0) try st.save(gpa);
-    return ok;
+    return ok and unrecorded == 0;
 }
 
 pub fn loadState(gpa: Allocator, root: []const u8, a: Allocator) !state.State {
@@ -301,35 +303,35 @@ pub const Budget = struct {
     defaults: bool,
 };
 
-/// Checks every selected rule against the budget as `run` does before a
-/// launch: its threads, and its memory with its shared inputs, each held
-/// once, and a container rule's Podman client. Returns how many rules
-/// cannot fit, so the launch would be refused.
-pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask: []const bool, b: Budget) !usize {
+/// Checks the rules that would run (`runs`, from the plan's decisions)
+/// against the budget as `run` does before a launch: its threads, and its
+/// memory with its shared inputs, each held once, and a container rule's
+/// Podman client. A reused rule needs nothing. Returns how many rules cannot
+/// fit or shared inputs cannot be measured, so the launch would be refused.
+pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, runs: []const bool, reused: usize, b: Budget) !usize {
     const units = @import("units.zig");
     const run = @import("run.zig");
     try w.print("\nbudget: {d} {s}, ", .{ b.threads, if (b.threads == 1) "thread" else "threads" });
     try units.size(w, @floatFromInt(b.memory_mib));
     try w.writeAll(if (b.defaults) " (the defaults; give --max-threads and --max-memory as for run)\n" else "\n");
+    if (reused > 0) {
+        try units.count(w, reused, "reused rule needs", "reused rules need");
+        try w.writeAll(" no budget\n");
+    }
 
     // Each shared input's memory, counted once.
-    const shared = try a.alloc(?u64, wf.shared.len);
-    for (wf.shared, shared) |s, *mib| {
-        mib.* = null;
-        var used = false;
-        for (wf.rules, 0..) |r, i| if (mask[i]) for (r.shared) |n| {
-            if (std.mem.eql(u8, n, s.name)) used = true;
-        };
-        if (!used) continue;
-        if (s.memory_mib) |m| {
-            mib.* = m + run.container_client_mib;
-        } else if (s.path_abs) |p| {
-            // Mapped files take their pages; a file not there yet counts 0.
-            const bytes = state.pageBytes(gpa, p) catch 0;
-            mib.* = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
-        }
+    var failure: []const u8 = "";
+    const shared = run.sharedSizes(gpa, a, wf, runs, &failure) catch |err| switch (err) {
+        error.Unmeasurable => {
+            try w.print("cannot measure {s}: run would refuse the launch\n", .{failure});
+            return 1;
+        },
+        else => return err,
+    };
+    for (wf.shared, shared) |s, z| {
+        const size = z orelse continue;
         try w.print("shared {s}: ", .{s.name});
-        try units.size(w, @floatFromInt(mib.*.?));
+        try units.size(w, @floatFromInt(size.reserve_mib));
         try w.print(" held once{s}\n", .{if (s.memory_mib != null) ", with its Podman client" else ""});
     }
 
@@ -337,11 +339,8 @@ pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const w
     var largest_need: u64 = 0;
     var refused: usize = 0;
     for (wf.rules, 0..) |r, i| {
-        if (!mask[i]) continue;
-        var need = run.reservedMib(&r);
-        for (r.shared) |n| if (wf.sharedIndex(n)) |si| {
-            need += shared[si] orelse 0;
-        };
+        if (!runs[i]) continue;
+        const need = run.neededMib(&r, shared);
         if (need > largest_need) {
             largest_need = need;
             largest = i;

@@ -27,6 +27,15 @@ pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ root, ".workz" });
 }
 
+/// Makes the records directory `records`, readable by its owner alone: it
+/// holds every attempt's output and the environment values passed to rules.
+pub fn makeRecordsDir(gpa: Allocator, records: []const u8) !void {
+    try sys.mkdirAll(gpa, records);
+    const p = try sys.z(gpa, records);
+    defer gpa.free(p);
+    _ = try sys.check(linux.fchmodat(linux.AT.FDCWD, p, 0o700));
+}
+
 /// Where an attempt keeps its copies of the diagnostics files the rule
 /// wrote as `written`.
 pub fn diagnosticPaths(a: Allocator, dir: []const u8, written: []const []const u8) ![]const []const u8 {
@@ -104,6 +113,22 @@ pub fn latestLaunch(gpa: Allocator, a: Allocator, records: []const u8) !?[]const
     const names = try launchNames(gpa, a, records);
     if (names.len == 0) return null;
     return try std.fs.path.join(a, &.{ records, "launches", names[names.len - 1] });
+}
+
+/// Whether the launch in `launch_dir` (`<records>/launches/<id>`) can still
+/// change: it has no summary, an engine holds the working directory's lock,
+/// and it is the newest launch, the only one a held lock can belong to. A
+/// launch without a summary that is not active ended without recording its
+/// end, as when its engine was killed.
+pub fn launchActive(gpa: Allocator, launch_dir: []const u8) bool {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    if (sys.exists(gpa, std.fs.path.join(a, &.{ launch_dir, "summary.json" }) catch return false)) return false;
+    const rec = std.fs.path.dirname(std.fs.path.dirname(launch_dir) orelse return false) orelse return false;
+    if (!running(gpa, rec)) return false;
+    const latest = (latestLaunch(gpa, a, rec) catch return false) orelse return false;
+    return std.mem.eql(u8, std.fs.path.basename(latest), std.fs.path.basename(launch_dir));
 }
 
 /// Append-only JSON Lines event stream. Each line is one object with a

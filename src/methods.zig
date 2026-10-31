@@ -91,10 +91,16 @@ const Launch = struct {
     versions: ?Value = null,
 };
 
+/// A JSON record file, or null when there is none; one that does not parse
+/// is named on standard error and read as absent.
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| if (err == error.OutOfMemory) err else null;
+    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        std.debug.print("workz: {s} is not valid JSON; its fields are left out\n", .{path});
+        return null;
+    };
 }
 
 fn str(v: ?Value, key: []const u8) []const u8 {

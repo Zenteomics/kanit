@@ -180,7 +180,7 @@ report	1	1	0.99	1	256	5	process	2	64	measured	true
 
 - `runs` counts the step's rules with a completed run, the latest of each. A suggestion from one or two runs covers only the inputs those runs had; the HTML page says how many runs it rests on.
 - `threads_used` is the largest CPU time over wall time of any run. `suggest_threads` rounds it up, ignoring a surplus under 0.05, and never exceeds the current request.
-- `used_mib` is the largest memory any run used, as `used_basis` says: `process` is the largest resident memory of one process; `cgroup` is the cgroup peak, for rules that use shared inputs or containers, whose work the processes' resident memory misses.
+- `used_mib` is the largest memory any run used, as `used_basis` says: `process` is the largest resident memory of one process; `cgroup` is the cgroup peak, for rules that use shared inputs or containers, whose work the processes' resident memory misses, or the anonymous memory sampled in the cgroup when several processes at once held more than the largest of them.
 - `peak_mib` is the largest cgroup peak, page cache included.
 - `suggest_mib` is `used_mib` plus 20%, rounded up to a multiple of 64 MiB, and at least 64 MiB.
 - `note` is `measured`; `out_of_memory` when an attempt was killed for exceeding its memory, and the suggestion is then at least half again the request it exceeded; or `idle` when most runs were idle, and the suggestion keeps the current request.

@@ -61,6 +61,8 @@ pub fn errorText(err: anyerror) []const u8 {
         error.IsDir => "it is a directory",
         error.NoSpace => "no space left on the device",
         error.FileTooBig => "the file is too large",
+        error.NestedDirectorySymlink => "it holds a symlink to a directory; declare that directory on its own",
+        error.DirectoryTooDeep => "its directories nest more than 64 levels deep",
         else => @errorName(err),
     };
 }
@@ -448,6 +450,15 @@ pub fn absolute(gpa: Allocator, base: []const u8, path: []const u8) ![]u8 {
 }
 
 /// Resolves symlinks in `path` through /proc, for alias checks.
+/// The target a symlink names, as written; owned by the caller.
+pub fn readlink(gpa: Allocator, path: []const u8) ![]u8 {
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    var buf: [4096]u8 = undefined;
+    const n = try check(linux.readlinkat(linux.AT.FDCWD, p, &buf, buf.len));
+    return gpa.dupe(u8, buf[0..n]);
+}
+
 pub fn realpath(gpa: Allocator, path: []const u8) !?[]u8 {
     const p = try z(gpa, path);
     defer gpa.free(p);

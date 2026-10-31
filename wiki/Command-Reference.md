@@ -64,7 +64,7 @@ Prints, for every selected rule, whether a run would run it or reuse it, and why
 | `--pass-env`    | NAME     | as `run --pass-env` would; repeatable           |
 | `--threads`     | STEP=N   | as `run --threads` would; repeatable            |
 
-`--budget` then checks each selected rule's threads, and its memory with its shared inputs, each counted once, and a container rule's Podman client, against the budget a launch with the same `--max-threads` and `--max-memory` would have: it names each rule that does not fit and the largest need, and exits 1 when `run` would refuse the launch.
+`--budget` then checks the threads of each rule that would run, a reused rule needing none, and its memory with its shared inputs, each counted once, and a container rule's Podman client, against the budget a launch with the same `--max-threads` and `--max-memory` would have: it names each rule that does not fit, a shared input it cannot measure, and the largest need, and exits 1 when `run` would refuse the launch.
 
 ## explain
 
@@ -124,9 +124,10 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 | `--json`             |            | off               | JSON summary, also on a terminal           |
 | `--no-color`         |            | off               | no colors on a terminal                    |
 
-- Sizes take `K`, `M`, `G` or `T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` kills at once.
+- Sizes take `K`, `M`, `G` or `T`, up to `1024T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` kills at once.
 - `--threads STEP=N` gives every rule of step STEP a request of N threads in this launch, for trying another thread count without editing the workflow. The request is part of each rule's key, so those rules run again with it, and again with the workflow's request in a launch without it ([Resources and scheduling](Resources-and-Scheduling.md#trying-another-thread-count)).
 - The [input manifest](Reuse-and-Resume.md#input-manifests) is a JSON object of absolute paths to `"sha256:<hex>"` digests, or to a digest with a stamp.
+- `--slice` places the run's scope, so it needs isolation: `run` refuses it with `--no-isolation`.
 
 ## watch
 
@@ -149,7 +150,7 @@ Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([key
 workz status [WORKFLOW] [--history [N]] [--json] [--launch ID] [--no-color]
 ```
 
-Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`.
+Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`. A launch whose engine ended without recording its end, as when it was killed, shows what it recorded with `"status": "unfinished"`, says so on standard error and exits 1.
 
 | Option       | Argument | Default | Meaning                                      |
 | ------------ | -------- | ------- | -------------------------------------------- |
@@ -174,7 +175,7 @@ Prints the standard output and error of the rule's newest attempt, then, without
 | `--stderr`         |          | standard error only                             |
 | `--launch`         | ID       | look in this launch                             |
 | `--attempt`        | N        | this attempt instead of the newest              |
-| `-f`, `--follow`   |          | keep printing until the attempt ends            |
+| `-f`, `--follow`   |          | keep printing until the attempt or launch ends  |
 
 Give `--stdout` or `--stderr`, not both; without either, `logs` prints both streams.
 
@@ -186,7 +187,7 @@ workz control [WORKFLOW] retry RULE
 workz control [WORKFLOW] cancel
 ```
 
-Sends a command to the running launch ([Steering a running launch](Running-Workflows.md#steering-a-running-launch)). It fails if the newest launch has ended, or if RULE is not one of the rules the launch runs.
+Sends a command to the running launch ([Steering a running launch](Running-Workflows.md#steering-a-running-launch)). It fails if the newest launch has ended, if no engine runs it any longer, or if RULE is not one of the rules the launch runs.
 
 ## report
 
@@ -215,7 +216,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 workz verify [WORKFLOW] [--content]
 ```
 
-Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. Unrecorded rules are not differences: the exit status stays 0.
+Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs.
 
 ## clean
 

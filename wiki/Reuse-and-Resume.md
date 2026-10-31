@@ -46,13 +46,13 @@ For a colon-separated list such as `PATH` it names the entries added or removed,
 
 No other variable is part of the key. Host rules also receive `HOME`, `USER`, `LOGNAME`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM`, but a change to one of them reruns nothing; name a variable with `--pass-env` to pass it and key it. Everything else stays out of rules ([Running workflows](Running-Workflows.md#what-a-command-sees)).
 
-The engine key is 3. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action.
+The engine key is 4. Rebuilding workz reruns nothing: the executable's own digest is recorded in each launch, not in rule keys. Upgrading reruns rules only when the new version changes the engine key or what it records about inputs, and its changelog says so first, among the changes that need action.
 
 ## File identity
 
 A file's identity is its inode, size, and modification and change times, which workz reads with one `statx` call. A rewrite changes them even when it restores the old modification time, because programs cannot set the change time. workz therefore notices every edit without reading the file. The device number is left out: btrfs numbers its subvolumes anew at each mount, so it would change with every reboot.
 
-A directory's identity covers every file below it, so adding, removing or editing any of them changes it.
+A directory's identity covers every entry below it: each file's identity, and each directory by name, so an empty directory counts. Adding, removing, renaming or editing any of them changes it. A dangling symlink counts as missing, so the identity changes when its target appears. A symlink to a directory below a directory input is refused, with its path: its target's contents would go unseen. Declare the directory it names as an input of its own. `.workz/` directories are left out, since workz writes into them while rules run.
 
 ## Moving a project
 
@@ -139,7 +139,7 @@ Both work with `plan` and `explain` too, so you can see the effect first. Combin
 
 ## Previous outputs
 
-Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. A rule therefore never sees its own old outputs, and the bytes a rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
+Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. If the attempt fails, is stopped or cannot start, workz moves them back, and the rule keeps its record: `verify` and the next `plan` still see the last result, and what the failed attempt wrote goes to its `failed/` directory. A rule therefore never sees its own old outputs, and the bytes a completed rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
 
 ## Verify outputs
 

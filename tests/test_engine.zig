@@ -69,6 +69,23 @@ test "a rule that joins a service depends on the rules writing what the service 
     try testing.expect(std.mem.endsWith(u8, problem.message, ": rule use joins service 'idx' and writes idx/extra, which the service loads; the service would start before the file exists"));
 }
 
+test "[regression] - [workflow]: a file mounted into a service is an input of every rule that joins it" {
+    const text = "[shared.idx]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"1G\"\nmounts = { \"conf/load.cfg\" = \"/cfg\" }\n\n" ++
+        "[[rules]]\nname = \"conf\"\noutput = [\"conf/load.cfg\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"use\"\noutput = [\"u\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ text, &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+
+    try testing.expectEqual(@as(usize, 1), wf.rules[1].input.len);
+    try testing.expectEqualStrings("conf/load.cfg", wf.rules[1].input[0]);
+    try testing.expectEqualSlices(usize, &.{0}, g.parents[1]);
+}
+
 test "a directory input depends on every rule writing inside it, and not on a sibling" {
     var s = try Scratch.init();
     defer s.deinit();
@@ -77,11 +94,10 @@ test "a directory input depends on every rule writing inside it, and not on a si
         "[[rules]]\nname = \"w1\"\noutput = [\"d/a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"w2\"\noutput = [\"d/sub/b.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"sib\"\noutput = [\"d-x/c.txt\", \"d.y\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
-        "[[rules]]\nname = \"read\"\ninput = [\"d\"]\noutput = [\"d/n.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+        "[[rules]]\nname = \"read\"\ninput = [\"d\"]\noutput = [\"n.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
     defer wf.deinit();
     var g = try workz.graph.build(testing.allocator, &wf, &problem);
     defer g.deinit();
-    // Its own output inside the directory is no dependency.
     try testing.expectEqualSlices(usize, &.{ 0, 1 }, g.parents[3]);
     try testing.expect(g.produces(wf.rules[3].input_abs[0]));
 }

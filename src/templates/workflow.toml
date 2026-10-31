@@ -9,6 +9,9 @@
 #   workz plan --budget               what would run, and whether it fits
 #   workz run workflow.toml
 #   workz watch
+#
+# workz keeps every attempt's output and records in .workz/ beside this
+# file; add .workz/ to the project's .gitignore.
 
 [workflow]
 name = "example"

@@ -31,7 +31,7 @@ workz runs a rule's command only after every rule that produces one of its input
 - **Declare every file the command reads**, including scripts, reference files and configuration. An undeclared input is invisible: editing it never reruns the rule, and nothing orders the rule after its producer.
 - **Declare every file the command must leave behind.** After the command exits 0, workz checks that each output exists as a regular file; a missing one fails the attempt with `exited 0 without output <path>`. Temporary files need not be declared.
 - **Outputs live inside the working directory**, as relative paths without `..`, and outside `.workz/`. Inputs may be anywhere.
-- **Directories can be inputs.** A directory's identity covers every file below it, so adding or changing any of them reruns the rule. An index such as `ref/bowtie2` is a natural directory input.
+- **Directories can be inputs.** A directory's identity covers every file and directory below it, so adding, removing or changing any of them reruns the rule. A rule cannot write inside its own directory input. An index such as `ref/bowtie2` is a natural directory input.
 - **There are no wildcards.** Paths name files exactly; `*`, `?`, `[ ]` and `{ }` are errors. Inside `shell`, use whatever the shell allows.
 
 workz creates the directory of every output before an attempt starts, and moves any output already there into the attempt's `previous/` directory, so a command always starts from a clean slate and earlier bytes are never lost ([Reuse and resume](Reuse-and-Resume.md#previous-outputs)).
@@ -84,7 +84,7 @@ wrote .../workflow.toml: 3 rules from 2 steps. Next: workz graph --by step, then
 ```
 
 - A step with `for_each = "sample"` becomes one rule per row, named `SAMPLE__STEP` (`s1__trim`) and labelled with its `step` and `sample`, so every report and view groups by them. A step without it is one rule, named as the step.
-- `{name}` takes a column of the sheet, a `[params]` value, or `{step}`. In `shell`, `{input}`, `{output}` and `{threads}` are the rule's own inputs, outputs (space-separated) and threads.
+- `{name}` takes a column of the sheet, a `[params]` value, or `{step}`. In `shell`, `{input}`, `{output}` and `{threads}` are the rule's own inputs, outputs (space-separated) and threads, as the rule gets them: from `resources`, the step, or `[defaults]`.
 - In a step without `for_each`, a list element naming a sheet column becomes one element per sample: the report above reads every sample's file.
 - Only those names are replaced. Other braces stay as written, so awk's `{print $1}` and the shell's `${HOME}` need no escaping; in a path, an unknown `{name}` is an error, and so is a column used outside a `for_each` step.
 - The workflow is checked as `validate` would before it replaces `workflow.toml`; one that is not valid is left beside it to read, and `workflow.toml` is unchanged.

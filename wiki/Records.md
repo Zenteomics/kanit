@@ -1,4 +1,4 @@
-Everything workz writes for itself lives in `.workz/` in the working directory. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, so a reader can check what it parses.
+Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, so a reader can check what it parses.
 
 ## Layout
 
@@ -26,6 +26,7 @@ Everything workz writes for itself lives in `.workz/` in the working directory. 
             stdout.log  stderr.log  the command's output
             record.json             what the attempt used and how it ended
             previous/               earlier outputs, moved aside before it ran
+            failed/                 what an attempt that did not complete left at its output paths
             diagnostics/            tails of the rule's diagnostics files, kept when it failed
 ```
 
@@ -68,7 +69,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 ```json
 {
   "engine": "workz 0.5.0 sha256:...",
-  "engine_key": 3,
+  "engine_key": 4,
   "launch": "20261027T224512.478-40c9943e",
   "status": "completed",
   "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },
@@ -88,18 +89,19 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `error` holds the reason a launch was refused or stopped, or `null`.
 - `engine_cost` is the CPU time and peak memory of the engine itself.
 - A refused launch counts every selected rule as `not_started`.
-- `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal.
+- `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal. For a launch whose engine ended without a summary, `status` prints the same fields with `"status": "unfinished"`.
 - In that running summary, `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
 - `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started, and `diagnostics`, the paths of the copies its last attempt kept ([Writing workflows](Writing-Workflows.md#diagnostics)).
 - `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
-- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/`, which stay until `workz clean --previous` removes them.
+- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/` and kept there, which stay until `workz clean --previous` removes them. Outputs put back after an attempt that did not complete are not counted.
 
 ## Attempt files
 
 - `command.sh` is the script that ran: for a host rule, `set -euo pipefail` followed by the rule's `shell`.
 - `request.json` holds `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
 - `stdout.log` and `stderr.log` are the command's output.
-- `record.json` is written last, when the attempt ends.
+- `record.json` is written last, when the attempt ends. An attempt that could not start, such as one whose workdir link would replace a file, gets one too, with `started` `null`.
+- `previous/` holds the earlier outputs moved aside before the attempt ran. When the attempt does not complete, workz moves them back to their paths, so the last result stays where its record says, and moves what the attempt left there into `failed/`.
 
 `record.json` fields:
 
@@ -109,12 +111,13 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `rule`, `attempt`      | which attempt                                              |
 | `status`, `reason`     | `completed`, `failed` or `cancelled`, and why              |
 | `exit_code`, `signal`  | how the command ended                                      |
-| `started`, `finished`  | UTC times                                                  |
+| `started`, `finished`  | UTC times; `started` is `null` if it never started         |
 | `wall_s`, `cpu_s`      | elapsed and CPU seconds                                    |
 | `cpu_source`           | `cgroup` or `rusage`                                       |
 | `rusage`               | `cpu_s` and `maxrss_kib` of the process tree               |
 | `cgroup`               | the attempt's cgroup counters, or `null` without isolation |
 | `request`              | `threads`, `memory_mib`, `groups`, `shared`, `container`   |
+| `request.reserved_mib` | memory admission reserved, a Podman client included        |
 | `labels`               | `step`, `sample`, `category`, `tool`; `declared` for each  |
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
 | `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
@@ -161,11 +164,12 @@ Rule events:
 - `task_blocked`, `task_reused`, `task_cancelling`: `rule`.
 - `task_timeout`: `rule`, `attempt`.
 - `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
+- `output_restored`: `rule`, `path`, `moved_from`, `bytes`, for an earlier output put back after an attempt that did not complete.
 - `output_changed`, `output_identity_refreshed`: `rule`, `path`.
 
 Shared input events:
 
-- `shared_loading`: `name`, `pid`, `cgroup`, and `path` and `bytes` for a file input, or `container` and `memory_mib` for a service.
+- `shared_loading`: `name`, `pid`, `cgroup`, and `path` and `bytes` for a file input, or `container`, `memory_mib` and `reserved_mib`, with its Podman client, for a service.
 - `shared_loaded`: `name`, `bytes`, `holder_file_bytes`.
 - `shared_released`: `name`, `memory_peak`, `cpu_s`, `users` (attempts that started using it while it was held) and `held_s`.
 - `shared_retry`: `name`, `reason`, `next_start`.

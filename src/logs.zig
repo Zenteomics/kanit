@@ -50,7 +50,8 @@ pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, op
 }
 
 /// Writes the attempt's logs. With `follow`, keeps writing what is appended
-/// until the attempt's record exists, then writes the rest and returns.
+/// until the attempt's record exists or its launch is no longer active,
+/// then writes the rest and returns.
 pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, opts: Options) !void {
     const names: []const []const u8 = switch (opts.stream) {
         .both => &.{ "stdout.log", "stderr.log" },
@@ -68,9 +69,13 @@ pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, op
     // Following both streams interleaves them as they grow.
     var offsets = [_]u64{ 0, 0 };
     const record = try std.fs.path.join(a, &.{ dir, "record.json" });
+    var paths: [2][]const u8 = undefined;
+    for (names, 0..) |n, k| paths[k] = try std.fs.path.join(a, &.{ dir, n });
+    // <launch>/attempts/<rule>/<NNN>
+    const launch_dir = std.fs.path.dirname(std.fs.path.dirname(std.fs.path.dirname(dir) orelse dir) orelse dir) orelse dir;
     while (true) {
-        const done = sys.exists(gpa, record);
-        for (names, 0..) |n, k| offsets[k] = try copy(gpa, w, try std.fs.path.join(a, &.{ dir, n }), offsets[k]);
+        const done = sys.exists(gpa, record) or !records.launchActive(gpa, launch_dir);
+        for (names, 0..) |_, k| offsets[k] = try copy(gpa, w, paths[k], offsets[k]);
         try w.flush();
         if (done) {
             if (opts.stream == .both) try diagnostics(gpa, a, w, dir);

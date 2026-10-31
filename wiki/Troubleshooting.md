@@ -46,11 +46,31 @@ workz: workflow.toml: 3 problems
 
 - `rule NAME: 'PATH' must be a relative path inside the working directory`: Outputs, logs and benchmarks are written inside the working directory. Use a relative path without `..`, or run with `-d` set to a directory that contains them.
 
-- `rule NAME: declare the producer path instead of the symlink 'PATH'`: The input is a symlink to another rule's output. Use the output's own path, so the dependency is visible to workz.
+- `rule NAME: declare the producer path instead of the symlink 'PATH'`: The input reaches another rule's output, or a directory it writes into, through a symlink. Use the output's own path, so the dependency is visible to workz.
+
+- `rule NAME: 'PATH' passes through a symlinked directory; name it by its real path`: An output, log, benchmark or workdir is written through a symlink to a directory. Write the path the symlink points to.
+
+- `rule NAME: 'PATH' is inside its directory input 'DIR'; write it outside that directory`: The rule would change its own input while it runs. Write the output, log, benchmark or workdir beside the directory, or name the input files one by one.
+
+- `cannot read input DIR: DIR/LINK is a symlink to a directory; declare the directory it names as an input of its own`: A directory input holds a symlink to a directory, whose contents workz would not see. Declare the linked directory as an input too, or name the inputs below the link explicitly.
 
 - `rule NAME must declare memory` and `rule NAME: invalid memory 'TEXT'`: Every rule needs a memory request, as a string such as `"512M"` or `"4G"`, on the rule, in its resources or in `[defaults]`.
 
 - `rule NAME uses undeclared resource group 'G'`, `rule NAME uses undeclared shared input 'S'` (with `; did you mean 'X'?` when a declared one is close): Declare the group under `[resource_groups.G]` or the input under `[shared.S]`, or fix the name.
+
+- `rule NAME: 'PATH' needs 'DIR' to be a directory, but rule OTHER writes that path as a file`: Two declarations cannot both hold: `DIR` cannot be a file and the directory `PATH` lies in. Rename one of them.
+
+- `rule NAME: a log or benchmark is a hard link to a log or benchmark of rule OTHER`: Both would write the same file. Remove the extra link, or give each rule its own file.
+
+- `step NAME: input must be a list of paths` (or `output`): A template step writes `input` and `output` as lists, such as `input = ["in.txt"]`.
+
+- `.workz/state.json cannot be read: it is not a valid workz state`: The resume state is damaged. Move it aside; the next launch runs every rule, and the launch directories keep every earlier attempt.
+
+- `PATH is not valid JSON`: A record in `.workz/` is damaged, so the command leaves it out, names it, and exits 1. A `summary.json` that cannot be read leaves the launch's result unknown; its events and attempt records remain.
+
+- `rule NAME lists shared input 'S' twice`: A shared input is held and counted once for a rule. List it once.
+
+- `input manifest entry is not a regular file: PATH`: A manifest digest covers one file's bytes. List the files inside a directory one by one.
 
 - `rule NAME uses the shared service 'S'; only container rules can join a service`: Services share memory through a container's IPC namespace, so the rule needs a `container`.
 

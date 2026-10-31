@@ -42,11 +42,17 @@ pub const Attempt = struct {
     cpu_s: f64,
     threads: f64,
     request_mib: f64,
+    /// What admission reserved for it, a container's Podman client
+    /// included; records that do not say reserved `request_mib`.
+    reserved_mib: ?f64 = null,
     /// Units of resource groups it held.
     groups: []const GroupUse = &.{},
     /// cgroup peak (includes page cache) and process peak RSS.
     peak_mib: ?f64,
     rss_mib: f64,
+    /// The largest anonymous memory the cgroup was seen to hold while the
+    /// attempt ran, sampled; null without isolation or in older records.
+    anon_mib: ?f64 = null,
     oom_kill: f64,
     limit_events: f64,
     waited_s: f64,
@@ -104,15 +110,18 @@ pub const Attempt = struct {
     /// cgroup peak where the process size misses the work (mapped shared
     /// inputs count in the RSS but are charged to their holders; in a
     /// container the process is the Podman client). Page cache beyond it
-    /// is reclaimed under the limit, not counted.
+    /// is reclaimed under the limit, not counted. Processes running at once
+    /// can hold more than the largest of them: the sampled anonymous memory
+    /// is a lower bound, and the result is never below it.
     pub fn usedMib(self: Attempt) f64 {
         if (self.uses_shared or self.in_container) if (self.peak_mib) |p| return p;
-        return self.rss_mib;
+        return @max(self.rss_mib, self.anon_mib orelse 0);
     }
 
-    /// Whether `usedMib` is the cgroup peak.
+    /// Whether `usedMib` comes from the cgroup's counters, not the process.
     pub fn usedIsPeak(self: Attempt) bool {
-        return (self.uses_shared or self.in_container) and self.peak_mib != null;
+        if ((self.uses_shared or self.in_container) and self.peak_mib != null) return true;
+        return (self.anon_mib orelse 0) > self.rss_mib;
     }
 };
 
@@ -165,23 +174,29 @@ pub fn median(xs: []const f64) f64 {
 /// Reads every attempt record of a launch, in rule and attempt order:
 /// `attempts/<rule>/<NNN>/record.json`, where NNN is zero-padded so the
 /// names sort by number. An attempt still running has no record yet.
-pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8) ![]Attempt {
+pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     const dir = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
     var out: std.ArrayList(Attempt) = .empty;
     for ((try sys.dirNames(gpa, a, dir)) orelse &.{}) |rule| {
         const rule_dir = try std.fs.path.join(a, &.{ dir, rule });
         for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
-            if (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, n, "record.json" }))) |r| try out.append(a, r);
+            if (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, n, "record.json" }), unreadable)) |r| try out.append(a, r);
         }
     }
     return out.items;
 }
 
-/// The attempt in record file `path`, or null when it cannot be read.
-fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
+/// The attempt in record file `path`, or null when there is none yet or it
+/// cannot be read. The path of a record that exists but does not parse is
+/// added to `unreadable`, in `a`.
+fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.ArrayList([]const u8)) !?Attempt {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else null;
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        if (unreadable) |list| try list.append(a, path);
+        return null;
+    };
     const wall = num(get(v, "wall_s")) orelse 0;
     const req = get(v, "request");
     const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
@@ -211,9 +226,11 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
         .cpu_s = num(get(v, "cpu_s")) orelse if (get(v, "rusage")) |ru| num(get(ru, "cpu_s")) orelse 0 else 0,
         .threads = if (req) |q| num(get(q, "threads")) orelse 1 else 1,
         .request_mib = if (req) |q| num(get(q, "memory_mib")) orelse 0 else 0,
+        .reserved_mib = if (req) |q| num(get(q, "reserved_mib")) else null,
         .groups = groups.items,
         .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,
         .rss_mib = if (get(v, "rusage")) |ru| (num(get(ru, "maxrss_kib")) orelse 0) / 1024.0 else 0,
+        .anon_mib = if (cg) |c| if (num(get(c, "anon_peak"))) |p| p / 1048576.0 else null else null,
         .oom_kill = if (cg) |c| num(get(c, "oom_kill")) orelse 0 else 0,
         .limit_events = if (cg) |c| num(get(c, "memory_max_events")) orelse 0 else 0,
         .waited_s = if (queue) |q| num(get(q, "waited_s")) orelse 0 else 0,
@@ -240,7 +257,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8) !?Attempt {
 /// launch of the same working directory. Launch IDs begin with their start
 /// time, so earlier launches sort first. A rule whose earlier launch was
 /// cleaned up is left out.
-pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, names: []const []const u8) ![]Attempt {
+pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, names: []const []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     if (names.len == 0) return &.{};
     var wanted: std.StringArrayHashMapUnmanaged(void) = .empty;
     for (names) |n| try wanted.put(a, n, {});
@@ -264,7 +281,7 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
             var j = numbers.len;
             const found = while (j > 0) {
                 j -= 1;
-                const r = (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, numbers[j], "record.json" }))) orelse continue;
+                const r = (try readRecord(gpa, a, try std.fs.path.join(a, &.{ rule_dir, numbers[j], "record.json" }), unreadable)) orelse continue;
                 if (r.completed()) break r;
             } else null;
             if (found) |r| {
@@ -508,6 +525,8 @@ pub const Launch = struct {
     /// digest, as `launch.json` holds them; "" when not recorded.
     engine_id: []const u8 = "",
     workflow_sha256: []const u8 = "",
+    /// Record files that exist but do not parse, which were left out.
+    unreadable: std.ArrayList([]const u8) = .empty,
     /// The `--threads STEP=N` the launch ran with.
     thread_overrides: []const []const u8 = &.{},
     started_text: []const u8 = "",
@@ -720,12 +739,16 @@ fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]c
     return std.mem.replaceOwned(u8, a, p.message, "\n", "; ");
 }
 
-/// A JSON record, or null when it is missing or cannot be parsed; running
-/// out of memory is an error, not a missing record.
-fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
+/// A JSON record file, or null when there is none. One that exists but does
+/// not parse reads as absent, and its path is added to `unreadable`, in `a`.
+fn readJson(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
     const bytes = sys.readFile(gpa, path, 1 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else null;
+    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+        if (err == error.OutOfMemory) return err;
+        try unreadable.append(a, path);
+        return null;
+    };
 }
 
 fn stateOf(s: tracker.Status, finished: bool) State {
@@ -750,7 +773,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     _ = try l.tracker.update();
     const tr = &l.tracker;
 
-    if (try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }))) |v| {
+    if (try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), &l.unreadable)) |v| {
         l.workdir = str(v, "workdir");
         if (l.workdir.len > 0) l.name = std.fs.path.basename(l.workdir);
         l.engine_id = str(v, "engine");
@@ -772,7 +795,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     l.t0_ns = if (tr.launch_ns != 0) tr.launch_ns else tr.started_ns;
     l.selected = tr.selected;
 
-    const summary = try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }));
+    const summary = try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), &l.unreadable);
     if (summary) |s| {
         l.finished = true;
         l.status = str(s, "status");
@@ -794,10 +817,10 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
         l.elapsed_s = @max(@as(f64, @floatFromInt(end - l.t0_ns)) / 1e9, 0);
     }
 
-    l.rows = try attempts(gpa, a, launch_dir);
+    l.rows = try attempts(gpa, a, launch_dir, &l.unreadable);
     var reused_names: std.ArrayList([]const u8) = .empty;
     for (tr.rules.items) |r| if (r.status == .reused) try reused_names.append(a, r.name);
-    const reused = try reusedAttempts(gpa, a, launch_dir, reused_names.items);
+    const reused = try reusedAttempts(gpa, a, launch_dir, reused_names.items, &l.unreadable);
     l.reused_unrecorded = reused_names.items.len - reused.len;
 
     // The workflow snapshot gives every rule its labels and the graph.
@@ -1113,7 +1136,7 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
     for (l.rows) |r| {
         threads += r.threads * r.wall_s;
         cpu += r.cpu_s;
-        memory += r.request_mib * r.wall_s;
+        memory += (r.reserved_mib orelse r.request_mib) * r.wall_s;
         jobs += r.wall_s;
     }
     if (l.max_threads > 0 and threads > 0) try bounds.append(a, .{ .kind = .threads, .work = threads, .limit = l.max_threads, .seconds = threads / l.max_threads });
@@ -1124,7 +1147,7 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
     const end_ns = l.t0_ns + std.math.lossyCast(i128, l.elapsed_s * 1e9);
     for (l.shared()) |s| {
         const open: f64 = if (s.held_since > 0) @as(f64, @floatFromInt(@max(end_ns - s.held_since, 0))) / 1e9 else 0;
-        memory += s.declared_mib * (s.held_s + open);
+        memory += (s.reserved_mib orelse s.declared_mib) * (s.held_s + open);
     }
     if (l.max_memory_mib > 0 and memory > 0) try bounds.append(a, .{ .kind = .memory, .work = memory, .limit = l.max_memory_mib, .seconds = memory / l.max_memory_mib });
     // Every rule takes a thread, so jobs bind only below the thread budget.

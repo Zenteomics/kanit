@@ -129,13 +129,14 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 - **Memory.** The service's `memory`, and 32 MiB for its Podman client, count once against the budget while it runs. With isolation, the shared memory it holds is charged to its cgroup, not to its users; without isolation nothing limits it. A user's own request covers only what it uses besides the index.
 - **Lifetime.** The service stays up while a rule that has yet to run needs it, so later users do not load it again. It gives way when a waiting rule needs its memory and no user is running, and it stops after its last user.
 - **Time limit and retries.** `timeout` limits how long the service may take to become ready, and `retries` (0 to 3) starts it again if it fails before it is ready. After that, every rule that needs it fails with `shared input NAME could not be loaded:` and the reason.
+- **Failure while in use.** A service that ends after it was ready, while rules use it, stops those rules: they fail with `shared service NAME failed while the rule used it:` and the reason, without a retry, and nothing they wrote is recorded as a result. The memory they read may be gone.
 - **Logs.** The service's standard error is kept in `.workz/launches/<ID>/shared/<NAME>-<N>.stderr.log`, one file per start.
 
 ### Rules for services
 
 - Only container rules can join a service, and a rule can join one service.
 - `path` may hold files that rules of the same workflow produce, such as the index itself.
-- The service's image, command, path and mounts are part of its users' rule keys, and its `path` is an input of every rule that joins it: a rule that writes the index runs before them, and rebuilding the index reruns them. Listing it in `input` as well changes nothing.
+- The service's image, command, path and mounts are part of its users' rule keys, and its `path` and the sources of its `mounts` are inputs of every rule that joins it: a rule that writes the index or a mounted file runs before them, and rebuilding or changing one reruns them. Listing them in `input` as well changes nothing.
 - A rule that joins a service may not write inside its `path`: the service would load before the file exists.
 - `mounts` on a service places host files inside its image, as on a rule.
 

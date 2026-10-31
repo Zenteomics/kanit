@@ -450,8 +450,12 @@ pub fn editDistance(a: []const u8, b: []const u8) usize {
     return prev[b.len];
 }
 
+/// The largest size accepted for a request or a budget, 1024T: far above any
+/// workstation, and small enough that sums and byte counts fit in a u64.
+pub const max_memory_mib: u64 = 1 << 30;
+
 /// Memory request in MiB: an integer with an optional K, M, G or T suffix;
-/// no suffix means MiB.
+/// no suffix means MiB. Null for zero or above `max_memory_mib`.
 pub fn parseMemoryMib(text: []const u8) ?u64 {
     const t = std.mem.trim(u8, text, " ");
     if (t.len == 0) return null;
@@ -466,7 +470,7 @@ pub fn parseMemoryMib(text: []const u8) ?u64 {
         'T' => std.math.mul(u64, n, 1024 * 1024) catch return null,
         else => unreachable,
     };
-    if (mib == 0) return null;
+    if (mib == 0 or mib > max_memory_mib) return null;
     return mib;
 }
 
@@ -576,6 +580,8 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
         try noted(p.fail(&at_wf, "workflow.name is required", .{}));
         break :name "";
     };
+    if (meta.get("name")) |v| if (v == .string and std.mem.trim(u8, v.string, " \t").len == 0)
+        try noted(p.failKey(&at_wf, "name", "workflow.name must not be empty", .{}));
     wf.version = (try keep(?[]const u8, p.str(meta, "version", &at_wf, "workflow"), null)) orelse "";
     if (try p.int(meta, "format_version", &at_wf, "workflow")) |v| {
         if (v != format_version) return p.failKey(&at_wf, "format_version", "workflow format_version {d} is not supported; this engine reads format {d}", .{ v, format_version });
@@ -730,6 +736,7 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     const name = (try p.str(r, "name", &at, "rule")) orelse return p.fail(&at, "rule {d} has no name", .{i + 1});
     if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
     const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
+    if (std.mem.trim(u8, shell, " \t\r\n").len == 0) return p.failKey(&at, "shell", "rule {s}: shell is empty; give the command that writes its outputs", .{name});
     var input = try p.strings(r, "input", &at, name);
     const output = try p.strings(r, "output", &at, name);
     const diagnostics = try p.strings(r, "diagnostics", &at, name);
@@ -764,6 +771,9 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
         if (try p.int(res, "threads", &res_at, name)) |t| threads = t;
         if (try p.str(res, "memory", &res_at, name)) |m| memory = m;
         shared_uses = try p.strings(res, "shared", &res_at, name);
+        // Each shared input is held, and counted, once.
+        for (shared_uses, 0..) |s, k| for (shared_uses[0..k]) |earlier| if (std.mem.eql(u8, s, earlier))
+            return p.failKey(&res_at, "shared", "rule {s} lists shared input '{s}' twice", .{ name, s });
         if (res.get("groups")) |gv| {
             const gt = switch (gv) {
                 .table => |t| t,
@@ -782,22 +792,15 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
         }
     }
     // A rule reads the files of the shared inputs it uses, a mapped file or
-    // a service's index, so each path is also its input: a rebuilt index
-    // reruns it, and a rule writing the index runs before it.
+    // a service's index and the files mounted into the service, so each path
+    // is also its input: a rebuilt index or a changed mounted file reruns
+    // it, and a rule writing one runs before it.
     for (shared_uses) |used| {
         const sh = for (wf.shared) |s| {
             if (std.mem.eql(u8, s.name, used)) break s;
         } else continue;
-        const sp = sh.path orelse continue;
-        const sp_abs = sh.path_abs orelse continue;
-        const listed = for (input) |in| {
-            if (std.mem.eql(u8, try sys.absolute(arena, root, in), sp_abs)) break true;
-        } else false;
-        if (listed) continue;
-        const more = try arena.alloc([]const u8, input.len + 1);
-        @memcpy(more[0..input.len], input);
-        more[input.len] = sp;
-        input = more;
+        if (sh.path) |sp| input = try withInput(arena, root, input, sp, sh.path_abs.?);
+        for (sh.mounts) |m| input = try withInput(arena, root, input, m.source, m.source_abs);
     }
     if (threads == null) threads = default_threads;
     if (memory == null) memory = default_memory;
@@ -890,6 +893,15 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     };
 }
 
+/// `input` with `path` appended, unless it already names `path_abs`.
+fn withInput(arena: Allocator, root: []const u8, input: []const []const u8, path: []const u8, path_abs: []const u8) ![]const []const u8 {
+    for (input) |in| if (std.mem.eql(u8, try sys.absolute(arena, root, in), path_abs)) return input;
+    const more = try arena.alloc([]const u8, input.len + 1);
+    @memcpy(more[0..input.len], input);
+    more[input.len] = path;
+    return more;
+}
+
 fn absAll(arena: Allocator, root: []const u8, paths: []const []const u8) ![]const []const u8 {
     const out = try arena.alloc([]const u8, paths.len);
     for (paths, 0..) |path, i| out[i] = try sys.absolute(arena, root, path);
@@ -924,14 +936,23 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: [
     if (try sys.lstat(gpa, abs)) |id| {
         if (!id.isReg()) return problem.set(gpa, "rule {s}: existing '{s}' must be a regular file", .{ rule, written });
     }
-    // The nearest existing parent must resolve inside the working directory.
-    var parent = std.fs.path.dirname(abs) orelse return;
-    const real = while (true) {
-        if (try cache.real(parent)) |r| break r;
-        parent = std.fs.path.dirname(parent) orelse return;
-    };
+    // The parent must resolve inside the working directory, and to the path
+    // as written: through a symlinked directory the file would have a second
+    // name, which the graph and the containment checks do not see.
+    const parent = std.fs.path.dirname(abs) orelse return;
     const real_root = (try cache.real(wf.root)) orelse return;
-    if (!within(real_root, real)) return problem.set(gpa, "rule {s}: the parent of '{s}' resolves outside the working directory", .{ rule, written });
+    const dest = (try cache.destination(parent)) orelse return;
+    defer gpa.free(dest);
+    if (!within(real_root, dest)) return problem.set(gpa, "rule {s}: the parent of '{s}' resolves outside the working directory", .{ rule, written });
+    if (!sameBelow(wf.root, parent, real_root, dest))
+        return problem.set(gpa, "rule {s}: '{s}' passes through a symlinked directory; name it by its real path", .{ rule, written });
+}
+
+/// Whether `path` below `root` and `real` below `real_root` name the same
+/// place relative to their roots.
+fn sameBelow(root: []const u8, path: []const u8, real_root: []const u8, real: []const u8) bool {
+    if (!within(root, path) or !within(real_root, real)) return false;
+    return std.mem.eql(u8, std.mem.trimStart(u8, path[root.len..], "/"), std.mem.trimStart(u8, real[real_root.len..], "/"));
 }
 
 fn hasParentComponent(path: []const u8) bool {
@@ -980,7 +1001,37 @@ const PathCache = struct {
         try self.reals.put(self.gpa, path, r);
         return r;
     }
+
+    /// Where an absolute, normalized `path` is or would be created: the
+    /// resolved path of its nearest existing ancestor with the rest of
+    /// `path` appended. Owned by the caller; null when no ancestor resolves.
+    fn destination(self: *PathCache, path: []const u8) !?[]u8 {
+        var head = path;
+        while (true) {
+            if (try self.real(head)) |r| {
+                const rest = path[head.len..];
+                if (std.mem.eql(u8, r, "/") and rest.len > 0) return try self.gpa.dupe(u8, rest);
+                return try std.mem.concat(self.gpa, u8, &.{ r, rest });
+            }
+            head = std.fs.path.dirname(head) orelse return null;
+        }
+    }
 };
+
+/// Reports the nearest directory above `abs`, inside `root`, that a rule
+/// writes as a file (`files` and `sides` map paths to their rules).
+fn fileAncestor(gpa: Allocator, problem: *Problem, root: []const u8, files: *const std.StringHashMapUnmanaged([]const u8), sides: *const std.StringHashMapUnmanaged([]const u8), rule: []const u8, what: []const u8, written: []const u8, abs: []const u8) !void {
+    var dir = std.fs.path.dirname(abs) orelse return;
+    while (dir.len > root.len and within(root, dir)) : (dir = std.fs.path.dirname(dir) orelse return) {
+        const owner = files.get(dir) orelse sides.get(dir) orelse continue;
+        return problem.add(gpa, "rule {s}: {s}'{s}' needs '{s}' to be a directory, but rule {s} writes that path as a file", .{ rule, what, written, keyPath(root, dir), owner });
+    }
+}
+
+fn insideInput(gpa: Allocator, problem: *Problem, rule: []const u8, what: []const u8, written: []const u8, abs: []const u8, in_written: []const u8, in: []const u8) !void {
+    if (abs.len > in.len and within(in, abs))
+        try problem.add(gpa, "rule {s}: {s}'{s}' is inside its directory input '{s}'; write it outside that directory", .{ rule, what, written, in_written });
+}
 
 fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
     const prior = problem.count;
@@ -1088,7 +1139,22 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
             if (!relativeLocal(d) or !within(wf.root, r.workdir_abs.?) or std.mem.eql(u8, r.workdir_abs.?, wf.root))
                 try problem.add(gpa, "rule {s}: workdir '{s}' must be a directory below the working directory", .{ r.name, d })
             else if (inRecords(wf.root, r.workdir_abs.?))
-                try problem.add(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d });
+                try problem.add(gpa, "rule {s}: workdir '{s}' is inside the engine record directory", .{ r.name, d })
+            else if (try cache.destination(r.workdir_abs.?)) |dest| {
+                defer gpa.free(dest);
+                const real_root = (try cache.real(wf.root)) orelse wf.root;
+                if (!sameBelow(wf.root, r.workdir_abs.?, real_root, dest))
+                    try problem.add(gpa, "rule {s}: workdir '{s}' passes through a symlinked directory; name it by its real path", .{ r.name, d });
+            }
+        }
+        // A rule's own writes would change its directory input while it runs.
+        // A shared input's path has its own checks, with the graph.
+        own: for (r.input_abs, r.input) |in, in_written| {
+            for (r.shared) |name| if (wf.sharedIndex(name)) |si| if (wf.shared[si].path_abs) |p| if (std.mem.eql(u8, p, in)) continue :own;
+            for (r.output_abs, r.output) |abs, written| try insideInput(gpa, problem, r.name, "", written, abs, in_written, in);
+            if (r.log) |l| try insideInput(gpa, problem, r.name, "", l, r.log_abs.?, in_written, in);
+            if (r.benchmark) |b| try insideInput(gpa, problem, r.name, "", b, r.benchmark_abs.?, in_written, in);
+            if (r.workdir) |d| try insideInput(gpa, problem, r.name, "workdir ", d, r.workdir_abs.?, in_written, in);
         }
         for (r.links) |l| {
             const is_input = for (r.input_abs) |in| {
@@ -1128,7 +1194,21 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
                 try problem.add(gpa, "rule {s}: a log or benchmark is a hard link to a declared output", .{e.value_ptr.*});
                 continue :sides;
             }
-            try side_inodes.put(gpa, .{ .dev = id.dev, .ino = id.ino }, e.value_ptr.*);
+            if (try side_inodes.fetchPut(gpa, .{ .dev = id.dev, .ino = id.ino }, e.value_ptr.*)) |other|
+                try problem.add(gpa, "rule {s}: a log or benchmark is a hard link to a log or benchmark of rule {s}", .{ e.value_ptr.*, other.value });
+        }
+    }
+    // A path written as a file cannot also be a directory that another
+    // writable path or a workdir lies in.
+    for (wf.rules) |r| {
+        problem.current_line = r.line;
+        for (r.output_abs, r.output) |abs, written| try fileAncestor(gpa, problem, wf.root, &outputs, &side, r.name, "", written, abs);
+        if (r.log) |l| try fileAncestor(gpa, problem, wf.root, &outputs, &side, r.name, "", l, r.log_abs.?);
+        if (r.benchmark) |b| try fileAncestor(gpa, problem, wf.root, &outputs, &side, r.name, "", b, r.benchmark_abs.?);
+        if (r.workdir) |d| {
+            const owner = outputs.get(r.workdir_abs.?) orelse side.get(r.workdir_abs.?);
+            if (owner) |o| try problem.add(gpa, "rule {s}: workdir '{s}' is a directory, but rule {s} writes that path as a file", .{ r.name, d, o });
+            try fileAncestor(gpa, problem, wf.root, &outputs, &side, r.name, "workdir ", d, r.workdir_abs.?);
         }
     }
     for (wf.rules) |r| {
@@ -1145,15 +1225,24 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
                     continue :inputs;
                 }
             };
-            // An input that is a symlink to a declared output must name the producer path.
-            if (!outputs.contains(in)) {
-                if (try cache.real(in)) |real| {
-                    if (outputs.contains(real)) {
-                        try problem.add(gpa, "rule {s}: declare the producer path instead of the symlink '{s}'", .{ r.name, written });
-                        continue :inputs;
-                    }
+            // An input reaching a declared output, or a directory holding
+            // one, through a symlink must name the producer path: the graph
+            // links rules by the paths they write.
+            if (!outputs.contains(in)) if (try cache.destination(in)) |dest| {
+                defer gpa.free(dest);
+                const real_root = (try cache.real(wf.root)) orelse wf.root;
+                if (!within(real_root, dest) or sameBelow(wf.root, in, real_root, dest)) continue :inputs;
+                const named = try std.fs.path.join(gpa, &.{ wf.root, dest[real_root.len..] });
+                defer gpa.free(named);
+                var keys = outputs.keyIterator();
+                const reaches = outputs.contains(named) or while (keys.next()) |o| {
+                    if (within(named, o.*)) break true;
+                } else false;
+                if (reaches) {
+                    try problem.add(gpa, "rule {s}: declare the producer path instead of the symlink '{s}'", .{ r.name, written });
+                    continue :inputs;
                 }
-            }
+            };
         }
     }
     problem.current_line = 0;

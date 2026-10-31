@@ -212,9 +212,12 @@ pub const Ui = struct {
                     self.top = 0;
                 },
                 'S' => if (self.selected) |sel| {
+                    // The rule acted on stays selected as its row moves.
+                    self.chosen = true;
                     self.action = .{ .cmd = "stop", .rule = sel };
                 },
                 'R' => if (self.selected) |sel| {
+                    self.chosen = true;
                     self.action = .{ .cmd = "retry", .rule = sel };
                 },
                 'X' => if (self.clock_ns < self.confirm_until) {

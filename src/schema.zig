@@ -6,7 +6,7 @@
 const std = @import("std");
 const workflow = @import("workflow.zig");
 
-const Type = enum { string, integer, boolean, strings, string_table, integer_table, resources };
+const Type = enum { any, string, integer, boolean, strings, string_table, integer_table, resources };
 
 const Key = struct { name: []const u8, type: Type, help: []const u8 };
 
@@ -14,8 +14,8 @@ const Key = struct { name: []const u8, type: Type, help: []const u8 };
 const workflow_types = [_]Key{
     .{ .name = "name", .type = .string, .help = "name of the workflow, required" },
     .{ .name = "version", .type = .string, .help = "your version label" },
-    .{ .name = "description", .type = .string, .help = "what the workflow does" },
-    .{ .name = "author", .type = .string, .help = "who wrote it" },
+    .{ .name = "description", .type = .any, .help = "what the workflow does; any value, not read" },
+    .{ .name = "author", .type = .any, .help = "who wrote it; any value, not read" },
     .{ .name = "format_version", .type = .integer, .help = "workflow format, 1" },
 };
 const default_types = [_]Key{
@@ -85,6 +85,7 @@ pub const tables = [_]struct { keys: []const []const u8, types: []const Key }{
 
 fn value(w: *std.Io.Writer, k: Key) std.Io.Writer.Error!void {
     switch (k.type) {
+        .any => return w.print("{{\"description\":{f}}}", .{std.json.fmt(k.help, .{})}),
         .string => try w.writeAll("{\"type\":\"string\""),
         .integer => try w.writeAll("{\"type\":\"integer\""),
         .boolean => try w.writeAll("{\"type\":\"boolean\""),

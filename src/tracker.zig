@@ -91,6 +91,9 @@ pub const SharedView = struct {
     /// Memory the input is counted for: a service's declared memory, or the
     /// pages of its files.
     declared_mib: f64 = 0,
+    /// What it took from the budget, a service's Podman client included;
+    /// records that do not say count `declared_mib`.
+    reserved_mib: ?f64 = null,
     failed: bool = false,
     /// Seconds its holders held memory, from loading to release, and when
     /// the current one began; a holder still held when the records end
@@ -133,6 +136,8 @@ pub const Tracker = struct {
     /// began its rules after its checks.
     started_ns: i128 = 0,
     launch_ns: i128 = 0,
+    /// Lines of the event stream that were not valid JSON, and were skipped.
+    unreadable_lines: usize = 0,
     max_threads: u32 = 0,
     max_memory_mib: u64 = 0,
     max_jobs: u32 = 0,
@@ -236,8 +241,13 @@ pub const Tracker = struct {
         if (line.len == 0) return;
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
-        // A line that does not parse is skipped; running out of memory is not.
-        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| return if (err == error.OutOfMemory) err else {};
+        // A line that does not parse is counted and skipped; running out of
+        // memory is not.
+        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| {
+            if (err == error.OutOfMemory) return err;
+            self.unreadable_lines += 1;
+            return;
+        };
         const a = self.arena.allocator();
         const ev = str(v, "event") orelse return;
         const at = parseTime(str(v, "time") orelse "") orelse 0;
@@ -284,6 +294,7 @@ pub const Tracker = struct {
                 if (float(v, "memory_mib")) |m| {
                     s.service = true;
                     s.declared_mib = m;
+                    s.reserved_mib = float(v, "reserved_mib");
                 } else if (float(v, "bytes")) |b| s.declared_mib = b / 1048576.0;
             } else if (eql(u8, ev, "shared_loaded")) {
                 if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;

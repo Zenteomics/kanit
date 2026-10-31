@@ -24,7 +24,7 @@ pub const format_version: i64 = 4;
 /// taken or judged complete changes, or when a fix changes the bytes a rule
 /// leaves for the same inputs. Raising it reruns every rule once. Scheduling,
 /// records, monitoring and speed changes do not raise it.
-pub const engine_key: u32 = 3;
+pub const engine_key: u32 = 4;
 pub const engine_key_text = std.fmt.comptimePrint("workz-key {d}", .{engine_key});
 
 pub const Output = struct {
@@ -113,6 +113,16 @@ pub fn loadRecorded(gpa: Allocator, a: Allocator, rec: []const u8) !State {
     errdefer st.deinit();
     for (try records.Journal.unfinished(gpa, a, rec)) |name| _ = st.data.rules.map.swapRemove(name);
     return st;
+}
+
+/// Why the state file at `path` cannot be used, and what to do, for a
+/// `load` error; null for any other error.
+pub fn loadErrorText(a: Allocator, err: anyerror, path: []const u8) !?[]const u8 {
+    return switch (err) {
+        error.CorruptState => try std.fmt.allocPrint(a, "{s} cannot be read: it is not a valid workz state; move it aside, and the next launch runs every rule", .{path}),
+        error.UnsupportedState => try std.fmt.allocPrint(a, "{s} has a format version this workz cannot read; use the workz that wrote it, or move it aside, and the next launch runs every rule", .{path}),
+        else => null,
+    };
 }
 
 /// Loads `<rec>/state.json`, or returns an empty state when it is absent.
@@ -225,12 +235,15 @@ fn withoutDevice(id: []const u8) []const u8 {
 }
 
 /// Identity text of a path: the stat tuple of a file, or a digest over the
-/// sorted relative paths and identities of every file below a directory.
+/// sorted relative paths and identities of every entry below a directory.
 /// Each distinct path is examined once per launch.
 pub const Identities = struct {
     gpa: Allocator,
     arena: std.heap.ArenaAllocator,
     memo: std.StringHashMapUnmanaged(?[]const u8) = .empty,
+    /// Why the last `get` returned `error.Unreadable`, naming the input and
+    /// the entry below it that failed. Lives as long as the memo.
+    problem: []const u8 = "",
 
     pub fn init(gpa: Allocator) Identities {
         return .{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -246,17 +259,28 @@ pub const Identities = struct {
         _ = self.memo.remove(path);
     }
 
+    /// The identity of `path`, or null when it does not exist. A directory
+    /// that cannot be read, or that holds a symlink to a directory, returns
+    /// `error.Unreadable` and sets `problem`.
     pub fn get(self: *Identities, path: []const u8) !?[]const u8 {
         if (self.memo.get(path)) |v| return v;
         const a = self.arena.allocator();
         const key = try a.dupe(u8, path);
-        const id = try identityText(a, self.gpa, path);
+        var failed: ?[]u8 = null;
+        defer if (failed) |f| self.gpa.free(f);
+        const id = identityText(a, self.gpa, path, &failed) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                self.problem = try std.fmt.allocPrint(a, "cannot read input {s}: {s}", .{ path, try walkErrorText(a, err, failed orelse path) });
+                return error.Unreadable;
+            },
+        };
         try self.memo.put(self.gpa, key, id);
         return id;
     }
 };
 
-fn identityText(a: Allocator, gpa: Allocator, path: []const u8) !?[]const u8 {
+fn identityText(a: Allocator, gpa: Allocator, path: []const u8, failed: *?[]u8) !?[]const u8 {
     const id = (try sys.stat(gpa, path)) orelse return null;
     if (!id.isDir()) return try std.fmt.allocPrint(a, "{f}", .{id});
     var lines: std.ArrayList([]u8) = .empty;
@@ -264,19 +288,36 @@ fn identityText(a: Allocator, gpa: Allocator, path: []const u8) !?[]const u8 {
         for (lines.items) |l| gpa.free(l);
         lines.deinit(gpa);
     }
-    try walk(gpa, path, path.len, &lines, 0);
+    try walk(gpa, path, path.len, &lines, 0, true, failed);
     std.mem.sort([]u8, lines.items, {}, lessString);
     var h = std.crypto.hash.sha2.Sha256.init(.{});
     for (lines.items) |l| h.update(l);
     return try std.fmt.allocPrint(a, "dir:{s}", .{&std.fmt.bytesToHex(h.finalResult(), .lower)});
 }
 
+/// What went wrong at `path` while walking a directory, for a person.
+pub fn walkErrorText(a: Allocator, err: anyerror, path: []const u8) ![]const u8 {
+    return switch (err) {
+        error.NestedDirectorySymlink => std.fmt.allocPrint(a, "{s} is a symlink to a directory; declare the directory it names as an input of its own", .{path}),
+        error.DirectoryTooDeep => std.fmt.allocPrint(a, "{s} nests directories more than 64 levels deep", .{path}),
+        else => std.fmt.allocPrint(a, "{s}: {s}", .{ path, sys.errorText(err) }),
+    };
+}
+
 fn lessString(_: void, x: []u8, y: []u8) bool {
     return std.mem.lessThan(u8, x, y);
 }
 
-/// Collects "relative-path\tidentity\n" for every file below `dir`.
-fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList([]u8), depth: usize) !void {
+/// Collects "relative-path\tidentity\n" for every entry below `dir`: a
+/// file's identity, `dir` for a directory, so that empty ones count, and
+/// `missing` for a dangling symlink. With `dirs` false it lists files only.
+/// Record directories (`.workz`) are left out: the engine writes into them
+/// while rules run. A symlink to a directory is refused, since its target's
+/// contents would go unrecorded. On an error, `failed` names the entry.
+fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList([]u8), depth: usize, dirs: bool, failed: *?[]u8) !void {
+    errdefer if (failed.* == null) {
+        failed.* = gpa.dupe(u8, dir) catch null;
+    };
     if (depth > 64) return error.DirectoryTooDeep;
     const linux = std.os.linux;
     const p = try sys.z(gpa, dir);
@@ -290,11 +331,20 @@ fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList(
         // A file system that gives no type needs a stat.
         const is_dir = e.kind == 4 or (e.kind == 0 and ((try sys.lstat(gpa, child)) orelse continue).isDir());
         if (is_dir) {
-            try walk(gpa, child, base_len, lines, depth + 1);
-        } else {
-            const id = (try sys.stat(gpa, child)) orelse continue;
-            try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\t{f}\n", .{ child[base_len..], id }));
+            if (std.mem.eql(u8, e.name, ".workz")) continue;
+            if (dirs) try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}/\tdir\n", .{child[base_len..]}));
+            try walk(gpa, child, base_len, lines, depth + 1, dirs, failed);
+            continue;
         }
+        const id = (try sys.stat(gpa, child)) orelse {
+            if (dirs) try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\tmissing\n", .{child[base_len..]}));
+            continue;
+        };
+        if (id.isDir()) {
+            failed.* = try gpa.dupe(u8, child);
+            return error.NestedDirectorySymlink;
+        }
+        try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}\t{f}\n", .{ child[base_len..], id }));
     }
 }
 
@@ -327,7 +377,9 @@ pub fn listFiles(gpa: Allocator, path: []const u8, out: *std.ArrayList([]u8)) !v
         for (lines.items) |l| gpa.free(l);
         lines.deinit(gpa);
     }
-    try walk(gpa, path, path.len, &lines, 0);
+    var failed: ?[]u8 = null;
+    defer if (failed) |f| gpa.free(f);
+    try walk(gpa, path, path.len, &lines, 0, false, &failed);
     for (lines.items) |l| {
         const rel = l[0..std.mem.indexOfScalar(u8, l, '\t').?];
         try out.append(gpa, try std.fmt.allocPrint(gpa, "{s}{s}", .{ path, rel }));

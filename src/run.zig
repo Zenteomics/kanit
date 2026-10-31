@@ -17,6 +17,7 @@ const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const container = @import("container.zig");
+const plan = @import("plan.zig");
 const model = @import("model.zig");
 const html = @import("html.zig");
 const monitor = @import("monitor.zig");
@@ -93,6 +94,9 @@ const Task = struct {
     kill_at: ?i128 = null,
     timed_out: bool = false,
     cancelled: bool = false,
+    /// Why the shared service the attempt joined failed while it ran; the
+    /// attempt is stopped and fails without a retry.
+    lost_service: ?[]const u8 = null,
     reason: []const u8 = "",
     /// The diagnostics kept from the last attempt, as the rule wrote them.
     diagnostics: []const []const u8 = &.{},
@@ -583,10 +587,18 @@ const Engine = struct {
         const t = &self.tasks[i];
         const r = self.rule(i);
         var missing: ?[]const u8 = null;
-        const key = try state.ruleKey(self.a, self.ids, self.wf, self.g.parents[i], i, self.st, self.cut, TaskKeys{ .tasks = self.tasks }, self.env_text, self.engine_id, self.extras[i], &missing);
+        // An input a producer left unreadable fails the rule like a missing one.
+        var unreadable = false;
+        const key = state.ruleKey(self.a, self.ids, self.wf, self.g.parents[i], i, self.st, self.cut, TaskKeys{ .tasks = self.tasks }, self.env_text, self.engine_id, self.extras[i], &missing) catch |err| switch (err) {
+            error.Unreadable => blk: {
+                unreadable = true;
+                break :blk null;
+            },
+            else => return err,
+        };
         if (key == null) {
             t.status = .failed;
-            t.reason = try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
+            t.reason = if (unreadable) self.ids.problem else try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
             self.finished += 1;
             self.events.emit("task_failed", .{ .rule = r.name, .attempt = @as(?u32, null), .reason = t.reason });
             self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
@@ -615,6 +627,15 @@ const Engine = struct {
     }
 
     // ---- admission ----
+
+    /// Why rule i cannot start even on an idle budget, or null.
+    fn neverFits(self: *Engine, i: usize) ?[]const u8 {
+        const r = self.rule(i);
+        var need = reservedMib(r);
+        for (r.shared_index) |hi| need += self.holders[hi].reserve_mib;
+        if (r.threads <= self.max_threads and need <= self.max_memory) return null;
+        return std.fmt.allocPrint(self.a, "it needs {d} threads and {d} MiB; the run allows {d} threads and {d} MiB", .{ r.threads, need, self.max_threads, self.max_memory }) catch "it needs more than the run allows";
+    }
 
     /// The first resource that keeps a ready rule from starting, or null
     /// when it fits: "jobs", "threads", "memory" or "group:NAME".
@@ -709,6 +730,13 @@ const Engine = struct {
         std.mem.sort(usize, ready.items, self, readyBefore);
         for (ready.items) |i| {
             if (self.stopping) break;
+            // The launch checked the rules it expected to run; one that runs
+            // anyway and can never fit fails instead of waiting.
+            if (self.neverFits(i)) |why| {
+                try self.setWait(i, null);
+                self.endUnstarted(i, false, null, .failed, why);
+                continue;
+            }
             if (self.blocker(i)) |why| {
                 // Idle holders kept for later rules give way to a rule that
                 // fits once their memory is returned, which happens when
@@ -827,6 +855,7 @@ const Engine = struct {
         try sys.mkdirAll(self.gpa, t.dir);
         t.timed_out = false;
         t.cancelled = false;
+        t.lost_service = null;
         t.kill_at = null;
         try self.endWait(i);
         t.queued_s = @as(f64, @floatFromInt(sys.monoNs() - t.ready_ns)) / 1e9;
@@ -865,8 +894,10 @@ const Engine = struct {
             if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(self.gpa, d);
         }
 
+        // The rule's record stays until an attempt replaces it: a failed
+        // attempt gives the outputs back, and the journal drops the record
+        // if the engine dies while the attempt runs.
         try self.journal.mark(self.gpa, "dispatch", r.name);
-        if (self.st.data.rules.map.fetchSwapRemove(r.name) != null) self.dirty = true;
         if (r.workdir_abs) |d| if (try self.prepareWorkdir(r, d)) |why| return self.failToStart(i, why);
 
         const out_fd = try sys.openWrite(self.gpa, try std.fmt.allocPrint(self.a, "{s}/stdout.log", .{t.dir}), .truncate);
@@ -952,9 +983,88 @@ const Engine = struct {
         return r.timeout_s orelse self.opts.timeout_s;
     }
 
-    /// An attempt that could not start: it fails and gives back what it held.
+    /// An attempt that could not start: it fails, gives back what it held,
+    /// and puts back the outputs it moved aside.
     fn failToStart(self: *Engine, i: usize, reason: []const u8) void {
-        self.endUnstarted(i, true, self.tasks[i].attempts, .failed, reason);
+        self.restorePrevious(i) catch {};
+        const t = &self.tasks[i];
+        // A failure to prepare, such as a full disk, can pass: it uses the
+        // rule's retries as a failed command does.
+        if (!self.stopping and t.attempts < t.max_attempts) {
+            const r = self.rule(i);
+            self.writeUnstartedRecord(i, t.attempts, .failed, reason);
+            if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            t.cg = null;
+            self.reserve(i, false);
+            self.releaseShared(i);
+            t.status = .ready;
+            self.ready_counter += 1;
+            t.ready_seq = self.ready_counter;
+            t.ready_ns = sys.monoNs();
+            t.waits = .empty;
+            t.wait_reason = null;
+            self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "failed", .reason = reason });
+            self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
+            self.alert("retrying", "{s}: {s}", .{ r.name, reason });
+            return;
+        }
+        self.endUnstarted(i, true, t.attempts, .failed, reason);
+    }
+
+    /// The record of numbered attempt `n` of rule i that never started: a
+    /// numbered attempt directory always ends with one.
+    fn writeUnstartedRecord(self: *Engine, i: usize, n: u32, status: Status, reason: []const u8) void {
+        const t = &self.tasks[i];
+        const r = self.rule(i);
+        if (t.dir.len == 0) return;
+        records.writeJson(self.gpa, std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}) catch return, .{
+            .v = 1,
+            .rule = r.name,
+            .attempt = n,
+            .status = @tagName(status),
+            .reason = reason,
+            .started = @as(?[]const u8, null),
+            .finished = records.timeText(self.a, sys.realNs()) catch "",
+            .wall_s = @as(f64, 0),
+            .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .reserved_mib = reservedMib(r), .groups = r.groups, .shared = r.shared, .container = r.container },
+            .labels = r.labels,
+            .outputs = &[_]state.Output{},
+            .key = if (t.key) |k| k.key else null,
+        }) catch {};
+    }
+
+    /// After an attempt that did not complete, moves each output it moved
+    /// into previous/ back to its path, so the last result stays where its
+    /// record says. What the attempt left at that path moves to the
+    /// attempt's failed/. The record's identity of a restored output is
+    /// refreshed: the move changes its change time, not its bytes.
+    fn restorePrevious(self: *Engine, i: usize) !void {
+        const t = &self.tasks[i];
+        const r = self.rule(i);
+        const entry = self.st.data.rules.map.getPtr(r.name);
+        for (r.output_abs, r.output, 0..) |o, written, k| {
+            const name = try std.fmt.allocPrint(self.a, "{d}-{s}", .{ k, std.fs.path.basename(o) });
+            const prev = try std.fs.path.join(self.a, &.{ t.dir, "previous", name });
+            const kept = (try sys.lstat(self.gpa, prev)) orelse continue;
+            if (try sys.lstat(self.gpa, o)) |_| {
+                const failed_dir = try std.fs.path.join(self.a, &.{ t.dir, "failed" });
+                sys.mkdir(self.gpa, failed_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+                try sys.rename(self.gpa, o, try std.fs.path.join(self.a, &.{ failed_dir, name }));
+            }
+            try sys.rename(self.gpa, prev, o);
+            self.ids.forget(o);
+            self.previous_bytes -|= kept.size;
+            self.events.emit("output_restored", .{ .rule = r.name, .path = written, .moved_from = prev, .bytes = kept.size });
+            const e = entry orelse continue;
+            const sa = self.st.allocator();
+            const outs = try sa.dupe(state.Output, e.outputs);
+            for (outs) |*out| if (std.mem.eql(u8, out.path, o)) {
+                const id = (try self.ids.get(o)) orelse continue;
+                out.id = try sa.dupe(u8, id);
+            };
+            e.outputs = outs;
+            self.dirty = true;
+        }
     }
 
     /// Ends a rule whose attempt never ran. An admitted rule gives back its
@@ -973,6 +1083,7 @@ const Engine = struct {
         t.status = status;
         t.reason = reason;
         self.finished += 1;
+        if (attempt) |n| self.writeUnstartedRecord(i, n, status, reason);
         if (status == .failed) {
             self.events.emit("task_failed", .{ .rule = r.name, .attempt = attempt, .reason = reason });
             self.alert("failed", "{s}: {s}", .{ r.name, reason });
@@ -1005,14 +1116,17 @@ const Engine = struct {
             const kv = std.mem.span(e.?);
             const eq = std.mem.indexOfScalar(u8, kv, '=') orelse continue;
             const name = kv[0..eq];
-            // The keyed variables but PATH, which the image sets.
-            const keep = for (state.keyed_env) |k| {
+            // The keyed variables but PATH, which the image sets. A passed
+            // variable goes by name alone: Podman takes its value from its own
+            // environment, so the value stays out of the argument vector.
+            const keyed = for (state.keyed_env) |k| {
                 if (std.mem.eql(u8, k, "PATH")) continue;
                 if (std.mem.eql(u8, k, name)) break true;
-            } else for (self.opts.pass_env) |k| {
+            } else false;
+            const passed = for (self.opts.pass_env) |k| {
                 if (std.mem.eql(u8, k, name)) break true;
             } else false;
-            if (keep) try list.append(self.a, kv);
+            if (passed) try list.append(self.a, name) else if (keyed) try list.append(self.a, kv);
         }
         try list.appendSlice(self.a, extra);
         return list.items;
@@ -1150,7 +1264,7 @@ const Engine = struct {
         h.st = .loading;
         h.timed_out = false;
         h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
-        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .pid = h.pid, .cgroup = h.cg });
+        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .reserved_mib = h.reserve_mib, .pid = h.pid, .cgroup = h.cg });
         self.progress("starting", "shared service {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
@@ -1339,16 +1453,24 @@ const Engine = struct {
     }
 
     /// Marks a shared input failed for the rest of the launch and fails the
-    /// rules admitted to use it.
+    /// rules admitted to use it. Rules running against a service stop and
+    /// fail too: the memory or index they read may be gone. A mapped file
+    /// stays in the page cache, so its running users go on.
     fn failHolder(self: *Engine, hi: usize, why: []const u8, peak: ?u64) !void {
         const h = &self.holders[hi];
         const s = self.wf.shared[hi];
         h.st = .failed;
         h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
         self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });
+        const lost = try std.fmt.allocPrint(self.a, "shared service {s} failed while the rule used it: {s}", .{ s.name, why });
         for (self.tasks, 0..) |*t, i| {
-            if (t.status != .staging) continue;
-            if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) != null) self.failStaged(i, h.failure.?);
+            if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) == null) continue;
+            if (t.status == .staging) self.failStaged(i, h.failure.?);
+            if (t.status == .running and s.isService() and t.lost_service == null) {
+                t.lost_service = lost;
+                self.terminate(t, @as(i128, self.opts.grace_s) * std.time.ns_per_s);
+                self.events.emit("task_cancelling", .{ .rule = self.rule(i).name });
+            }
         }
     }
 
@@ -1394,7 +1516,9 @@ const Engine = struct {
         var quote = false;
         const code = reaped.exitCode();
         const sig = reaped.signal();
-        if (t.cancelled) {
+        if (t.lost_service) |why| {
+            reason = why;
+        } else if (t.cancelled) {
             reason = t.stop_why;
         } else if (t.timed_out) {
             reason = try std.fmt.allocPrint(self.a, "timed out after {d} s", .{self.timeoutOf(r).?});
@@ -1403,12 +1527,17 @@ const Engine = struct {
         } else if (code) |c| {
             if (c == 0) {
                 ok = true;
+                // The same rule as validation: an output is a regular file,
+                // not a symlink to one.
                 for (r.output_abs, r.output) |o, written| {
                     self.ids.forget(o);
-                    const id = try sys.stat(self.gpa, o);
+                    const id = try sys.lstat(self.gpa, o);
                     if (id == null or !id.?.isReg()) {
                         ok = false;
-                        reason = try std.fmt.allocPrint(self.a, "exited 0 without output {s}", .{written});
+                        reason = if (id == null)
+                            try std.fmt.allocPrint(self.a, "exited 0 without output {s}", .{written})
+                        else
+                            try std.fmt.allocPrint(self.a, "exited 0, but its output {s} is not a regular file", .{written});
                         break;
                     }
                 }
@@ -1477,7 +1606,7 @@ const Engine = struct {
                 .maxrss_kib = reaped.usage.maxrss,
             },
             .cgroup = counters,
-            .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .groups = r.groups, .shared = r.shared, .container = r.container },
+            .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .reserved_mib = reservedMib(r), .groups = r.groups, .shared = r.shared, .container = r.container },
             .image = if (r.container) |img| self.images.get(img) else null,
             .version = r.version,
             .labels = r.labels,
@@ -1527,7 +1656,11 @@ const Engine = struct {
         }
         t.reason = reason;
         self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = status, .reason = reason, .exit_code = code, .signal = sig, .wall_s = wall_s });
-        if (!t.cancelled and !self.stopping and t.attempts < t.max_attempts) {
+        self.restorePrevious(i) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => self.alert("warning", "{s}: cannot put its earlier outputs back from {s}/previous: {s}", .{ r.name, monitor.shownPath(self.a, t.dir), sys.errorText(err) }),
+        };
+        if (!t.cancelled and !self.stopping and t.lost_service == null and t.attempts < t.max_attempts) {
             t.status = .ready;
             self.releaseShared(i);
             released = true;
@@ -2187,6 +2320,48 @@ pub fn reservedMib(r: *const workflow.Rule) u64 {
     return r.memory_mib + if (r.container != null) container_client_mib else 0;
 }
 
+/// What one shared input holds and takes from the budget, as `Holder`.
+pub const SharedSize = struct { bytes: u64, mib: u64, reserve_mib: u64 };
+
+/// The sizes of the shared inputs that the rules marked in `runs` use, each
+/// measured once; null for one that no such rule uses, which is not
+/// measured. A service holds its declared memory beside its Podman client;
+/// mapped files hold their pages. A mapped path that cannot be measured
+/// returns `error.Unmeasurable` and sets `failure`.
+pub fn sharedSizes(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, runs: []const bool, failure: *[]const u8) ![]?SharedSize {
+    const out = try a.alloc(?SharedSize, wf.shared.len);
+    @memset(out, null);
+    for (wf.rules, runs) |r, run_it| {
+        if (!run_it) continue;
+        for (r.shared_index) |hi| {
+            if (out[hi] != null) continue;
+            const s = wf.shared[hi];
+            if (s.memory_mib) |mib| {
+                out[hi] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
+                continue;
+            }
+            const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err| switch (err) {
+                error.OutOfMemory => return err,
+                else => {
+                    failure.* = try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) });
+                    return error.Unmeasurable;
+                },
+            };
+            const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
+            out[hi] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
+        }
+    }
+    return out;
+}
+
+/// What rule `r` needs of the budget to start: `reservedMib` and each of its
+/// shared inputs, held once.
+pub fn neededMib(r: *const workflow.Rule, sizes: []const ?SharedSize) u64 {
+    var need = reservedMib(r);
+    for (r.shared_index) |hi| need += if (sizes[hi]) |z| z.reserve_mib else 0;
+    return need;
+}
+
 /// A wait for a part of the budget, which ends when the budget gets it back.
 fn budgetReason(reason: []const u8) bool {
     for ([_][]const u8{ "jobs", "threads", "memory" }) |r| if (std.mem.eql(u8, reason, r)) return true;
@@ -2345,7 +2520,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const max_jobs = opts.jobs orelse max_threads;
 
     const rec = try records.recordsDir(a, wf.root);
-    try sys.mkdirAll(gpa, rec);
+    try records.makeRecordsDir(gpa, rec);
     const lock_fd = records.lock(gpa, rec) catch |err| switch (err) {
         error.Busy => {
             std.debug.print("workz: another launch is running in {s}; watch it with workz watch, or run again after it ends\n", .{wf.root});
@@ -2392,51 +2567,25 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     });
     const refusal: Refusal = .{ .gpa = gpa, .a = a, .events = &events, .launch = launch.id, .dir = launch.dir, .engine = engine_id, .selected = selected, .t0 = t_open, .json = opts.json };
 
-    // Budget and input checks.
-    var holders = try a.alloc(Holder, wf.shared.len);
-    for (wf.shared, 0..) |s, i| {
-        // A service holds its declared memory, and its Podman client takes
-        // more of the budget; mapped files hold their pages.
-        if (s.memory_mib) |mib| {
-            holders[i] = .{ .bytes = mib * 1024 * 1024, .mib = mib, .reserve_mib = mib + container_client_mib };
-            continue;
-        }
-        const bytes = state.pageBytes(gpa, s.path_abs.?) catch |err|
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "shared input {s} ({s}): {s}", .{ s.name, s.path.?, sys.errorText(err) }));
-        const mib = std.math.divCeil(u64, bytes, 1024 * 1024) catch unreachable;
-        holders[i] = .{ .bytes = bytes, .mib = mib, .reserve_mib = mib };
-    }
     // One identity memo for the launch: the input check below fills it for
     // the key computation.
     var ids = state.Identities.init(gpa);
     defer ids.deinit();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
-        var need = reservedMib(&r);
-        for (r.shared_index) |hi| need += holders[hi].reserve_mib;
-        if (r.threads > max_threads)
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower {s}", .{ r.name, r.threads, max_threads, if (overridden(opts.thread_overrides, r.labels.step)) try std.fmt.allocPrint(a, "--threads {s}", .{r.labels.step}) else "the rule's threads" }));
-        if (need > max_memory) {
-            const with: []const u8 = if (r.shared_index.len > 0 and r.container != null)
-                " with its shared inputs and its Podman client"
-            else if (r.shared_index.len > 0)
-                " with its shared inputs"
-            else if (r.container != null)
-                " with its Podman client"
-            else
-                "";
-            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB{s}; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, with, max_memory }));
-        }
         for (r.input_abs, r.input) |in, written| {
             // A selected rule's producers are selected too.
             if (g.produces(in)) continue;
-            if ((try ids.get(in)) == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));
+            const id = ids.get(in) catch |err| switch (err) {
+                error.Unreadable => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s}: {s}", .{ r.name, ids.problem })),
+                else => return err,
+            };
+            if (id == null) return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "missing input of rule {s}: {s} (input paths are relative to {s}); create it, or fix the path", .{ r.name, written, wf.root }));
         }
     }
 
     var st = state.loadRecorded(gpa, a, rec) catch |err| switch (err) {
-        error.UnsupportedState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json has an unsupported format version", .{rec})),
-        error.CorruptState => return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "{s}/state.json cannot be read", .{rec})),
+        error.UnsupportedState, error.CorruptState => return refusal.refuse(.invalid, (try state.loadErrorText(a, err, try std.fs.path.join(a, &.{ rec, "state.json" }))).?),
         else => return err,
     };
     defer st.deinit();
@@ -2519,23 +2668,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     const env_text = try state.envText(a, environ, opts.pass_env);
 
-    const shared_info = try a.alloc(struct { name: []const u8, path: ?[]const u8, container: ?[]const u8, bytes: u64 }, wf.shared.len);
-    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .container = s.container, .bytes = h.bytes };
-
     const devnull = try sys.openRead(gpa, "/dev/null");
     defer sys.close(devnull);
     const host_envp = try process.Vec.init(a, try state.hostEnv(a, environ, opts.pass_env));
-
-    // Shared inputs are protected from reclaim by other work on the machine:
-    // the run's scope gets a memory.low of their size.
-    if (tree) |t| {
-        var shared_mib: u64 = 0;
-        for (holders) |h| shared_mib += h.mib;
-        if (shared_mib > 0) {
-            const ok = protectScope(gpa, a, t, shared_mib, environ.get("PATH") orelse "/usr/bin:/bin", &host_envp, devnull);
-            events.emit("memory_protected", .{ .memory_low_mib = shared_mib, .ok = ok });
-        }
-    }
 
     // Container rules: Podman, local images resolved to IDs, leftovers removed.
     var podman: ?[]const u8 = null;
@@ -2552,6 +2687,63 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         events.emit("containers_checked", .{ .images = images.count(), .leftovers_removed = removed, .seconds = @as(f64, @floatFromInt(sys.monoNs() - tc)) / 1e9 });
     }
     const extras = try container.ruleExtras(a, wf, &images);
+
+    // Budget: the rules that will run, decided as `plan` decides them, must
+    // each fit, with the shared inputs they use; a rule reused needs nothing.
+    var decide: plan.Context = try .init(gpa, a, wf, g, &st, &ids, env_text, environ);
+    decide.rerun = opts.rerun;
+    decide.rerun_rules = opts.rerun_rules;
+    decide.extras = extras;
+    const decisions = decide.decideAll(mask) catch |err| switch (err) {
+        error.Unreadable => return refusal.refuse(.invalid, ids.problem),
+        else => return err,
+    };
+    const runs = try a.alloc(bool, wf.rules.len);
+    for (runs, decisions, mask) |*r, d, m| r.* = m and d.run;
+    var failure: []const u8 = "";
+    const strict = sharedSizes(gpa, a, wf, runs, &failure) catch |err| switch (err) {
+        error.Unmeasurable => return refusal.refuse(.invalid, failure),
+        else => return err,
+    };
+    // The shared inputs of selected rules expected to be reused are measured
+    // too where they can be, in case one of them runs after all.
+    const sizes = sharedSizes(gpa, a, wf, mask, &failure) catch |err| switch (err) {
+        error.Unmeasurable => strict,
+        else => return err,
+    };
+    for (wf.rules, runs) |r, run_it| {
+        if (!run_it) continue;
+        if (r.threads > max_threads)
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} requests {d} threads; the run allows {d}: raise --max-threads, or lower {s}", .{ r.name, r.threads, max_threads, if (overridden(opts.thread_overrides, r.labels.step)) try std.fmt.allocPrint(a, "--threads {s}", .{r.labels.step}) else "the rule's threads" }));
+        const need = neededMib(&r, sizes);
+        if (need > max_memory) {
+            const with: []const u8 = if (r.shared_index.len > 0 and r.container != null)
+                " with its shared inputs and its Podman client"
+            else if (r.shared_index.len > 0)
+                " with its shared inputs"
+            else if (r.container != null)
+                " with its Podman client"
+            else
+                "";
+            return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "rule {s} needs {d} MiB{s}; the run allows {d} MiB: raise --max-memory, or lower the rule's memory", .{ r.name, need, with, max_memory }));
+        }
+    }
+    // A shared input that no rule that runs uses is never held.
+    const holders = try a.alloc(Holder, wf.shared.len);
+    for (holders, sizes) |*h, z| h.* = if (z) |s| .{ .bytes = s.bytes, .mib = s.mib, .reserve_mib = s.reserve_mib } else .{ .bytes = 0, .mib = 0, .reserve_mib = 0 };
+    const shared_info = try a.alloc(struct { name: []const u8, path: ?[]const u8, container: ?[]const u8, bytes: u64 }, wf.shared.len);
+    for (wf.shared, holders, 0..) |s, h, i| shared_info[i] = .{ .name = s.name, .path = s.path_abs, .container = s.container, .bytes = h.bytes };
+
+    // Shared inputs are protected from reclaim by other work on the machine:
+    // the run's scope gets a memory.low of their size.
+    if (tree) |t| {
+        var shared_mib: u64 = 0;
+        for (holders) |h| shared_mib += h.mib;
+        if (shared_mib > 0) {
+            const ok = protectScope(gpa, a, t, shared_mib, environ.get("PATH") orelse "/usr/bin:/bin", &host_envp, devnull);
+            events.emit("memory_protected", .{ .memory_low_mib = shared_mib, .ok = ok });
+        }
+    }
     var containers_cg: ?[]const u8 = null;
     if (podman != null) if (tree) |t| {
         containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch |err|
@@ -2693,9 +2885,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         if (t.status != .completed) continue;
         const k = t.key orelse continue;
         var missing: ?[]const u8 = null;
-        const again = try state.ruleKey(a, &post, wf, g.parents[i], i, engine.st, &post_cut, TaskKeys{ .tasks = engine.tasks }, env_text, state.engine_key_text, engine.extras[i], &missing);
+        const again = state.ruleKey(a, &post, wf, g.parents[i], i, engine.st, &post_cut, TaskKeys{ .tasks = engine.tasks }, env_text, state.engine_key_text, engine.extras[i], &missing) catch |err| switch (err) {
+            error.Unreadable => null,
+            else => return err,
+        };
+        // Its attempt completed, but the result does not match its inputs:
+        // the rule fails, and nothing records it as reusable.
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
+            t.status = .failed;
+            t.reason = "its inputs changed while the launch ran; run it again";
+            engine.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
             _ = engine.st.data.rules.map.swapRemove(r.name);
             engine.dirty = true;
         }
@@ -2823,7 +3023,20 @@ fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, mpath
             res.ok = false;
             continue;
         }
-        const id_text = (try ids.get(path)) orelse {
+        // A digest covers one regular file's bytes.
+        if (sys.stat(gpa, path) catch null) |id| if (!id.isReg()) {
+            std.debug.print("workz: input manifest entry is not a regular file: {s}\n", .{path});
+            res.ok = false;
+            continue;
+        };
+        const id_text = (ids.get(path) catch |err| switch (err) {
+            error.Unreadable => {
+                std.debug.print("workz: {s}\n", .{ids.problem});
+                res.ok = false;
+                continue;
+            },
+            else => return err,
+        }) orelse {
             std.debug.print("workz: input manifest file is missing: {s}\n", .{path});
             res.ok = false;
             continue;

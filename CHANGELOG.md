@@ -6,10 +6,75 @@ All notable changes to workz will be documented in this file. The format follows
 
 ## Unreleased
 
-workz reads workflows with z-toml 0.4.1.
+This version makes reuse and records hold where 0.5.0 could mislead: a directory input counts its whole shape, a failed rerun keeps the last result and its record, a dead service fails the rules that used it, budget checks count only the rules that will run, and damaged records are named instead of shown. workz reads workflows with z-toml 0.4.1.
+
+Three changes need action:
+
+- **Expect every rule to run once.** A directory's identity now covers its subdirectories, so the engine key moves to 4.
+- **Rename paths that validation now refuses.**
+  - An output, log, benchmark or workdir written through a symlinked directory: write its real path.
+  - An input that reaches another rule's output through a symlinked directory: name the producer path.
+  - A rule writing inside its own directory input, including any rule with `input = ["."]`: write beside the directory.
+  - A directory input that holds a symlink to a directory: declare that directory as an input of its own.
+- **Update scripts that read records or exit statuses.**
+  - `verify` exits 1 when a selected rule has no record to check.
+  - `status` exits 1 for a launch whose engine ended without recording its end, and prints it with `"status": "unfinished"`.
+  - An attempt that could not start writes `record.json`, with `started` `null`.
+  - The event `output_restored` follows an attempt that did not complete, and `previous_bytes` leaves out the bytes it put back.
+  - `record.json` adds `request.reserved_mib`, and a service's `shared_loading` event adds `reserved_mib`.
+  - `.workz/` is made readable by its owner alone; another user who read the records needs to be given access again.
+  - `run` refuses `--slice` with `--no-isolation`, which ignored it, and `version` refuses words after it.
 
 ### Fixed
 
+- **Directory inputs.**
+  - Creating, renaming or removing an empty directory inside a directory input reruns the rules that read it.
+  - A dangling symlink inside a directory input counts, so its target appearing reruns them too.
+  - `.workz/` directories inside a directory input are left out of its identity.
+  - An unreadable directory input stops `plan`, `explain` and `run` with its path and the reason.
+- **Symlinked paths.** Two spellings of one output, a write into `.workz/` or a workdir outside the working directory through a symlink, and a consumer hidden from its producer by a directory alias are refused by validation.
+- **Failed reruns.** An attempt that fails, is stopped or cannot start moves the earlier outputs back from `previous/`, and the rule keeps its record; what the attempt wrote goes to its `failed/` directory.
+- **Shared services.**
+  - A service that dies after it was ready fails the rules running against it, instead of letting them complete.
+  - Files mounted into a service are inputs of the rules that join it, so changing one reruns them.
+- **Results.**
+  - A rule whose input changed while it ran counts as failed, with a reason, instead of completed.
+  - An output written as a symlink fails its attempt, as validation would refuse it on the next command.
+- **Budget checks.**
+  - A launch whose rules are all reusable runs under any budget, and `plan --budget` counts only the rules that would run.
+  - A shared input that no running rule uses is no longer measured, so a missing one no longer refuses an unrelated launch.
+  - `plan --budget` refuses a used shared input it cannot measure, as `run` does, instead of counting it as empty.
+  - A rule that lists one shared input twice is refused, instead of counting it twice.
+- **Sizes.** Requests and budgets above 1024T are refused when read, instead of aborting on overflow.
+- **Input errors.** An unreadable or too deeply nested input names its path, a manifest entry that is not a file is refused, and `validate --inputs` reports a dangling symlink as missing, as `run` does.
+- **`workz prepare`.**
+  - Dotted resource group and shared input names, such as `"disk.io"`, stay quoted, so the prepared workflow is valid.
+  - `{threads}` is the number of threads the rule gets, from `resources`, the step or `[defaults]`, instead of a literal or the step's own value.
+  - A step whose `input` or `output` is not a list is named, instead of aborting.
+- **Validation.**
+  - An empty `workflow.name` or `shell` is refused.
+  - A path written as a file and also needed as a directory by another output, log, benchmark or workdir is refused.
+  - Two logs or benchmarks that are hard links to one file are refused.
+- **`workz schema`.** `description` and `author` take any value, as the parser does.
+- **Isolation.** A `WORKZ_STAGE` inherited from the caller no longer skips the run's scope, so the run's CPU and memory limits always hold.
+- **Passed variables.**
+  - `.workz/` is readable by its owner alone, since it holds the values given with `--pass-env`.
+  - A container rule receives them by name, so their values stay out of Podman's arguments.
+  - `--help` and the guide say that these values are recorded, so they are not for secrets.
+- **Damaged records.**
+  - `status` names a `summary.json` that is not valid JSON, instead of printing it as the summary.
+  - `report` names a record it cannot read, leaves it out and exits 1.
+  - `watch` shows an unknown start and counts the unreadable lines of an event stream, instead of a start in 1970.
+  - Every command that reads `state.json` says the same thing when it cannot, and `clean --keep` refuses to prune.
+- **Memory reports.**
+  - The memory bound counts what admission reserved, Podman clients included, for launches that record it.
+  - A host rule whose processes together held more anonymous memory than its largest process is not sized below that memory.
+- **`prepare --check`** writes its temporary copy under a random name, created anew, so a file planted in the temporary directory is never written through.
+- **`watch`.** After `S` stops the selected rule and the rows reorder, `R` retries that rule, not the one that moved under the cursor.
+- **Startup failures.** An attempt that cannot be prepared, such as one whose workdir link would replace a file, uses the rule's retries, and every attempt keeps its record.
+- **Notices.** `zig build` installs `LICENSE` and `THIRD_PARTY.md` in `zig-out/share/doc/workz/`, and the package includes `THIRD_PARTY.md`.
+- **Records in Git.** The guide and the files `workz init` writes say to add `.workz/` to the project's `.gitignore`.
+- **Dead launches.** `status`, `watch`, `control` and `logs --follow` see that a launch whose engine was killed is no longer running: they stop waiting, and `control` refuses.
 - **Malformed workflows.** A comment with a control character after an array element or an inline-table entry is reported at its line and column, instead of freeing a parsed value twice.
 
 ## [0.5.0] - 2026-10-27

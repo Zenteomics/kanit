@@ -33,7 +33,7 @@ Put the executable on your `PATH`, for example:
 install -m 755 zig-out/bin/workz ~/.local/bin/workz
 ```
 
-The examples in this guide call `workz` and assume it is on your `PATH`.
+The examples in this guide call `workz` and assume it is on your `PATH`. The build also installs `LICENSE` and `THIRD_PARTY.md`, the notice of the z-toml library linked into the binary, in `zig-out/share/doc/workz/`; give them with any copy of the binary you hand on.
 
 ## Shell completion
 

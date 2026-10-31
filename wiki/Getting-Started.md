@@ -135,7 +135,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 [3/4] completed gc_s3 (3 ms)
 [3/4] started summary (attempt 1)
 [4/4] completed summary (4 ms)
-{"engine":"workz 0.5.0 sha256:...","engine_key":3,"launch":"20261027T224948.994-d496b983","status":"completed","counts":{"completed":4,...}
+{"engine":"workz 0.5.0 sha256:...","engine_key":4,"launch":"20261027T224948.994-d496b983","status":"completed","counts":{"completed":4,...}
 ```
 
 The first line gives the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. The second line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (shortened here).
@@ -223,7 +223,7 @@ workz run workflow.toml --max-threads 2 --max-memory 1G
 
 ## Look at what happened
 
-Every launch leaves a record in `.workz/`. `status --history` lists the launches, newest first:
+Every launch leaves a record in `.workz/`, which grows with each one and holds every attempt's output and the values of `--pass-env` variables: add `.workz/` to the project's `.gitignore`. `status --history` lists the launches, newest first:
 
 ```sh
 workz status --history

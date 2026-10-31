@@ -96,9 +96,13 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         try w.print("{s}", .{t.final_status});
         if (t.final_error.len > 0) try w.print(": {s}", .{t.final_error});
     } else {
-        try w.writeAll("running for ");
-        try units.duration(w, seconds(now_ns - t.started_ns));
+        // Without a readable event the start is unknown, not the epoch.
+        if (t.started_ns == 0) try w.writeAll("running, started at an unknown time") else {
+            try w.writeAll("running for ");
+            try units.duration(w, seconds(now_ns - t.started_ns));
+        }
     }
+    if (t.unreadable_lines > 0) try w.print("\n{d} {s} of events.jsonl could not be read and {s} left out", .{ t.unreadable_lines, if (t.unreadable_lines == 1) "line" else "lines", if (t.unreadable_lines == 1) "is" else "are" });
     try w.print("\n{d} selected:", .{t.selected});
     for (std.enums.values(Status)) |s| {
         const k = t.count(s);
@@ -170,6 +174,12 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
         try render(gpa, &out.interface, &tr, sys.realNs());
         try out.interface.flush();
         if (once or tr.finished) return true;
+        // A launch whose engine died never records its end.
+        if (!records.launchActive(gpa, dir)) {
+            if (try tr.update() and tr.finished) continue;
+            std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
+            return false;
+        }
         const ts: linux.timespec = .{ .sec = @intCast(interval_ms / 1000), .nsec = @intCast((interval_ms % 1000) * std.time.ns_per_ms) };
         _ = linux.nanosleep(&ts, null);
     }
@@ -279,7 +289,7 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     }
 
     // The last attempt of each rule, from the attempt records.
-    const rows = model.attempts(gpa, a, launch_dir) catch &.{};
+    const rows = model.attempts(gpa, a, launch_dir, null) catch &.{};
     var last: std.ArrayList(model.Attempt) = .empty;
     for (rows, 0..) |r, i| {
         if (i + 1 < rows.len and std.mem.eql(u8, rows[i + 1].rule, r.rule)) continue;
@@ -389,12 +399,22 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     const a = arena.allocator();
     const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
-            if (human) return watch(gpa, io, dir, true, 1000, color);
-            return runningJson(gpa, dir);
+            const active = records.launchActive(gpa, dir);
+            if (!active) std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
+            if (human) return try watch(gpa, io, dir, true, 1000, color) and active;
+            return try runningJson(gpa, dir, if (active) "running" else "unfinished") and active;
         },
         else => return err,
     };
     defer gpa.free(summary);
+    // A script reads this as the summary: it must be one, not a fragment.
+    _ = std.json.parseFromSliceLeaky(std.json.Value, a, summary, .{}) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => {
+            std.debug.print("workz: {s}/summary.json is not valid JSON, so the launch's result cannot be shown; its events and attempt records remain\n", .{dir});
+            return false;
+        },
+    };
     if (human) {
         var buf: [16384]u8 = undefined;
         var out = std.Io.File.stdout().writerStreaming(io, &buf);
@@ -406,10 +426,11 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     return true;
 }
 
-/// A running launch as JSON with the summary's keys, so a script reads one
+/// A launch without a summary, running or unfinished, as JSON with the
+/// summary's keys and `status_text` as its status, so a script reads one
 /// shape: what has not ended is null, and the counts add the rules running,
 /// waiting once ready and pending; `not_started` counts the last two.
-fn runningJson(gpa: Allocator, dir: []const u8) !bool {
+fn runningJson(gpa: Allocator, dir: []const u8, status_text: []const u8) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
     _ = try tr.update();
@@ -435,7 +456,7 @@ fn runningJson(gpa: Allocator, dir: []const u8) !bool {
         .engine = tr.engine,
         .engine_key = tr.engine_key,
         .launch = std.fs.path.basename(dir),
-        .status = "running",
+        .status = status_text,
         .counts = .{
             .completed = tr.count(.completed),
             .reused = tr.count(.reused),
