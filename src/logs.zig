@@ -8,6 +8,7 @@ const linux = std.os.linux;
 const sys = @import("sys.zig");
 const records = @import("records.zig");
 const state = @import("state.zig");
+const Tracker = @import("tracker.zig").Tracker;
 const Allocator = std.mem.Allocator;
 
 pub const Stream = enum { both, stdout, stderr };
@@ -40,6 +41,31 @@ pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, op
     defer st.deinit();
     const e = st.data.rules.map.get(rule) orelse return null;
     return if (sys.exists(gpa, e.attempt)) try a.dupe(u8, e.attempt) else null;
+}
+
+/// For `--follow` without `--launch` or `--attempt`: while the newest launch
+/// runs and has yet to start `rule`, waits for it, so the logs followed are
+/// that launch's and not the last recorded ones. The attempt's directory, or
+/// null when the launch does not run the rule, ends first, or ends the rule
+/// without an attempt, as for a reused or blocked rule.
+pub fn awaitAttempt(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8) !?[]const u8 {
+    const rec = try records.recordsDir(a, root);
+    const launch = (try records.latestLaunch(gpa, a, rec)) orelse return null;
+    var tr = try Tracker.init(gpa, launch);
+    defer tr.deinit();
+    while (records.launchActive(gpa, launch)) {
+        _ = try tr.update();
+        // A launch still checking its inputs has not named its rules yet.
+        if (tr.started_ns != 0) {
+            const i = tr.index.get(rule) orelse return null;
+            const r = tr.rules.items[i];
+            if (r.dir.len > 0) return try a.dupe(u8, r.dir);
+            if (r.status != .pending and r.status != .waiting) return null;
+        }
+        const ts: linux.timespec = .{ .sec = 0, .nsec = 200 * std.time.ns_per_ms };
+        _ = linux.nanosleep(&ts, null);
+    }
+    return null;
 }
 
 /// Writes the attempt's logs. With `follow`, keeps writing what is appended

@@ -96,6 +96,8 @@ Three changes need action:
   - `report` names a record it cannot read, leaves it out and exits 1.
   - `watch` shows an unknown start and counts the unreadable lines of an event stream, instead of a start in 1970.
   - Every command that reads `state.json` says the same thing when it cannot, and `clean --keep` refuses to prune.
+  - `status --history` keeps a row marked `unreadable` for a launch whose summary cannot be read, instead of leaving it out.
+  - Negative amounts in a run sample read as none.
 - **Memory reports.**
   - The memory bound counts what admission reserved, Podman clients included, for launches that record it.
   - A host rule whose processes together held more anonymous memory than its largest process is not sized below that memory.
@@ -104,7 +106,13 @@ Three changes need action:
 - **Startup failures.** An attempt that cannot be prepared, such as one whose workdir link would replace a file, uses the rule's retries, and every attempt keeps its record.
 - **Notices.** `zig build` installs `LICENSE` and `THIRD_PARTY.md` in `zig-out/share/doc/workz/`, and the package includes `THIRD_PARTY.md`.
 - **Records in Git.** The guide and the files `workz init` writes say to add `.workz/` to the project's `.gitignore`.
-- **Dead launches.** `status`, `watch`, `control` and `logs --follow` see that a launch whose engine was killed is no longer running: they stop waiting, and `control` refuses.
+- **Dead launches.** `status`, `watch`, `control` and `logs --follow` see that a launch whose engine was killed is no longer running: they stop waiting, and `control` refuses. `watch --once` and the text view say `unfinished` instead of `running` and exit 1.
+- **Text from programs.** A tool's error line that is not UTF-8 is recorded with U+FFFD in place of the bad bytes, so `reason` stays a string instead of becoming an array of bytes; tool versions, service errors and control lines are kept the same way, and the views and the HTML page cut long text without splitting a character.
+- **Running launches.**
+  - `report` says on standard error that the attempts still running have no record yet and are left out; with none ended, it says so instead of that the launch ran no rule.
+  - `logs RULE --follow` during a launch that has yet to start the rule waits for it and follows its new attempt, instead of printing the previous launch's attempt and exiting.
+  - The summary and the text view name the blocked rules, not only their count.
+  - Waiting events carry the rule's request, so the share of time a resource group's budget had room counts rules that never started instead of treating them as needing nothing.
 - **Malformed workflows.** A comment with a control character after an array element or an inline-table entry is reported at its line and column, instead of freeing a parsed value twice.
 
 ## [0.5.0] - 2026-10-27

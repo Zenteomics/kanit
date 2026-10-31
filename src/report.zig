@@ -298,7 +298,8 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
         try w.writeAll("\n");
     }
     if (l.rows.len == 0) {
-        try w.writeAll("no rule started in this launch");
+        // An attempt writes its record when it ends.
+        try w.writeAll(if (l.finished) "no rule started in this launch" else "no attempt of this launch has ended");
         if (l.@"error") |e| try w.print(": {s}", .{e});
         try w.writeAll("\n");
     }

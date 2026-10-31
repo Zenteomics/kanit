@@ -57,7 +57,8 @@ pub fn lastLine(gpa: Allocator, a: Allocator, path: []const u8, max: usize) []co
 }
 
 /// The last `n` non-empty lines of a file, oldest first, with control
-/// characters blanked and each cut to `max` bytes; allocated in `a`.
+/// characters blanked, each cut to `max` bytes without splitting a character
+/// and made valid UTF-8; allocated in `a`.
 pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: usize) []const []const u8 {
     const tail = sys.readTail(gpa, path, 4096) catch return &.{};
     defer gpa.free(tail);
@@ -67,7 +68,7 @@ pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: 
         if (found.items.len == n) break;
         const line = std.mem.trimEnd(u8, raw, " \r");
         if (line.len == 0) continue;
-        const out = a.dupe(u8, line[0..@min(line.len, max)]) catch break;
+        const out = a.dupe(u8, sys.utf8Text(a, sys.utf8Prefix(line, max)) catch break) catch break;
         for (out) |*c| if (c.* < 0x20 or c.* == 0x7f) {
             c.* = ' ';
         };
@@ -87,7 +88,9 @@ pub fn lastOutput(gpa: Allocator, a: Allocator, dir: []const u8, max: usize) []c
 }
 
 /// The plain text view: header, running tasks with live counters, failures.
-pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128) !void {
+/// `alive` is false for a launch whose engine ended without recording its
+/// end: nothing of it runs any longer.
+pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128, alive: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
@@ -95,6 +98,8 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     if (t.finished) {
         try w.print("{s}", .{t.final_status});
         if (t.final_error.len > 0) try w.print(": {s}", .{t.final_error});
+    } else if (!alive) {
+        try w.writeAll("unfinished: its engine ended without recording its end");
     } else {
         // Without a readable event the start is unknown, not the epoch.
         if (t.started_ns == 0) try w.writeAll("running, started at an unknown time") else {
@@ -112,7 +117,7 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     for (t.shared.items) |s| try w.print("shared {s}: {s}\n", .{ s.name, s.state });
 
     // An ended launch has nothing running; its summary is `workz status`.
-    if (!t.finished) {
+    if (!t.finished and alive) {
         try w.writeAll("\nRUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT\n");
         var shown: usize = 0;
         for (t.rules.items) |r| {
@@ -140,6 +145,19 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         try w.writeAll("\n");
     }
     if (failures > 10) try w.print("... and {d} more\n", .{failures - 10});
+    var blocked: std.ArrayList([]const u8) = .empty;
+    for (t.rules.items) |r| if (r.status == .blocked) try blocked.append(a, r.name);
+    if (blocked.items.len > 0) {
+        try w.writeAll("\nBLOCKED\n");
+        try writeNames(w, blocked.items, 10);
+        try w.writeAll("\n");
+    }
+}
+
+/// Up to `most` of `names`, joined by commas, and how many more there are.
+fn writeNames(w: *std.Io.Writer, names: []const []const u8, most: usize) !void {
+    for (names[0..@min(names.len, most)], 0..) |n, i| try w.print("{s}{s}", .{ if (i == 0) "" else ", ", n });
+    if (names.len > most) try w.print(" and {d} more", .{names.len - most});
 }
 
 /// The launch to show: the one named `launch` by ID, else the newest. Null,
@@ -170,16 +188,18 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
     var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
         _ = try tr.update();
+        // A launch whose engine died never records its end; one that ended
+        // between the two reads has recorded it.
+        var alive = tr.finished or records.launchActive(gpa, dir);
+        if (!alive) alive = (try tr.update()) and tr.finished;
         if (tty and !once) try out.interface.writeAll("\x1b[H\x1b[2J");
-        try render(gpa, &out.interface, &tr, sys.realNs());
+        try render(gpa, &out.interface, &tr, sys.realNs(), alive);
         try out.interface.flush();
-        if (once or tr.finished) return true;
-        // A launch whose engine died never records its end.
-        if (!records.launchActive(gpa, dir)) {
-            if (try tr.update() and tr.finished) continue;
+        if (!alive) {
             std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
             return false;
         }
+        if (once or tr.finished) return true;
         const ts: linux.timespec = .{ .sec = @intCast(interval_ms / 1000), .nsec = @intCast((interval_ms % 1000) * std.time.ns_per_ms) };
         _ = linux.nanosleep(&ts, null);
     }
@@ -207,7 +227,15 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
             continue;
         };
         defer gpa.free(text);
-        const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch continue;
+        const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => std.json.Value{ .null = {} },
+        };
+        // A damaged summary keeps its row, so the list still shows every launch.
+        if (v != .object) {
+            try w.print("{s:<31} {s}\n", .{ names[i], "unreadable" });
+            continue;
+        }
         const counts = if (v.object.get("counts")) |c| c else std.json.Value{ .null = {} };
         const cnt = struct {
             fn of(c: std.json.Value, k: []const u8) u64 {
@@ -221,7 +249,7 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
         try w.print("{s:<31} {s:<13} ", .{ names[i], str(v, "status") orelse "?" });
         try units.right(w, 8, units.duration, .{elapsed});
         try w.print(" {d:>5} {d:>7} {d:>10}", .{ done, bad, other });
-        if (str(v, "error")) |e| try w.print("  {s}", .{e[0..@min(e.len, 100)]});
+        if (str(v, "error")) |e| try w.print("  {s}", .{sys.utf8Prefix(e, 100)});
         try w.writeAll("\n");
     }
 }
@@ -332,6 +360,16 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         try label(w, s, col, "");
         try w.print("and {d} more; workz report lists every attempt\n", .{failures - shown});
     }
+    // A blocked rule never ran, so it has no attempt: the summary names it.
+    var blocked_names: std.ArrayList([]const u8) = .empty;
+    if (get(v, "failures")) |fs| if (fs == .array) for (fs.array.items) |f| {
+        if (std.mem.eql(u8, str(f, "status") orelse "", "blocked")) if (str(f, "rule")) |name| try blocked_names.append(a, name);
+    };
+    if (blocked_names.items.len > 0) {
+        try label(w, s, col, "blocked");
+        try writeNames(w, blocked_names.items, 8);
+        try w.writeAll("\n");
+    }
     if (shown == 0 and last.items.len > 0) {
         std.mem.sort(model.Attempt, last.items, {}, struct {
             fn gt(_: void, x: model.Attempt, y: model.Attempt) bool {
@@ -399,9 +437,10 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     const a = arena.allocator();
     const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), 1 << 20) catch |err| switch (err) {
         error.FileNotFound => {
+            // The view says itself when the launch did not finish.
+            if (human) return try watch(gpa, io, dir, true, 1000, color);
             const active = records.launchActive(gpa, dir);
             if (!active) std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
-            if (human) return try watch(gpa, io, dir, true, 1000, color) and active;
             return try runningJson(gpa, dir, if (active) "running" else "unfinished") and active;
         },
         else => return err,

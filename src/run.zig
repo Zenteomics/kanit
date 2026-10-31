@@ -684,7 +684,7 @@ const Engine = struct {
         }
         t.wait_reason = reason;
         t.wait_since = sys.monoNs();
-        if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why });
+        if (reason) |why| self.events.emit("task_waiting", .{ .rule = self.rule(i).name, .reason = why, .threads = self.rule(i).threads, .memory_mib = self.rule(i).memory_mib });
     }
 
     /// Ends the wait of a rule that starts. A wait for a part of the budget
@@ -1775,22 +1775,21 @@ const Engine = struct {
     /// The last line of file `path`, made fit for a recorded reason.
     fn errorLineOf(self: *Engine, path: []const u8) ![]const u8 {
         const line = try self.lastLineOf(path);
-        var end = @min(line.len, 200);
-        // Cut before a UTF-8 continuation byte, never inside a character.
-        while (end < line.len and end > 0 and line[end] & 0xc0 == 0x80) end -= 1;
-        const out = try self.a.dupe(u8, line[0..end]);
+        const cut = sys.utf8Prefix(line, 200);
+        const out = try self.a.dupe(u8, cut);
         for (out) |*ch| if (ch.* < 0x20 or ch.* == 0x7f) {
             ch.* = ' ';
         };
-        return if (end < line.len) std.fmt.allocPrint(self.a, "{s}...", .{out}) else out;
+        return if (cut.len < line.len) std.fmt.allocPrint(self.a, "{s}...", .{out}) else out;
     }
 
+    /// The last line of file `path`, as valid UTF-8, since it goes into records.
     fn lastLineOf(self: *Engine, path: []const u8) ![]const u8 {
         const tail = sys.readTail(self.gpa, path, 2048) catch return "";
         defer self.gpa.free(tail);
         const trimmed = std.mem.trimEnd(u8, tail, " \r\n");
         const begin = if (std.mem.lastIndexOfScalar(u8, trimmed, '\n')) |k| k + 1 else 0;
-        return self.a.dupe(u8, trimmed[begin..]);
+        return sys.utf8Text(self.a, try self.a.dupe(u8, trimmed[begin..]));
     }
 
     /// Keeps the last `diagnostics_max` bytes of each of the rule's
@@ -1860,8 +1859,10 @@ const Engine = struct {
             }) + 1;
             self.control_offset += end;
             var it = std.mem.splitScalar(u8, buf[0..end], '\n');
-            while (it.next()) |line| {
-                if (line.len == 0) continue;
+            while (it.next()) |raw| {
+                if (raw.len == 0) continue;
+                // A line written by hand may hold bytes that are not text.
+                const line = try sys.utf8Text(self.a, raw);
                 var words = std.mem.tokenizeScalar(u8, line, ' ');
                 const cmd = words.next() orelse continue;
                 const name = words.next() orelse "";
@@ -2237,7 +2238,7 @@ const Engine = struct {
                 .image = v.image,
                 .status = if (!v.started) "not run" else if (v.stopped) "stopped" else if (v.exit_code == 0) "completed" else "failed",
                 .exit_code = v.exit_code,
-                .output = try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n")),
+                .output = try sys.utf8Text(self.a, try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n"))),
             });
         }
         try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), .{ .v = records.record_version, .commands = entries.items });

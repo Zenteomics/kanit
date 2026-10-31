@@ -136,7 +136,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 workz watch [WORKFLOW] [--once] [--interval MS] [--launch ID] [--no-color]
 ```
 
-Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([keys](Watching-a-Launch.md#keys)); otherwise it prints a plain view every interval until the launch ends, and with `--once` it prints one.
+Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([keys](Watching-a-Launch.md#keys)); otherwise it prints a plain view every interval until the launch ends, and with `--once` it prints one. A launch whose engine ended without recording its end shows as `unfinished`, and `watch` exits 1.
 
 | Option       | Argument | Default | Meaning                          |
 | ------------ | -------- | ------- | -------------------------------- |
@@ -168,7 +168,7 @@ Prints the summary of the newest launch, or `--launch ID`, once it has ended: on
 workz logs [WORKFLOW] RULE [options]
 ```
 
-Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed; `--follow` prints them once the attempt has ended.
+Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed; `--follow` prints them once the attempt has ended. With `--follow` and neither `--launch` nor `--attempt`, a rule that the running launch has yet to start is waited for, and its new attempt is followed; one that the launch reuses or blocks shows its newest recorded attempt.
 
 | Option             | Argument | Meaning                                         |
 | ------------------ | -------- | ----------------------------------------------- |

@@ -171,6 +171,35 @@ pub fn readHead(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     return gpa.realloc(out, done);
 }
 
+/// At most `max` bytes of `text`, cut before a UTF-8 continuation byte so
+/// that no character is split.
+pub fn utf8Prefix(text: []const u8, max: usize) []const u8 {
+    if (text.len <= max) return text;
+    var end = max;
+    while (end > 0 and text[end] & 0xc0 == 0x80) end -= 1;
+    return text[0..end];
+}
+
+/// `bytes` as valid UTF-8, for a program's output that goes into records
+/// and terminals: each byte that does not start a valid sequence becomes
+/// U+FFFD. Valid text is returned as it is, else a copy in `a`.
+pub fn utf8Text(a: Allocator, bytes: []const u8) ![]const u8 {
+    if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
+    var out: std.ArrayList(u8) = .empty;
+    var i: usize = 0;
+    while (i < bytes.len) {
+        const n = std.unicode.utf8ByteSequenceLength(bytes[i]) catch 0;
+        if (n > 0 and i + n <= bytes.len and std.unicode.utf8ValidateSlice(bytes[i .. i + n])) {
+            try out.appendSlice(a, bytes[i .. i + n]);
+            i += n;
+        } else {
+            try out.appendSlice(a, "\u{FFFD}");
+            i += 1;
+        }
+    }
+    return out.items;
+}
+
 /// Returns at most the last `max` bytes of a file, or an empty slice if it is missing.
 pub fn readTail(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = openRead(gpa, path) catch |err| switch (err) {

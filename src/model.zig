@@ -1211,8 +1211,11 @@ fn collectWaits(a: Allocator, l: *Launch) !void {
             var fits = false;
             for (tr.group_waits.items) |w| {
                 if (!eql(u8, w.group, name) or w.to_ns == 0 or s.ns < w.from_ns or s.ns >= w.to_ns) continue;
-                waiting = true;
                 const v = tr.rules.items[w.rule];
+                // Older records give a rule's request only once it starts: one
+                // that never started cannot tell whether it fit.
+                if (v.threads == 0 and v.memory_mib == 0) continue;
+                waiting = true;
                 if (l.max_threads - s.threads_reserved >= @as(f64, @floatFromInt(v.threads)) and l.max_memory_mib - s.memory_reserved_mib >= @as(f64, @floatFromInt(v.memory_mib))) fits = true;
             }
             moments += @intFromBool(waiting);

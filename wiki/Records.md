@@ -139,7 +139,7 @@ The `cgroup` object holds:
 `events.jsonl` holds one JSON object per line, appended as things happen. Every event has `v` (1), `time` (UTC, to the millisecond) and `event`:
 
 ```json
-{"v":1,"time":"2026-10-26T03:36:53.792Z","event":"task_waiting","rule":"trim_S3","reason":"group:disk"}
+{"v":1,"time":"2026-10-26T03:36:53.792Z","event":"task_waiting","rule":"trim_S3","reason":"group:disk","threads":2,"memory_mib":1024}
 {"v":1,"time":"2026-10-26T03:36:56.801Z","event":"task_finished","rule":"trim_S2","attempt":1,"status":"completed","wall_s":3.007621927,"cpu_s":2.981506,"maxrss_kib":3840,"memory_peak":1712128}
 ```
 
@@ -158,7 +158,7 @@ Launch events:
 
 Rule events:
 
-- `task_waiting`: `rule`, `reason`.
+- `task_waiting`: `rule`, `reason`, `threads`, `memory_mib`.
 - `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`, `shared` (the shared inputs it holds).
 - `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.

@@ -719,6 +719,13 @@ new version-fail
 "$workz" report wf.toml --methods > methods.txt
 check "a version command that fails records no version" 'jq -e ".commands[0].status == \"failed\" and .commands[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
 
+new utf8-output
+# Bytes that are not UTF-8 in a tool's error and version stay strings in the records.
+{ header utf8-output; rule bad '[]' '["b.txt"]' "\"printf 'bad \\\\377 byte\\\\n' >&2; exit 1\"" $'version = "printf \'v1 \\\\377\'"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json 2> /dev/null
+l="$(last_launch)"
+check "a tool's output that is not UTF-8 stays a string in the records" 'jq -e ".reason | type == \"string\" and test(\"bad .* byte\")" "$l/attempts/bad/001/record.json" > /dev/null && jq -e ".commands[0].output | type == \"string\"" "$l/versions.json" > /dev/null && jq -e ".failures[0].reason | type == \"string\"" s.json > /dev/null'
+
 new prepare
 mkdir reads && echo one > reads/a.txt && echo two > reads/b.txt
 printf 'sample\treads\nA\treads/a.txt\nB\treads/b.txt\n' > samples.tsv
@@ -829,6 +836,20 @@ new retry
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "a retried rule completes and keeps both attempts" '[ "$(status_of s.json completed)" = 1 ] && [ -f "$(last_launch)/attempts/flaky/001/record.json" ] && [ -f "$(last_launch)/attempts/flaky/002/record.json" ]'
 
+new logs-wait
+# logs --follow during a launch that has yet to start the rule follows its new attempt.
+write_logs() { { header logs-wait; rule a '[]' '["a.txt"]' "\"$1; echo a > a.txt\""; rule b '["a.txt"]' '["b.txt"]' "\"echo $2 >&2; touch b.txt\""; } > wf.toml; }
+write_logs "true" first-b
+"$workz" run wf.toml "${iso[@]}" -q > s1.json
+write_logs "sleep 2" second-b
+"$workz" run wf.toml "${iso[@]}" -q > s2.json &
+engine=$!
+for _ in $(seq 100); do [ "$(ls .workz/launches | wc -l)" = 2 ] && break; sleep 0.05; done
+timeout 30 "$workz" logs b --follow > f.txt 2> f.err
+frc=$?
+wait $engine
+check "logs --follow waits for the running launch to start the rule and follows that attempt" '[ $frc = 0 ] && grep -q second-b f.txt && ! grep -q first-b f.txt'
+
 # ---------------------------------------------------------------- time limits and termination
 new timeout
 { header timeout
@@ -900,6 +921,7 @@ new crash
 engine=$!
 for _ in $(seq 100); do jq -e .rules.first .workz/state.json > /dev/null 2>&1 && break; sleep 0.1; done
 "$workz" plan wf.toml > live.txt 2> live.err
+"$workz" report -d . > live-report.tsv 2> live-report.err
 kill -KILL $engine
 wait $engine 2>/dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
@@ -913,6 +935,9 @@ crc=$?
 timeout 10 "$workz" watch -d . --interval 200 > w.txt 2> w.err
 wrc=$?
 check "status, control and watch see that a killed engine's launch did not finish" '[ $src = 1 ] && [ "$(jq -r .status st.json)" = unfinished ] && grep -q "did not finish" st.err && [ $crc = 1 ] && grep -q "no engine runs it" ctl.err && [ $wrc = 1 ] && grep -q "did not finish" w.err'
+"$workz" watch -d . --once > once.txt 2> once.err
+orc=$?
+check "watch --once and report see a running launch as running and a killed one as unfinished" '[ $orc = 1 ] && head -1 once.txt | grep -q "unfinished: its engine ended without recording its end" && ! grep -q RUNNING once.txt && grep -q "did not finish" once.err && grep -q "is still running; its attempts that have not ended have no record yet" live-report.err'
 "$workz" plan wf.toml > plan.txt 2> plan.err
 check "after a killed engine, finished rules are reused and interrupted ones rerun, and plan notes a running launch" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt && grep -q "a launch is running in" live.err && ! grep -q "a launch is running" plan.err'
 
@@ -1185,7 +1210,7 @@ rrc=$?
 echo 'garbage' > "$l/events.jsonl"
 rm "$l/summary.json"
 "$workz" watch -d . --once > w.out 2> /dev/null
-check "a truncated summary, a corrupt record and a corrupt event stream are named, never shown as results" '[ $src = 1 ] && grep -q "summary.json is not valid JSON" st.err && [ ! -s st.out ] && [ $rrc = 1 ] && grep -q "record.json is not valid JSON; the report leaves it out" r.err && grep -q "started at an unknown time" w.out && grep -q "1 line of events.jsonl could not be read" w.out'
+check "a truncated summary, a corrupt record and a corrupt event stream are named, never shown as results" '[ $src = 1 ] && grep -q "summary.json is not valid JSON" st.err && [ ! -s st.out ] && [ $rrc = 1 ] && grep -q "record.json is not valid JSON; the report leaves it out" r.err && grep -q "unfinished: its engine ended without recording its end" w.out && grep -q "1 line of events.jsonl could not be read" w.out'
 echo garbage > .workz/state.json
 "$workz" plan wf.toml > /dev/null 2> p.err
 prc=$?

@@ -1349,7 +1349,8 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (opts.launch) |id| if (!sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ rec, "launches", id }))) return failed("no launch {s} recorded in {s}", .{ id, rec });
-    const dir = (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
+    const fresh = if (opts.follow and opts.launch == null and opts.attempt == null) try workz.logs.awaitAttempt(c.gpa, c.a, root, rule) else null;
+    const dir = fresh orelse (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
         if (opts.attempt) |n| return failed("no attempt {d} of rule {s} recorded in {s}", .{ n, rule, rec });
         if (opts.launch) |id| return failed("rule {s} did not run in launch {s}", .{ rule, id });
         return failed("no attempt of rule {s} recorded in {s}", .{ rule, rec });
@@ -1592,6 +1593,9 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     }
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
+    // An attempt writes its record when it ends; the page shows running ones.
+    if ((kind != .html or suggest) and workz.records.launchActive(c.gpa, dir))
+        std.debug.print("workz: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const w = &text.writer;
@@ -1961,7 +1965,7 @@ fn hold(paths: []const [:0]const u8) Exit {
 /// the newest launch, which launch last ran some.
 fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
     const id = std.fs.path.basename(dir);
-    var why: []const u8 = "it ran no rule";
+    var why: []const u8 = if (workz.records.launchActive(c.gpa, dir)) "none has ended yet" else "it ran no rule";
     if (sys.readFile(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }), 1 << 20)) |text| {
         defer c.gpa.free(text);
         if (std.json.parseFromSliceLeaky(std.json.Value, c.a, text, .{ .allocate = .alloc_always })) |v| {

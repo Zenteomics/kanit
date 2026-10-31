@@ -284,12 +284,13 @@ pub const Tracker = struct {
             self.previous_bytes += whole(u64, v, "bytes") orelse 0;
         } else if (eql(u8, ev, "sample")) {
             self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
-            self.cpu_cores = float(v, "cpu_cores_used");
+            // A damaged record's negative amounts read as none.
+            self.cpu_cores = if (float(v, "cpu_cores_used")) |c| @max(c, 0) else null;
             try self.samples.append(a, .{
                 .ns = at,
-                .threads_reserved = float(v, "threads_reserved") orelse 0,
-                .memory_reserved_mib = float(v, "memory_reserved_mib") orelse 0,
-                .shared_reserved_mib = float(v, "shared_reserved_mib") orelse 0,
+                .threads_reserved = @max(float(v, "threads_reserved") orelse 0, 0),
+                .memory_reserved_mib = @max(float(v, "memory_reserved_mib") orelse 0, 0),
+                .shared_reserved_mib = @max(float(v, "shared_reserved_mib") orelse 0, 0),
                 .memory_current = self.memory_current,
                 .cpu_cores = self.cpu_cores,
             });
@@ -327,6 +328,9 @@ pub const Tracker = struct {
             if (eql(u8, ev, "task_waiting")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .waiting;
+                // Its request, for what the budget had room for while it waited.
+                if (whole(u32, v, "threads")) |n| r.threads = n;
+                if (whole(u64, v, "memory_mib")) |n| r.memory_mib = n;
                 r.reason = try a.dupe(u8, str(v, "reason") orelse "");
                 if (std.mem.startsWith(u8, r.reason, "group:")) {
                     try self.open_wait.put(a, ri, self.group_waits.items.len);
