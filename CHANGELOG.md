@@ -11,11 +11,15 @@ This version makes reuse and records hold where 0.5.0 could mislead: a directory
 Three changes need action:
 
 - **Expect every rule to run once.** A directory's identity now covers its subdirectories, so the engine key moves to 4.
-- **Rename paths that validation now refuses.**
+- **Change what validation now refuses.**
   - An output, log, benchmark or workdir written through a symlinked directory: write its real path.
   - An input that reaches another rule's output through a symlinked directory: name the producer path.
   - A rule writing inside its own directory input, including any rule with `input = ["."]`: write beside the directory.
   - A directory input that holds a symlink to a directory: declare that directory as an input of its own.
+  - An input whose `..` follows a symlink, such as `link/../file`: write the path without `..`.
+  - An output below a symlink that points nowhere: write its real path.
+  - A size or duration with a sign or `_`, such as `"+512M"`: write digits and a unit. A `K` size rounds up to whole MiB.
+  - A `[defaults]` value out of range, which is checked even when every rule sets its own.
 - **Update scripts that read records or exit statuses.**
   - `verify` exits 1 when a selected rule has no record to check.
   - `status` exits 1 for a launch whose engine ended without recording its end, and prints it with `"status": "unfinished"`.
@@ -56,7 +60,7 @@ Three changes need action:
   - A shared input that no running rule uses is no longer measured, so a missing one no longer refuses an unrelated launch.
   - `plan --budget` refuses a used shared input it cannot measure, as `run` does, instead of counting it as empty.
   - A rule that lists one shared input twice is refused, instead of counting it twice.
-- **Sizes.** Requests and budgets above 1024T are refused when read, instead of aborting on overflow.
+- **Sizes.** Requests and budgets above 1024T are refused when read, instead of aborting on overflow, and a `K` size rounds up, so a request never shrinks.
 - **Input errors.** An unreadable or too deeply nested input names its path, a manifest entry that is not a file is refused, and `validate --inputs` reports a dangling symlink as missing, as `run` does.
 - **`workz prepare`.**
   - Dotted resource group and shared input names, such as `"disk.io"`, stay quoted, so the prepared workflow is valid.
@@ -66,6 +70,10 @@ Three changes need action:
   - An empty `workflow.name` or `shell` is refused.
   - A path written as a file and also needed as a directory by another output, log, benchmark or workdir is refused.
   - Two logs or benchmarks that are hard links to one file are refused.
+  - An input whose `..` follows a symlink is refused, since the program would read another file than the one workz tracks.
+  - An output below a symlink that points nowhere is refused, as one through a symlinked directory is.
+  - A `shell` holding a NUL byte, which Bash drops, and a workflow with `rules = []` are refused.
+  - Labels count characters, not bytes, and must be valid UTF-8.
 - **`workz schema`.** `description` and `author` take any value, as the parser does.
 - **Isolation.** A `WORKZ_STAGE` inherited from the caller no longer skips the run's scope, so the run's CPU and memory limits always hold.
 - **Passed variables.**

@@ -707,3 +707,65 @@ test "[unit] - [prepare]: --check reads rule names that a comment follows" {
     try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
     try testing.expectEqualStrings("change 1: S1__count\n", text.written());
 }
+
+test "[failure] - [workflow]: an input whose '..' follows a symlink is refused, and plain '..' is not" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("far");
+    _ = try s.dir("far/deep");
+    _ = try s.dir("sub");
+    _ = try s.file("far/y.txt", "stale");
+    try s.link("lnk", "far/deep");
+
+    const msg = try problemsIn(&s, head ++ rule1("produce", "output = [\"far/y.txt\"]\n") ++
+        rule1("consume", "input = [\"lnk/../y.txt\"]\noutput = [\"c.txt\"]\n"));
+    defer testing.allocator.free(msg);
+    try testing.expect(std.mem.indexOf(u8, msg, "rule consume: input 'lnk/../y.txt' names another file than it spells") != null);
+
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, head ++ rule1("produce", "output = [\"far/y.txt\"]\n") ++
+        rule1("consume", "input = [\"sub/../far/y.txt\"]\noutput = [\"c.txt\"]\n"), &problem);
+    wf.deinit();
+}
+
+test "[failure] - [workflow]: values that cannot mean what they say are refused" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    try s.link("gone", "/nonexistent-workz-dir");
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = head ++ rule1("a", "output = [\"gone/q.txt\"]\n"), .want = "rule a: 'gone/q.txt' passes through a symlinked directory" },
+        .{ .text = head ++ "[[rules]]\nname = \"a\"\noutput = [\"a\"]\nshell = \"echo ok > a\\u0000; echo BAD > bad\"\nmemory = \"1M\"\n", .want = "rule a: shell holds a NUL byte" },
+        .{ .text = head ++ "rules = []\n", .want = "the workflow declares no [[rules]]" },
+        .{ .text = head ++ "[defaults]\nmemory = \"bogus\"\nthreads = 0\n\n" ++ rule1("a", "output = [\"a\"]\n"), .want = "defaults: invalid memory 'bogus'" },
+        .{ .text = head ++ "[defaults]\nthreads = 0\n\n" ++ rule1("a", "output = [\"a\"]\n"), .want = "defaults: threads must be between 1 and 4096" },
+        .{ .text = head ++ rule1("a", "output = [\"a\"]\nstep = \"" ++ "é" ** 201 ++ "\"\n"), .want = "step must be 1 to 200 characters" },
+    }) |c| {
+        const msg = try problemsIn(&s, c.text);
+        defer testing.allocator.free(msg);
+        if (std.mem.indexOf(u8, msg, c.want) == null) {
+            std.debug.print("message: {s}\nexpected to contain: {s}\n", .{ msg, c.want });
+            return error.TestUnexpectedResult;
+        }
+    }
+    // 200 two-byte characters are 200 characters.
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, head ++ rule1("a", "output = [\"a\"]\nstep = \"" ++ "é" ** 200 ++ "\"\n"), &problem);
+    wf.deinit();
+}
+
+test "[edge] - [workflow]: sizes and durations are digits and a unit, and K rounds up" {
+    try testing.expectEqual(@as(?u64, 2), workflow.parseMemoryMib("1536K"));
+    try testing.expectEqual(@as(?u64, 1), workflow.parseMemoryMib("1024K"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1023K"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("+512M"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("1_024"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseMemoryMib("-1G"));
+    try testing.expectEqual(@as(?u64, 90), workflow.parseDuration("90"));
+    try testing.expectEqual(@as(?u64, 5400), workflow.parseDuration("1h30m"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("+30"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("1_0"));
+    try testing.expectEqual(@as(?u64, null), workflow.parseDuration("+30m"));
+}

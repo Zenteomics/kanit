@@ -230,6 +230,17 @@ v2=$?
 "$workz" validate root.toml 2> e3.txt
 v3=$?
 check "validation refuses writes through a symlinked directory and writes inside the rule's own directory input" '[ $v1 = 2 ] && grep -q "rule a: .alias/x.txt. passes through a symlinked directory" e1.txt && [ $v2 = 2 ] && grep -q "rule c: .rec/o.txt. passes through a symlinked directory" e2.txt && [ $v3 = 2 ] && grep -q "rule d: .d.txt. is inside its directory input" e3.txt && [ ! -e .workz/o.txt ]'
+mkdir -p far/deep && ln -s far/deep lnk && echo decoy > y.txt && ln -s gone-dir dangling
+{ header path-alias
+  rule e '[]' '["far/y.txt"]' '"echo e > far/y.txt"'
+  rule f '["lnk/../y.txt"]' '["f.txt"]' '"cat lnk/../y.txt > f.txt"'
+} > dotdot.toml
+{ header path-alias; rule g '[]' '["dangling/q.txt"]' '"mkdir -p dangling; echo g > dangling/q.txt"'; } > dangling.toml
+"$workz" validate dotdot.toml 2> e4.txt
+v4=$?
+"$workz" validate dangling.toml 2> e5.txt
+v5=$?
+check "validation refuses a '..' that a symlink sends elsewhere and an output below a dangling symlink" '[ $v4 = 2 ] && grep -q "rule f: input .lnk/../y.txt. names another file than it spells" e4.txt && [ $v5 = 2 ] && grep -q "rule g: .dangling/q.txt. passes through a symlinked directory" e5.txt'
 
 new workdir
 mkdir data && echo hello > data/in.txt

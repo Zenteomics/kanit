@@ -75,8 +75,8 @@ shared = ["genome"]
 - **Unknown keys are errors**, in every table. The message names the line and, when one is close, the key you probably meant.
 - **Names** of rules and shared inputs have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - **Paths** name files or directories explicitly. They cannot be empty, contain control characters, `*`, `?`, `[`, `]`, `{` or `}`, contain `://`, or start with `gh:`. Relative paths resolve against the working directory.
-- **Sizes** are strings: a whole number with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024. A plain number is MiB, so `"512"` and `"512M"` are equal. A size below 1 MiB, such as `"512K"`, or above `"1024T"` is refused.
-- **Durations** are strings: a whole number of seconds, or numbers with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.
+- **Sizes** are strings: digits with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024, without a sign or `_`. A plain number is MiB, so `"512"` and `"512M"` are equal. A `K` size rounds up to whole MiB, so `"1536K"` is 2 MiB. A size below 1 MiB, such as `"512K"`, or above `"1024T"` is refused.
+- **Durations** are strings: digits for seconds, or digits with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.
 
 ## [workflow]
 
@@ -94,6 +94,8 @@ shared = ["genome"]
 | --------- | ------- | ------- | ------------------------------ |
 | `threads` | integer | 1       | threads of rules that set none |
 | `memory`  | size    | none    | memory of rules that set none  |
+
+- `threads` is 1 to 4096. Both values are checked where they are declared, even when every rule sets its own.
 
 ## [resource_groups.NAME]
 
@@ -161,15 +163,16 @@ An entry with `container` is a service:
 - `priority` is between -1,000,000 and 1,000,000.
 - `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
 - A path one rule writes as a file cannot be a directory that another output, log, benchmark or workdir lies in, and two logs or benchmarks cannot be hard links to one file.
-- `workflow.name` and each rule's `shell` must not be empty.
-- `output`, `log`, `benchmark` and `workdir` name their real path: one that passes through a symlinked directory is an error, since the file would have a second name that the graph does not see.
+- A workflow declares at least one rule. `workflow.name` and each rule's `shell` must not be empty, and a `shell` cannot hold a NUL byte, which Bash would drop.
+- `output`, `log`, `benchmark` and `workdir` name their real path: one that passes through a symlinked directory, or a symlink that points nowhere, is an error, since the file would have a second name that the graph does not see.
 - An input that is a directory depends on every rule that writes inside it, so it is read once they have completed. A rule's own outputs, log, benchmark and workdir cannot lie inside its directory input, which they would change while it runs; an input of `.` is therefore an error for any rule.
 - `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
 - `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
 - An input that reaches another rule's output, or a directory it writes into, through a symlink is an error: declare the output's own path, so the dependency is visible.
+- An input whose `..` follows a symlink, such as `link/../file` where `link` points into another directory, is an error: the program would read another file than the path spells. Write the path without `..`.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
 - `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
-- `step`, `sample`, `category` and `tool` are labels of 1 to 200 characters without control characters. They are not part of the rule key, so changing one reruns nothing. [Concepts](Concepts.md#steps-samples-categories-and-tools) defines them and says how undeclared ones are derived.
+- `step`, `sample`, `category` and `tool` are UTF-8 labels of 1 to 200 characters without control characters. They are not part of the rule key, so changing one reruns nothing. [Concepts](Concepts.md#steps-samples-categories-and-tools) defines them and says how undeclared ones are derived.
 
 ## [rules.resources]
 
