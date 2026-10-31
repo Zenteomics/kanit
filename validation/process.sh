@@ -1,8 +1,37 @@
 #!/usr/bin/env bash
 # Process checks for the workz binary with real child processes, cgroups and
-# signals. Usage: validation/process.sh WORKZ_BINARY OUTPUT_DIR
+# signals. Usage: validation/process.sh WORKZ_BINARY OUTPUT_DIR [SECTION...]
 # OUTPUT_DIR must not exist; every check gets its own working directory there.
+# A SECTION is the first word of a section heading below, such as reuse,
+# container or monitoring; without one, every section runs. Exit status: 0
+# when every check passed, 1 when one failed, 3 when none failed but some
+# were skipped for a missing tool or image.
 set -uo pipefail
+
+# A selection runs a copy of this script without the other sections: the
+# setup before the first section, every helper function, the gates of the
+# optional tools, and the selected sections.
+if [ $# -gt 2 ]; then
+  sel=" ${*:3} "
+  copy=$(mktemp /var/tmp/workz-process.XXXXXX)
+  awk -v sel="$sel" '
+    /^# -{64} / { name = $3; sub(/,$/, "", name); inside = name == "summary" || index(sel, " " name " ") > 0; started = 1; if (inside) print; next }
+    !started { print; next }
+    /^[a-z_]+\(\) \{ .*\}$/ { print; next }
+    /^[a-z_]+\(\) \{ *(#.*)?$/ { fn = "block" }
+    !fn && /^[a-z_]+\(\) \{ / { fn = "line" }
+    fn == "block" { print; if ($0 ~ /^\}$/) fn = ""; next }
+    fn == "line" { print; if ($0 ~ /; \}$/) fn = ""; next }
+    /^else skip / { print (inside ? $0 : "fi"); next }
+    /^(if have_images |if command -v tmux )/ { print; print "  :"; next }
+    /^trap / { print; next }
+    inside { print }
+  ' "$0" > "$copy"
+  bash "$copy" "$1" "$2"
+  rc=$?
+  rm "$copy"
+  exit $rc
+fi
 
 workz=$(realpath "$1")
 out=$2
@@ -308,14 +337,21 @@ new container-records
 check "a container rule writing at the top of the working directory cannot write the records" '[ "$(cat top.txt)" = denied ] && [ ! -e .workz/planted ]'
 
 new container-secret
-{ header container-secret; crule s '[]' '["s.txt"]' '"sleep 2; printf %s \"$AUDIT_SECRET\" > s.txt"'; } > wf.toml
-AUDIT_SECRET=audit-secret-value "$workz" run wf.toml "${iso[@]}" --pass-env AUDIT_SECRET -q > s.json &
+{ header container-secret; crule s '[]' '["s.txt"]' '"sleep 2; printf %s \"$PASSED_SECRET\" > s.txt"'; } > wf.toml
+PASSED_SECRET=passed-secret-value "$workz" run wf.toml "${iso[@]}" --pass-env PASSED_SECRET -q > s.json &
 runner=$!
-# The pattern does not match itself in this grep's own arguments.
+# The pattern does not match itself in this grep's own arguments. A
+# process that does carry the value shows the scan can see one.
+bash -c 'sleep 3; :' passed-secret-value &
+decoy=$!
+control=0
+grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q "/proc/$decoy/" && control=1
+kill $decoy
+wait $decoy 2> /dev/null
 seen=0
-for _ in $(seq 25); do grep -l "audit-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q . && seen=1; sleep 0.1; done
+for _ in $(seq 25); do grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q . && seen=1; sleep 0.1; done
 wait $runner
-check "a passed variable reaches a container rule without its value in Podman's arguments" '[ "$(status_of s.json completed)" = 1 ] && [ "$(cat s.txt)" = audit-secret-value ] && [ $seen = 0 ]'
+check "a passed variable reaches a container rule without its value in Podman's arguments" '[ $control = 1 ] && [ "$(status_of s.json completed)" = 1 ] && [ "$(cat s.txt)" = passed-secret-value ] && [ $seen = 0 ]'
 
 new container-workdir
 echo inside > in.txt
@@ -765,7 +801,7 @@ new escaped
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 sleep 0.5
 pid=$(cat ../escaped.pid)
-check "a process that leaves the task's session is ended with its cgroup" '! alive $pid'
+check "a process that leaves the task's session is ended with its cgroup" '[ -n "$pid" ] && ! alive $pid'
 
 new oom
 { header oom; rule hog '[]' '["h.txt"]' '"python3 -I -c \"b = bytearray(300 * 1024 * 1024)\"; touch h.txt"'; } > wf.toml
@@ -804,7 +840,7 @@ new crash
 } > wf.toml
 "$workz" run wf.toml --no-isolation -q > s1.json &
 engine=$!
-sleep 2
+for _ in $(seq 100); do jq -e .rules.first .workz/state.json > /dev/null 2>&1 && break; sleep 0.1; done
 kill -KILL $engine
 wait $engine 2>/dev/null
 for _ in $(seq 20); do [ -d /proc/"$(cat ../crash-task.pid)" ] || break; sleep 0.1; done
@@ -1543,7 +1579,7 @@ wait $launcher
 rc=$?
 sleep 0.5
 child=$(cat child.pid)
-check "SIGTERM to the launcher stops the run and its children" '[ $rc = 130 ] && [ ! -e done.txt ] && ! alive $child'
+check "SIGTERM to the launcher stops the run and its children" '[ $rc = 130 ] && [ ! -e done.txt ] && [ -n "$child" ] && ! alive $child'
 { header terminate; rule slow '[]' '["done.txt"]' '"echo resumed > done.txt"'; } > wf.toml
 "$workz" run wf.toml --max-threads 2 --max-memory 256M -q > s2.json
 check "a later run completes the interrupted rule" '[ "$(cat done.txt)" = resumed ]'
@@ -1579,6 +1615,10 @@ for name in ordinary shared_inputs log_is_input log_hardlink relative_alias log_
   check "alias case $name is $([ $want = 0 ] && echo accepted || echo rejected)" '[ $rc = $want ]'
 done
 
+# ---------------------------------------------------------------- summary
 echo
 echo "$pass passed, $failed failed, $skipped skipped"
-[ $failed = 0 ]
+# A run that skipped checks did not test everything, so it cannot pass for
+# a complete one.
+[ $failed = 0 ] || exit 1
+[ $skipped = 0 ] || exit 3
