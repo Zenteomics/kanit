@@ -139,7 +139,7 @@ Both work with `plan` and `explain` too, so you can see the effect first. Combin
 
 ## Previous outputs
 
-Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. If the attempt fails, is stopped or cannot start, workz moves them back, and the rule keeps its record: `verify` and the next `plan` still see the last result, and what the failed attempt wrote goes to its `failed/` directory. A rule therefore never sees its own old outputs, and the bytes a completed rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
+Before an attempt starts, workz moves every output that already exists into the attempt's `previous/` directory, named `<index>-<file name>`. If the attempt fails, is stopped or cannot start, workz moves them back, and the rule keeps its record; if the engine was killed during the attempt, the next launch moves them back before it starts: `verify` and the next `plan` still see the last result, and what the failed attempt wrote goes to its `failed/` directory. A rule therefore never sees its own old outputs, and the bytes a completed rerun replaces are kept in `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until that launch directory is removed or `workz clean --previous` removes them ([Records](Records.md#cleaning-up)). A large output replaced on every rerun adds its size each time: the summary of a launch that kept some says how much.
 
 ## Verify outputs
 

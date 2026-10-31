@@ -92,7 +92,8 @@ pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *co
 /// directories of outside inputs and shared paths read-only, then each
 /// output's directory read-write. A directory below one already listed with
 /// the same access is skipped; a directory needed both ways is read-write
-/// (outputs at the top of the working directory make it writable).
+/// (outputs at the top of the working directory make it writable, but
+/// never the engine's records in it).
 pub const Mount = struct { dir: []const u8, write: bool };
 
 pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro: []const []const u8) ![]Mount {
@@ -117,6 +118,13 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
         if (!also_rw) try out.append(a, .{ .dir = d, .write = false });
     }
     for (rw_min) |d| try out.append(a, .{ .dir = d, .write = true });
+    // A writable working directory would expose the engine's records, which
+    // decide reuse: they are mounted over it read-only.
+    const rec = try std.fs.path.join(a, &.{ root, ".workz" });
+    for (rw_min) |d| if (workflow.within(d, rec)) {
+        try out.append(a, .{ .dir = rec, .write = false });
+        break;
+    };
     return out.items;
 }
 

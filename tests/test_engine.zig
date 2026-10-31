@@ -26,14 +26,17 @@ test "container mounts list each directory once with the access it needs" {
     rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
     const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});
-    // /w must be writable for top.txt, which also covers /w/out.
-    try testing.expectEqual(@as(usize, 3), ms.len);
+    // /w must be writable for top.txt, which also covers /w/out; the
+    // records below it stay read-only.
+    try testing.expectEqual(@as(usize, 4), ms.len);
     try testing.expectEqualStrings("/data/reads", ms[0].dir);
     try testing.expect(!ms[0].write);
     try testing.expectEqualStrings("/data/ref", ms[1].dir);
     try testing.expect(!ms[1].write);
     try testing.expectEqualStrings("/w", ms[2].dir);
     try testing.expect(ms[2].write);
+    try testing.expectEqualStrings("/w/.workz", ms[3].dir);
+    try testing.expect(!ms[3].write);
 
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/sub/b.txt" };
     const nested = try workz.container.mounts(a, "/w", &rule, &.{});

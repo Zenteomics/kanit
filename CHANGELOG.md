@@ -33,7 +33,10 @@ Three changes need action:
   - `.workz/` directories inside a directory input are left out of its identity.
   - An unreadable directory input stops `plan`, `explain` and `run` with its path and the reason.
 - **Symlinked paths.** Two spellings of one output, a write into `.workz/` or a workdir outside the working directory through a symlink, and a consumer hidden from its producer by a directory alias are refused by validation.
-- **Failed reruns.** An attempt that fails, is stopped or cannot start moves the earlier outputs back from `previous/`, and the rule keeps its record; what the attempt wrote goes to its `failed/` directory.
+- **Failed reruns.** An attempt that fails, is stopped or cannot start moves the earlier outputs back from `previous/`, and the rule keeps its record; what the attempt wrote goes to its `failed/` directory. After an engine killed during an attempt, the next launch moves them back before it starts, so `clean --keep` cannot remove the last copy.
+- **Container records.** A container rule with an output directly in the working directory can no longer write `.workz/`.
+- **`workz control`.** A command sent while a launch is still starting is applied instead of erased, and after `control cancel` the first interrupt keeps the grace period instead of killing at once.
+- **Lock probes.** A `run` started while `status` or `watch` checks the lock is no longer refused as if another launch were running.
 - **Shared services.**
   - A service that dies after it was ready fails the rules running against it, instead of letting them complete.
   - Files mounted into a service are inputs of the rules that join it, so changing one reruns them.

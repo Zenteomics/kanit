@@ -344,6 +344,8 @@ const Engine = struct {
     stopping: bool = false,
     interrupted: bool = false,
     interrupted_at: i128 = 0,
+    /// When the first INT, TERM or HUP arrived; a `control cancel` is not one.
+    signalled_at: ?i128 = null,
     fatal: ?[]const u8 = null,
     dirty: bool = false,
     pending_done: std.ArrayList([]const u8) = .empty,
@@ -1289,8 +1291,9 @@ const Engine = struct {
         const n = sys.read(h.pipe, &buf) catch 0;
         sys.close(h.pipe);
         h.pipe = -1;
-        // A service given up on stays failed even if it reports ready late.
-        if (h.timed_out) return;
+        // A service given up on stays failed even if it reports ready late,
+        // and one being stopped stays stopping: its exit is a release.
+        if (h.timed_out or h.st == .stopping) return;
         h.ready_deadline = null;
         if (n == 0 or !std.mem.startsWith(u8, buf[0..n], "ready")) {
             // The holder ends; its exit fails the rules waiting for it.
@@ -2236,6 +2239,9 @@ const Engine = struct {
 
     fn loop(self: *Engine) !void {
         var idle_passes: u32 = 0;
+        // `workz control` may append before the file is watched: those
+        // commands apply before the first rule starts.
+        if (self.control_watch >= 0) try self.readControl();
         while (true) {
             try self.updateReadiness();
             // Holders kept for rules that can no longer run are released.
@@ -2270,21 +2276,29 @@ const Engine = struct {
             if (process.has(seen, .INT) or process.has(seen, .TERM) or process.has(seen, .HUP)) {
                 // A repeated interrupt kills at once; one arriving within a second of
                 // the first is the same request delivered twice (terminal and launcher).
-                if (self.interrupted) {
-                    if (sys.monoNs() - self.interrupted_at >= std.time.ns_per_s) {
+                const now = sys.monoNs();
+                if (self.signalled_at) |at| {
+                    if (now - at >= std.time.ns_per_s) {
+                        if (!self.opts.quiet) self.note("workz: interrupted again; killing running tasks");
                         for (self.tasks) |*t| if (t.status == .running) {
-                            t.kill_at = sys.monoNs();
+                            t.kill_at = now;
                         };
                         for (self.holders) |*h| if (h.pid > 0) {
-                            h.kill_at = sys.monoNs();
+                            h.kill_at = now;
                         };
                     }
                 } else {
-                    self.interrupted = true;
-                    self.interrupted_at = sys.monoNs();
+                    self.signalled_at = now;
                     self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
-                    if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
-                    self.beginStop();
+                    if (self.interrupted) {
+                        // `control cancel` already stops the launch with its grace period.
+                        if (!self.opts.quiet) self.note("workz: interrupted; the launch is already stopping (interrupt again to kill)");
+                    } else {
+                        self.interrupted = true;
+                        self.interrupted_at = now;
+                        if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
+                        self.beginStop();
+                    }
                 }
             }
             for (fds.items[1..]) |f| if (f.revents != 0) {
@@ -2318,6 +2332,43 @@ pub const container_client_mib: u64 = 32;
 /// rule its Podman client's memory.
 pub fn reservedMib(r: *const workflow.Rule) u64 {
     return r.memory_mib + if (r.container != null) container_client_mib else 0;
+}
+
+/// For each rule an earlier launch dispatched and never finished (the
+/// journal's open entries), moves the outputs its last attempt put in
+/// `previous/` back to their paths, and what that attempt left there into
+/// its `failed/`, as a failed attempt does in its own launch. The attempt is
+/// the rule's newest in the newest other launch that ran it.
+fn recoverPrevious(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, rec: []const u8, current: []const u8, events: *records.Events) !void {
+    const open = try records.Journal.unfinished(gpa, a, rec);
+    if (open.len == 0) return;
+    const launches = try records.launchNames(gpa, a, rec);
+    for (open) |name| {
+        const ri = wf.ruleIndex(name) orelse continue;
+        const r = &wf.rules[ri];
+        var k = launches.len;
+        const dir = while (k > 0) {
+            k -= 1;
+            if (std.mem.eql(u8, launches[k], current)) continue;
+            const rule_dir = try std.fs.path.join(a, &.{ rec, "launches", launches[k], "attempts", name });
+            const numbers = (try sys.dirNames(gpa, a, rule_dir)) orelse continue;
+            if (numbers.len == 0) continue;
+            break try std.fs.path.join(a, &.{ rule_dir, numbers[numbers.len - 1] });
+        } else continue;
+        for (r.output_abs, r.output, 0..) |o, written, n| {
+            const file = try std.fmt.allocPrint(a, "{d}-{s}", .{ n, std.fs.path.basename(o) });
+            const prev = try std.fs.path.join(a, &.{ dir, "previous", file });
+            const kept = (try sys.lstat(gpa, prev)) orelse continue;
+            if (try sys.lstat(gpa, o)) |_| {
+                const failed_dir = try std.fs.path.join(a, &.{ dir, "failed" });
+                sys.mkdir(gpa, failed_dir) catch |err| if (err != error.PathAlreadyExists) return err;
+                try sys.rename(gpa, o, try std.fs.path.join(a, &.{ failed_dir, file }));
+            }
+            if (std.fs.path.dirname(o)) |d| try sys.mkdirAll(gpa, d);
+            try sys.rename(gpa, prev, o);
+            events.emit("output_restored", .{ .rule = name, .path = written, .moved_from = prev, .bytes = kept.size });
+        }
+    }
 }
 
 /// What one shared input holds and takes from the budget, as `Holder`.
@@ -2589,6 +2640,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         else => return err,
     };
     defer st.deinit();
+    // A launch killed during an attempt left that attempt's earlier outputs
+    // in its previous/: they go back to their paths before anything runs.
+    recoverPrevious(gpa, a, wf, rec, launch.id, &events) catch |err| switch (err) {
+        error.OutOfMemory => return err,
+        else => std.debug.print("workz: cannot put back the earlier outputs a killed launch moved aside: {s}\n", .{sys.errorText(err)}),
+    };
 
     // A recorded output that changed outside the engine is refused unless
     // --rerun, except when it has a stored digest and its bytes still match:
@@ -2813,13 +2870,16 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         t.max_attempts = 1 + (wf.rules[i].retries orelse opts.retry);
     }
     engine.last_save_ns = sys.monoNs();
-    // The control file of this launch, watched for appended commands.
+    // The control file of this launch, watched for appended commands. It is
+    // created without truncating: a command appended while the launch was
+    // being set up is kept.
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
     control: {
-        sys.writeFile(gpa, engine.control_path, "") catch |err| {
+        const cfd = sys.openWrite(gpa, engine.control_path, .append) catch |err| {
             std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
             break :control;
         };
+        sys.close(cfd);
         const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
             std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
             break :control;

@@ -100,7 +100,7 @@ A failed rule has no completed record, so the next launch runs it again; everyth
 
 ## Interrupts
 
-`Ctrl-C` (or `SIGTERM`, or `SIGHUP`) stops the launch gracefully: running attempts get `SIGTERM` and the grace period, and no new rule starts. A second interrupt, at least a second after the first, kills them at once. The launch ends with status `interrupted` and exit status 130; rules that had not started are `cancelled`.
+`Ctrl-C` (or `SIGTERM`, or `SIGHUP`) stops the launch gracefully: running attempts get `SIGTERM` and the grace period, and no new rule starts. A second interrupt, at least a second after the first, kills them at once. After `workz control cancel`, which stops the launch the same way, the first interrupt keeps the grace period and the second kills. The launch ends with status `interrupted` and exit status 130; rules that had not started are `cancelled`.
 
 ## Steering a running launch
 

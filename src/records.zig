@@ -67,11 +67,21 @@ pub fn lock(gpa: Allocator, records: []const u8) !sys.Fd {
     errdefer sys.close(fd);
     const LOCK_EX = 2;
     const LOCK_NB = 4;
-    _ = sys.check(linux.flock(fd, LOCK_EX | LOCK_NB)) catch |err| switch (err) {
-        error.WouldBlock => return error.Busy,
-        else => return err,
-    };
-    return fd;
+    // `running` probes take the lock shared for an instant; a launch holds
+    // it for its whole life. A short retry tells the two apart.
+    var tries: u32 = 0;
+    while (true) : (tries += 1) {
+        _ = sys.check(linux.flock(fd, LOCK_EX | LOCK_NB)) catch |err| switch (err) {
+            error.WouldBlock => {
+                if (tries == 20) return error.Busy;
+                const ts: linux.timespec = .{ .sec = 0, .nsec = 10 * std.time.ns_per_ms };
+                _ = linux.nanosleep(&ts, null);
+                continue;
+            },
+            else => return err,
+        };
+        return fd;
+    }
 }
 
 /// Whether a run holds the run lock now. It only tests the lock: a shared

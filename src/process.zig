@@ -212,8 +212,12 @@ pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *co
     sys.close(pipe[1]);
     var out: std.ArrayList(u8) = .empty;
     var buf: [4096]u8 = undefined;
+    var read_failed = false;
     while (true) {
-        const n = sys.read(pipe[0], &buf) catch break;
+        const n = sys.read(pipe[0], &buf) catch {
+            read_failed = true;
+            break;
+        };
         if (n == 0) break;
         try out.appendSlice(a, buf[0..n]);
     }
@@ -225,5 +229,7 @@ pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *co
     }
     _ = gpa;
     if (!linux.W.IFEXITED(status.*) or linux.W.EXITSTATUS(status.*) != 0) return error.CommandFailed;
+    // Output cut short by a failed read is not the command's output.
+    if (read_failed) return error.CommandFailed;
     return out.items;
 }

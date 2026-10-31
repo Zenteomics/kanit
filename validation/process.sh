@@ -298,6 +298,11 @@ drop_alias
 rc=$?
 check "a missing image refuses the launch without pulling" '[ $rc = 2 ] && jq -e ".status == \"refused\" and (.error | test(\"not available locally\"))" s4.json > /dev/null'
 
+new container-records
+{ header container-records; crule w '[]' '["top.txt"]' '"if touch .workz/planted 2> /dev/null; then echo wrote; else echo denied; fi > top.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json
+check "a container rule writing at the top of the working directory cannot write the records" '[ "$(cat top.txt)" = denied ] && [ ! -e .workz/planted ]'
+
 new container-secret
 { header container-secret; crule s '[]' '["s.txt"]' '"sleep 2; printf %s \"$AUDIT_SECRET\" > s.txt"'; } > wf.toml
 AUDIT_SECRET=audit-secret-value "$workz" run wf.toml "${iso[@]}" --pass-env AUDIT_SECRET -q > s.json &
@@ -811,6 +816,40 @@ wrc=$?
 check "status, control and watch see that a killed engine's launch did not finish" '[ $src = 1 ] && [ "$(jq -r .status st.json)" = unfinished ] && grep -q "did not finish" st.err && [ $crc = 1 ] && grep -q "no engine runs it" ctl.err && [ $wrc = 1 ] && grep -q "did not finish" w.err'
 "$workz" plan wf.toml > plan.txt
 check "after a killed engine, finished rules are reused and interrupted ones rerun" 'grep -q "reuse first" plan.txt && grep -q "run   second" plan.txt'
+
+new crash-previous
+{ header crash-previous; rule r '[]' '["out.txt"]' '"echo A > out.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s1.json
+sed -i 's|"echo A > out.txt"|"sleep 30; echo B > out.txt"|' wf.toml
+"$workz" run wf.toml --no-isolation -q > s2.json 2> /dev/null &
+engine=$!
+for _ in $(seq 50); do [ -e out.txt ] || break; sleep 0.1; done
+kill -KILL $engine
+wait $engine 2> /dev/null
+moved=$([ -e out.txt ] && echo no || echo yes)
+sed -i 's|"sleep 30; echo B > out.txt"|"echo partial > out.txt; exit 3"|' wf.toml
+"$workz" run wf.toml --no-isolation -q > s3.json 2> /dev/null
+"$workz" clean -d . --keep 1 > /dev/null
+check "a killed launch's earlier output comes back before the next launch, and survives clean --keep" '[ $moved = yes ] && [ "$(cat out.txt)" = A ] && [ "$(jq -c "select(.event == \"output_restored\")" "$(last_launch)/events.jsonl" | wc -l)" = 2 ]'
+
+new cancel-interrupt
+{ header cancel-interrupt; rule t '[]' '["t.txt"]' '"trap \"\" TERM; sleep 4; touch t.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation --grace 3 > s.json 2> err.txt &
+engine=$!
+for _ in $(seq 50); do jq -e 'select(.event == "task_started")' "$(last_launch)/events.jsonl" > /dev/null 2>&1 && break; sleep 0.1; done
+"$workz" control -d . cancel > /dev/null
+sleep 1.2
+kill -INT $engine
+wait $engine
+check "an interrupt after control cancel keeps the grace period" 'grep -q "the launch is already stopping" err.txt && ! grep -q "killing running tasks" err.txt'
+
+new control-startup
+{ header control-startup; rule s '[]' '["s.txt"]' '"sleep 3; touch s.txt"'; } > wf.toml
+"$workz" run wf.toml --no-isolation -q > s.json 2> /dev/null &
+engine=$!
+for _ in $(seq 400); do "$workz" control -d . cancel > /dev/null 2>&1 && break; done
+wait $engine
+check "a cancel sent while the launch starts is applied" '[ ! -e s.txt ] && [ "$(jq -r .status s.json)" = interrupted ]'
 
 new crash-isolated
 { header crash-isolated; rule long '[]' '["l.txt"]' '"echo $$ > pid.txt; sleep 30; touch l.txt"'; } > wf.toml
