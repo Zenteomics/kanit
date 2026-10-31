@@ -22,6 +22,7 @@ Three changes need action:
   - An attempt that could not start writes `record.json`, with `started` `null`.
   - The event `output_restored` follows an attempt that did not complete, and `previous_bytes` leaves out the bytes it put back.
   - `record.json` adds `request.reserved_mib`, and a service's `shared_loading` event adds `reserved_mib`.
+  - `summary.json`, `launch.json` and `request.json` add `v`, and `versions.json` becomes `{"v": 1, "commands": [...]}` instead of a bare list. A record or event with a newer `v` is left out and named, never misread.
   - `.workz/` is made readable by its owner alone; another user who read the records needs to be given access again.
   - `run` refuses `--slice` with `--no-isolation`, which ignored it, and `version` refuses words after it.
   - `plan` exits 1 when `run` would refuse the launch, for a missing input or an output changed outside workz, and says so on standard error.
@@ -38,6 +39,7 @@ Three changes need action:
 - **Failed reruns.** An attempt that fails, is stopped or cannot start moves the earlier outputs back from `previous/`, and the rule keeps its record; what the attempt wrote goes to its `failed/` directory. After an engine killed during an attempt, the next launch moves them back before it starts, so `clean --keep` cannot remove the last copy.
 - **Container records.** A container rule with an output directly in the working directory can no longer write `.workz/`.
 - **`workz control`.** A command sent while a launch is still starting is applied instead of erased, and after `control cancel` the first interrupt keeps the grace period instead of killing at once.
+- **Out of memory.** A state file read while memory runs out reports the shortage, instead of calling the file damaged and telling you to move it aside; loading a workflow frees what it held when an allocation fails.
 - **Lock probes.** A `run` started while `status` or `watch` checks the lock is no longer refused as if another launch were running.
 - **Shared services.**
   - A service that dies after it was ready fails the rules running against it, instead of letting them complete.

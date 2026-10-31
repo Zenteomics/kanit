@@ -1,4 +1,4 @@
-Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, so a reader can check what it parses.
+Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. workz refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
 
 ## Layout
 
@@ -51,7 +51,7 @@ workz reads the state files of earlier versions, formats 1 to 4, and saves them 
 
 Written when the launch starts:
 
-- `engine` (the version and the executable's SHA-256), `engine_key` and `launch`;
+- `v`, `engine` (the version and the executable's SHA-256), `engine_key` and `launch`;
 - `workflow` and `workflow_sha256`, and `workflow_name` and `workflow_version` from its `[workflow]` table;
 - `workdir` and `started`;
 - the budget: `max_threads`, `max_memory_mib` and `jobs`;
@@ -60,7 +60,7 @@ Written when the launch starts:
 
 ### versions.json
 
-Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
+Written when the launch ends, if a rule that ran names a `version` command ([Writing workflows](Writing-Workflows.md#tool-versions)): `v` and `commands`, one entry for each image and command, with `command`, `container` (the image reference, or `null` on the host), `image` (its ID), `status` (`completed`, `failed`, `stopped` when the launch ended first, or `not run`), `exit_code` and `output`, the first 4 KiB of what it printed. `versions/` keeps each command's whole output.
 
 ### summary.json
 
@@ -68,6 +68,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 
 ```json
 {
+  "v": 1,
   "engine": "workz 0.5.0 sha256:...",
   "engine_key": 4,
   "launch": "20261027T224512.478-40c9943e",
@@ -98,7 +99,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 ## Attempt files
 
 - `command.sh` is the script that ran: for a host rule, `set -euo pipefail` followed by the rule's `shell`.
-- `request.json` holds `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
+- `request.json` holds `v`, `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
 - `stdout.log` and `stderr.log` are the command's output.
 - `record.json` is written last, when the attempt ends. An attempt that could not start, such as one whose workdir link would replace a file, gets one too, with `started` `null`.
 - `previous/` holds the earlier outputs moved aside before the attempt ran. When the attempt does not complete, workz moves them back to their paths, so the last result stays where its record says, and moves what the attempt left there into `failed/`.
@@ -123,7 +124,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
 | `image`                | the image ID a container rule ran, else `null`             |
 | `version`              | the rule's version command, else `null`                    |
-| `queue`                | `waited_s`, and seconds per wait reason                    |
+| `queue`                | `waited_s`, and `reasons`: each `reason` with its `seconds` |
 | `key`                  | the rule key the attempt ran under                         |
 
 The `cgroup` object holds:

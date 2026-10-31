@@ -22,6 +22,10 @@ const sys = @import("sys.zig");
 const Allocator = std.mem.Allocator;
 
 pub const event_version = 1;
+/// Version of the JSON records of a launch: `launch.json`, `request.json`,
+/// `record.json`, `versions.json` and `summary.json`. A reader refuses a
+/// newer one; one without `v` is from before the field and reads as 1.
+pub const record_version = 1;
 
 pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ root, ".workz" });

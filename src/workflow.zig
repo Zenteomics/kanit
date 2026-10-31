@@ -998,6 +998,7 @@ const PathCache = struct {
             const real_dir = (try self.real(dir)) orelse break :blk null;
             break :blk try std.fs.path.join(self.gpa, &.{ real_dir, std.fs.path.basename(path) });
         };
+        errdefer if (r) |x| self.gpa.free(x);
         try self.reals.put(self.gpa, path, r);
         return r;
     }

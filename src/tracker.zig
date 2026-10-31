@@ -7,6 +7,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const fields = @import("fields.zig");
+const event_version = @import("records.zig").event_version;
 const Allocator = std.mem.Allocator;
 const str = fields.str;
 const int = fields.int;
@@ -248,6 +249,11 @@ pub const Tracker = struct {
             self.unreadable_lines += 1;
             return;
         };
+        // An event of a newer format is counted with the unreadable ones.
+        if (fields.newer(v, event_version)) {
+            self.unreadable_lines += 1;
+            return;
+        }
         const a = self.arena.allocator();
         const ev = str(v, "event") orelse return;
         const at = parseTime(str(v, "time") orelse "") orelse 0;

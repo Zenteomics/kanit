@@ -43,3 +43,11 @@ pub fn number(x: ?Value) ?f64 {
     };
     return if (std.math.isFinite(f)) f else null;
 }
+
+/// Whether a record's format, its field `v`, is newer than `known`, so it
+/// cannot be read as one this version knows. A record without `v` predates
+/// the field and is not newer.
+pub fn newer(v: Value, known: i64) bool {
+    const x = get(v, "v") orelse return false;
+    return x != .integer or x.integer > known;
+}

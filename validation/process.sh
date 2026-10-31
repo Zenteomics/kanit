@@ -401,7 +401,7 @@ waits2=$(grep -c '"reason":"memory"' "$(last_launch)/events.jsonl")
 "$workz" run wf.toml --max-threads 2 --max-memory 95M --rerun -q > s3.json 2> err3.txt
 rc=$?
 check "admission counts each container rule's Podman client in the memory budget" '[ "$(status_of s1.json completed)" = 2 ] && [ "$waits1" = 1 ] && [ "$(status_of s2.json completed)" = 2 ] && [ "$waits2" = 0 ] && [ $rc = 2 ] && grep -q "rule c1 needs 96 MiB with its Podman client; the run allows 95 MiB" err3.txt'
-check "a version command runs once per image in the image, and the record names the image ID" 'jq -e "length == 1 and (.[0].output | startswith(\"sort (GNU coreutils)\")) and .[0].image == \"$(jq -r .image .workz/launches/$(jq -r .launch s2.json)/attempts/c1/001/record.json)\"" ".workz/launches/$(jq -r .launch s2.json)/versions.json" > /dev/null'
+check "a version command runs once per image in the image, and the record names the image ID" 'jq -e ".v == 1 and (.commands | length) == 1 and (.commands[0].output | startswith(\"sort (GNU coreutils)\")) and .commands[0].image == \"$(jq -r .image .workz/launches/$(jq -r .launch s2.json)/attempts/c1/001/record.json)\"" ".workz/launches/$(jq -r .launch s2.json)/versions.json" > /dev/null'
 
 # ---------------------------------------------------------------- shared services
 # srule NAME INPUTS OUTPUTS SHELL SERVICE: a container rule that joins SERVICE.
@@ -641,14 +641,14 @@ new methods
 "$workz" run wf.toml "${iso[@]}" -q --rerun-rule join > s2.json
 "$workz" report wf.toml --methods > methods.txt
 "$workz" report wf.toml --methods --format json > methods.json
-check "a version command runs once per launch, and none runs when its rules are reused" '[ "$(jq -c "[.[] | .output]" .workz/launches/$(jq -r .launch s1.json)/versions.json)" = "[\"upper 1.4.2\"]" ] && [ ! -e "$(last_launch)/versions.json" ]'
+check "a version command runs once per launch, and none runs when its rules are reused" '[ "$(jq -c "[.commands[] | .output]" .workz/launches/$(jq -r .launch s1.json)/versions.json)" = "[\"upper 1.4.2\"]" ] && [ ! -e "$(last_launch)/versions.json" ]'
 check "report --methods names the workflow, the tools with their versions and each step's command across launches" 'grep -q "^  methods 2.1, file sha256:" methods.txt && grep -q "^  upper: upper 1.4.2$" methods.txt && grep -q "^    up_s1: echo one > s1.txt$" methods.txt && jq -e ".rules == 3 and (.launches | length) == 2 and .steps[0].step == \"up\" and .steps[0].rules == 2" methods.json > /dev/null'
 
 new version-fail
 { header version-fail; rule t '[]' '["t.txt"]' '"touch t.txt"' $'tool = "t"\nversion = "no_such_tool_xyz --version"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 "$workz" report wf.toml --methods > methods.txt
-check "a version command that fails records no version" 'jq -e ".[0].status == \"failed\" and .[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
+check "a version command that fails records no version" 'jq -e ".commands[0].status == \"failed\" and .commands[0].exit_code == 127" ".workz/launches/$(jq -r .launch s.json)/versions.json" > /dev/null && grep -q "version  no_such_tool_xyz --version (no version recorded)" methods.txt'
 
 new prepare
 mkdir reads && echo one > reads/a.txt && echo two > reads/b.txt

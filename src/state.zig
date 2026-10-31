@@ -137,11 +137,12 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
         else => return err,
     };
     defer gpa.free(bytes);
-    var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch return error.CorruptState;
+    var probe = std.json.parseFromSlice(struct { format_version: i64 }, gpa, bytes, .{ .ignore_unknown_fields = true }) catch |err| return if (err == error.OutOfMemory) err else error.CorruptState;
     const v = probe.value.format_version;
     probe.deinit();
     if (v < 1 or v > format_version) return error.UnsupportedState;
-    s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch return error.CorruptState;
+    // Running out of memory is not a damaged file.
+    s.data = std.json.parseFromSliceLeaky(Data, a, bytes, .{ .allocate = .alloc_always }) catch |err| return if (err == error.OutOfMemory) err else error.CorruptState;
     // Format 1 lacks `envs`, which this engine adds as rules run; formats 1
     // and 2 record identities with the device number. Once read, the file
     // is saved as the current format.

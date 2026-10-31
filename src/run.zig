@@ -869,6 +869,7 @@ const Engine = struct {
             try std.fmt.allocPrint(self.a, "#!/usr/bin/env bash\nset -euo pipefail\n{s}\n", .{r.shell});
         try sys.writeFile(self.gpa, script, body);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/request.json", .{t.dir}), .{
+            .v = records.record_version,
             .rule = r.name,
             .attempt = t.attempts,
             .shell = r.shell,
@@ -1020,7 +1021,7 @@ const Engine = struct {
         const r = self.rule(i);
         if (t.dir.len == 0) return;
         records.writeJson(self.gpa, std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}) catch return, .{
-            .v = 1,
+            .v = records.record_version,
             .rule = r.name,
             .attempt = n,
             .status = @tagName(status),
@@ -1592,7 +1593,7 @@ const Engine = struct {
         const status: []const u8 = if (ok) "completed" else if (t.cancelled) "cancelled" else "failed";
         const finished_text = try records.timeText(self.a, now_real);
         try records.writeJson(self.gpa, try std.fmt.allocPrint(self.a, "{s}/record.json", .{t.dir}), .{
-            .v = 1,
+            .v = records.record_version,
             .rule = r.name,
             .attempt = t.attempts,
             .status = status,
@@ -2181,7 +2182,7 @@ const Engine = struct {
                 .output = try self.a.dupe(u8, std.mem.trim(u8, head, " \t\r\n")),
             });
         }
-        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), entries.items);
+        try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), .{ .v = records.record_version, .commands = entries.items });
     }
 
     fn helper(self: *Engine, pid: ?linux.pid_t) void {
@@ -2465,6 +2466,7 @@ const EngineCost = struct { cpu_s: f64, max_rss_mib: f64 };
 
 /// `summary.json`, the record of how a launch ended.
 const Summary = struct {
+    v: u32 = records.record_version,
     engine: []const u8,
     engine_key: u32 = state.engine_key,
     launch: []const u8,
@@ -2593,6 +2595,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     var selected: usize = 0;
     for (mask) |m| selected += @intFromBool(m);
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.json" }), .{
+        .v = records.record_version,
         .engine = engine_id,
         .engine_key = state.engine_key,
         .launch = launch.id,

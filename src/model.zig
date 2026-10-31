@@ -197,6 +197,11 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
         if (unreadable) |list| try list.append(a, path);
         return null;
     };
+    // A record of a newer format is left out rather than misread.
+    if (fields.newer(v, records.record_version)) {
+        if (unreadable) |list| try list.append(a, path);
+        return null;
+    }
     const wall = num(get(v, "wall_s")) orelse 0;
     const req = get(v, "request");
     const cg: ?Value = if (get(v, "cgroup")) |c| (if (c == .object) c else null) else null;
@@ -744,11 +749,16 @@ fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]c
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
     const bytes = sys.readFile(gpa, path, 1 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
         try unreadable.append(a, path);
         return null;
     };
+    if (fields.newer(v, records.record_version)) {
+        try unreadable.append(a, path);
+        return null;
+    }
+    return v;
 }
 
 fn stateOf(s: tracker.Status, finished: bool) State {

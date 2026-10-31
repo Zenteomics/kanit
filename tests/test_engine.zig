@@ -214,3 +214,55 @@ test "[unit] - [views]: steps collapse samples, and a shared input shows what lo
     try testing.expectEqualStrings("report", wf.rules[path[2]].name);
     try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, "report", "index"));
 }
+
+test "[unit] - [run]: a rule's budget need counts its request, its client and each shared input once" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    // 5000 bytes take two 4 KiB pages: 1 MiB once rounded up.
+    _ = try s.file("ref.fa", "x" ** 5000);
+    const text = head ++ "[shared.ref]\npath = \"ref.fa\"\n\n[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"100M\"\n\n[shared.gone]\npath = \"missing-ref\"\n\n" ++
+        "[[rules]]\nname = \"host\"\noutput = [\"h\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"ref\"]\n" ++
+        "[[rules]]\nname = \"box\"\noutput = [\"b\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"ref\", \"svc\"]\n" ++
+        "[[rules]]\nname = \"far\"\noutput = [\"f\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"gone\"]\n";
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try loadText(&s, text, &problem);
+    defer wf.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var failure: []const u8 = "";
+
+    // `far` does not run, so its missing shared input is never measured.
+    const sizes = try workz.run.sharedSizes(testing.allocator, a, &wf, &.{ true, true, false }, &failure);
+
+    try testing.expectEqual(@as(u64, 1), sizes[0].?.mib);
+    try testing.expectEqual(@as(u64, 100 + workz.run.container_client_mib), sizes[1].?.reserve_mib);
+    try testing.expect(sizes[2] == null);
+    try testing.expectEqual(@as(u64, 10 + 1), workz.run.neededMib(&wf.rules[0], sizes));
+    try testing.expectEqual(@as(u64, 10 + workz.run.container_client_mib + 1 + 100 + workz.run.container_client_mib), workz.run.neededMib(&wf.rules[1], sizes));
+    try testing.expectError(error.Unmeasurable, workz.run.sharedSizes(testing.allocator, a, &wf, &.{ false, false, true }, &failure));
+    try testing.expectEqualStrings("shared input gone (missing-ref): no such file or directory", failure);
+}
+
+test "[unit] - [cgroup]: counters are read from the cgroup files, and a missing file reads as unknown" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("memory.peak", "314572800\n");
+    _ = try s.file("memory.events", "low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\noom_group_kill 0\n");
+    _ = try s.file("cpu.stat", "usage_usec 2500000\nuser_usec 2000000\nsystem_usec 500000\n");
+    _ = try s.file("memory.pressure", "some avg10=0.00 avg60=0.00 avg300=0.00 total=77\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=5\n");
+    _ = try s.file("memory.stat", "anon 1000\nfile 4096\n");
+
+    const c = workz.cgroup.read(testing.allocator, s.path);
+
+    try testing.expectEqual(@as(?u64, 314572800), c.memory_peak);
+    try testing.expectEqual(@as(?u64, null), c.memory_current);
+    try testing.expectEqual(@as(u64, 1), c.oom_kill);
+    try testing.expectEqual(@as(u64, 3), c.memory_max_events);
+    try testing.expectEqual(@as(?u64, 2500000), c.cpu_usage_usec);
+    try testing.expectEqual(@as(?u64, 77), c.memory_some_us);
+    try testing.expectEqual(@as(?u64, 5), c.memory_full_us);
+    try testing.expectEqual(@as(?u64, null), c.io_some_us);
+    try testing.expectEqual(@as(?u64, 4096), c.file);
+}

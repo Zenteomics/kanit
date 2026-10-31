@@ -96,11 +96,16 @@ const Launch = struct {
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    return std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
         std.debug.print("workz: {s} is not valid JSON; its fields are left out\n", .{path});
         return null;
     };
+    if (fields.newer(v, records.record_version)) {
+        std.debug.print("workz: {s} was written by a newer workz; its fields are left out\n", .{path});
+        return null;
+    }
+    return v;
 }
 
 fn str(v: ?Value, key: []const u8) []const u8 {
@@ -126,7 +131,10 @@ fn firstLine(text: []const u8) []const u8 {
 /// host when `image` is null: the first line of what it printed, if it
 /// exited 0.
 fn versionOf(l: *const Launch, command: []const u8, image: ?[]const u8) ?[]const u8 {
-    const list = l.versions orelse return null;
+    // `{"v": 1, "commands": [...]}`; launches before the version field wrote
+    // the bare list.
+    const top = l.versions orelse return null;
+    const list = if (top == .object) (fields.get(top, "commands") orelse return null) else top;
     if (list != .array) return null;
     for (list.array.items) |e| {
         if (!eql(u8, str(e, "command"), command)) continue;
