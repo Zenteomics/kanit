@@ -26,10 +26,10 @@ Writes a commented starter workflow to `FILE` (default `workflow.toml`). With `-
 ## prepare
 
 ```text
-workz prepare [TEMPLATE] [-o WORKFLOW] [--check]
+workz prepare [TEMPLATE] [--params FILE] [-o WORKFLOW] [--check]
 ```
 
-Writes the workflow a pipeline template describes ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)): TEMPLATE defaults to `pipeline.toml` and WORKFLOW to `workflow.toml` beside it. The result is checked as `validate` would before it replaces WORKFLOW; one that is not valid is kept beside it as `WORKFLOW.prepare-tmp` to read, with exit status 2. `--check` writes nothing: it prints the rules the template would add, remove and change against WORKFLOW, and whether the other tables changed, and exits 1 if anything would.
+Writes the workflow a pipeline template describes ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)): TEMPLATE defaults to `pipeline.toml` and WORKFLOW to `workflow.toml` beside it. The result is checked as `validate` would before it replaces WORKFLOW; one that is not valid is kept beside it as `WORKFLOW.prepare-tmp` to read, with exit status 2. `--check` writes nothing: it prints the rules the template would add, remove and change against WORKFLOW, and whether the other tables changed, and exits 1 if anything would. `--params FILE` names a run file: its `[workflow]` keys and `[params]` take the place of the template's one by one, its `[samples]` replaces the template's with a sheet read beside it, and the workflow goes beside it (`workflow.toml`), so one template serves every run. A run file holds no other table.
 
 ## schema
 

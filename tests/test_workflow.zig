@@ -806,6 +806,116 @@ test "[unit] - [prepare]: workflow and defaults name params, a sheet may start w
     };
 }
 
+test "[unit] - [prepare]: a sheet column's default fills its empty cells, and a column the sheet lacks" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.tsv", "sample\tadapter\nS1\tAGATC\nS2\t\n");
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[samples]
+        \\sheet = "samples.tsv"
+        \\defaults = { adapter = "CTGTC", umi = "", strand = "none" }
+        \\[[steps]]
+        \\name = "trim"
+        \\for_each = "sample"
+        \\output = ["{sample}.txt"]
+        \\shell = "trim -a {adapter} {umi}--strand {strand} > {sample}.txt"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    for ([_][]const u8{
+        "shell = \"trim -a AGATC --strand none > S1.txt\"",
+        "shell = \"trim -a CTGTC --strand none > S2.txt\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+}
+
+test "[unit] - [prepare]: a run file names the run, overrides params and brings its own sheet" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.tsv", "sample\nT1\n");
+    const template = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "pipeline"
+        \\version = "3"
+        \\[samples]
+        \\sheet = "samples.tsv"
+        \\[params]
+        \\genome = "default.fa"
+        \\mem = "2G"
+        \\[[steps]]
+        \\name = "align"
+        \\for_each = "sample"
+        \\output = ["{sample}.bam"]
+        \\shell = "align {genome} {strand} > {sample}.bam"
+        \\memory = "{mem}"
+        \\
+    );
+    _ = try s.dir("run");
+    _ = try s.file("run/sheet.csv", "sample,strand\nS1,reverse\nS2,\n");
+    const run = try s.file("run/run.toml",
+        \\[workflow]
+        \\name = "run-7"
+        \\[samples]
+        \\sheet = "sheet.csv"
+        \\defaults = { strand = "unstranded" }
+        \\[params]
+        \\genome = "/refs/whole.fa"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compileWith(testing.allocator, arena.allocator(), template, "pipeline.toml", .{ .path = run, .shown = "run.toml" }, &problem);
+    for ([_][]const u8{
+        "from pipeline.toml with run.toml",
+        "name = \"run-7\"",
+        "version = \"3\"",
+        "shell = \"align /refs/whole.fa reverse > S1.bam\"",
+        "shell = \"align /refs/whole.fa unstranded > S2.bam\"",
+        "memory = \"2G\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+    try testing.expect(std.mem.indexOf(u8, text, "T1") == null);
+    const odd = try s.file("run/odd.toml", "[steps]\nname = \"x\"\n");
+    try testing.expectError(error.Invalid, workz.prepare.compileWith(testing.allocator, arena.allocator(), template, "pipeline.toml", .{ .path = odd, .shown = "odd.toml" }, &problem));
+    try testing.expect(std.mem.indexOf(u8, problem.message, "odd.toml: unknown table 'steps'; a run file holds workflow, samples and params") != null);
+}
+
+test "[failure] - [prepare]: sheet defaults name columns with string values, never sample" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("empty.tsv", "sample\tlabel\nS1\t\n");
+    const step = "[[steps]]\nname = \"a\"\nfor_each = \"sample\"\noutput = [\"{sample}.txt\"]\nshell = \"true\"\n";
+    const Case = struct { text: []const u8, want: []const u8 };
+    for ([_]Case{
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"empty.tsv\"\n" ++ step, .want = "empty.tsv line 2: column label is empty" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"empty.tsv\"\ndefaults = { sample = \"S9\" }\n" ++ step, .want = "samples.defaults cannot name sample" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"empty.tsv\"\ndefaults = { label = 3 }\n" ++ step, .want = "samples.defaults.label must be a string" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"empty.tsv\"\ndefaults = { input = \"x\" }\n" ++ step, .want = "samples.defaults.input has the name of a placeholder" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"empty.tsv\"\ndefaults = \"x\"\n" ++ step, .want = "samples.defaults must be a table" },
+    }, 0..) |c, k| {
+        var name_buf: [16]u8 = undefined;
+        const path = try s.file(try std.fmt.bufPrint(&name_buf, "d{d}.toml", .{k}), c.text);
+        var arena = std.heap.ArenaAllocator.init(testing.allocator);
+        defer arena.deinit();
+        var problem: workz.prepare.Problem = .{};
+        try testing.expectError(error.Invalid, workz.prepare.compile(testing.allocator, arena.allocator(), path, "d.toml", &problem));
+        if (std.mem.indexOf(u8, problem.message, c.want) == null) {
+            std.debug.print("case {d}: want '{s}' in '{s}'\n", .{ k, c.want, problem.message });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "[failure] - [prepare]: a template refuses what would be read two ways or not at all" {
     var s = try Scratch.init();
     defer s.deinit();

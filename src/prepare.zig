@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
 const template_keys = [_][]const u8{ "workflow", "defaults", "resource_groups", "shared", "samples", "params", "steps" };
-const sample_keys = [_][]const u8{ "sheet", "names" };
+const sample_keys = [_][]const u8{ "sheet", "names", "defaults" };
 
 /// The sample sheet: column names, and one row of values per sample.
 pub const Sheet = struct {
@@ -41,10 +41,15 @@ fn fail(a: Allocator, problem: *Problem, comptime fmt: []const u8, args: anytype
     return error.Invalid;
 }
 
+/// Column defaults of a sample sheet: an empty cell of a column with a
+/// default takes it, and a column the sheet lacks takes it on every row.
+pub const Defaults = std.StringArrayHashMapUnmanaged([]const u8);
+
 /// Reads a TSV (or, for a `.csv` file, comma-separated) sample sheet with
 /// a header line naming its columns, one of them `sample`. Empty lines and
-/// lines starting with `#` are skipped.
-pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error!Sheet {
+/// lines starting with `#` are skipped. An empty cell is refused unless its
+/// column has a default.
+pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, defaults: Defaults, problem: *Problem) Error!Sheet {
     const raw_bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, sys.errorText(err) });
     defer gpa.free(raw_bytes);
     // A spreadsheet program may start the file with a UTF-8 byte order mark.
@@ -70,7 +75,9 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
         }
         if (header) |h| {
             if (fields.items.len != h.len) return fail(a, problem, "{s} line {d}: {d} fields, but the header has {d}", .{ shown, n, fields.items.len, h.len });
-            for (fields.items, h) |v, col| if (v.len == 0) return fail(a, problem, "{s} line {d}: column {s} is empty", .{ shown, n, col });
+            for (fields.items, h) |*v, col| if (v.len == 0) {
+                v.* = defaults.get(col) orelse return fail(a, problem, "{s} line {d}: column {s} is empty", .{ shown, n, col });
+            };
             try rows.append(a, fields.items);
         } else header = fields.items;
     }
@@ -84,7 +91,23 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
         for (rows.items[0..k]) |earlier| if (eql(u8, earlier[si], row[si])) return fail(a, problem, "{s} lists sample {s} twice", .{ shown, row[si] });
     }
     if (rows.items.len == 0) return fail(a, problem, "{s} lists no sample", .{shown});
-    return sheet;
+    return withDefaults(a, sheet, defaults);
+}
+
+/// The sheet with a column for every default it lacks, holding the default on every row.
+fn withDefaults(a: Allocator, sheet: Sheet, defaults: Defaults) Error!Sheet {
+    var columns: std.ArrayList([]const u8) = .empty;
+    try columns.appendSlice(a, sheet.columns);
+    for (defaults.keys()) |col| if (sheet.column(col) == null) try columns.append(a, col);
+    if (columns.items.len == sheet.columns.len) return sheet;
+    const rows = try a.alloc([]const []const u8, sheet.rows.len);
+    for (sheet.rows, rows) |row, *out| {
+        const full = try a.alloc([]const u8, columns.items.len);
+        @memcpy(full[0..row.len], row);
+        for (columns.items[row.len..], full[row.len..]) |col, *v| v.* = defaults.get(col).?;
+        out.* = full;
+    }
+    return .{ .columns = columns.items, .rows = rows, .source = sheet.source };
 }
 
 /// The placeholders `workz prepare` fills from the step itself; a column or
@@ -367,8 +390,81 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
     try w.writeAll("\n");
 }
 
+/// The sample sheet a `[samples]` table names: a file read beside `path`
+/// (the template or the run file), or a list of names; null without one.
+fn readSamples(gpa: Allocator, a: Allocator, value: ?toml.Value, path: []const u8, shown: []const u8, problem: *Problem) Error!?Sheet {
+    const sv = value orelse return null;
+    var sheet: ?Sheet = null;
+    if (sv != .table) return fail(a, problem, "{s}: samples must be a table with sheet or names", .{shown});
+    const st = sv.table;
+    var kit = st.iterator();
+    while (kit.next()) |e| if (!contains(&sample_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown key '{s}' in [samples]; use sheet, names or defaults", .{ shown, e.key_ptr.* });
+    if (st.get("sheet") != null and st.get("names") != null) return fail(a, problem, "{s}: [samples] takes sheet or names, not both", .{shown});
+    var defaults: Defaults = .empty;
+    if (st.get("defaults")) |dv| {
+        if (dv != .table) return fail(a, problem, "{s}: samples.defaults must be a table of column = \"value\"", .{shown});
+        var dit = dv.table.iterator();
+        while (dit.next()) |e| {
+            const col = e.key_ptr.*;
+            if (e.value_ptr.* != .string) return fail(a, problem, "{s}: samples.defaults.{s} must be a string", .{ shown, col });
+            if (eql(u8, col, "sample")) return fail(a, problem, "{s}: samples.defaults cannot name sample; every row names its own", .{shown});
+            if (reserved(col)) return fail(a, problem, "{s}: samples.defaults.{s} has the name of a placeholder workz prepare fills; rename it", .{ shown, col });
+            try defaults.put(a, col, e.value_ptr.string);
+        }
+    }
+    if (st.get("sheet")) |p| {
+        if (p != .string) return fail(a, problem, "{s}: samples.sheet must be a path", .{shown});
+        const dir = std.fs.path.dirname(path) orelse ".";
+        sheet = try readSheet(gpa, a, try sys.absolute(a, dir, p.string), p.string, defaults, problem);
+    } else if (st.get("names")) |n| {
+        if (n != .array) return fail(a, problem, "{s}: samples.names must be a list of names", .{shown});
+        var rows: std.ArrayList([]const []const u8) = .empty;
+        for (n.array.items) |item| {
+            if (item != .string or !workflow.validName(item.string)) return fail(a, problem, "{s}: samples.names holds an invalid sample name", .{shown});
+            const row = try a.alloc([]const u8, 1);
+            row[0] = item.string;
+            try rows.append(a, row);
+        }
+        const cols = try a.alloc([]const u8, 1);
+        cols[0] = "sample";
+        sheet = try withDefaults(a, .{ .columns = cols, .rows = rows.items, .source = "samples.names" }, defaults);
+    } else return fail(a, problem, "{s}: [samples] needs sheet or names", .{shown});
+    return sheet;
+}
+
+/// The values of a `[params]` table, put over those already in `params`.
+fn addParams(a: Allocator, problem: *Problem, value: ?toml.Value, shown: []const u8, sheet: ?Sheet, params: *std.StringArrayHashMapUnmanaged([]const u8)) Error!void {
+    const pv = value orelse return;
+    if (pv != .table) return fail(a, problem, "{s}: params must be a table", .{shown});
+    var pit = pv.table.iterator();
+    while (pit.next()) |e| {
+        const name = e.key_ptr.*;
+        if (!isIdent(name)) return fail(a, problem, "{s}: param '{s}' must be a name of letters, digits and '_'", .{ shown, name });
+        if (reserved(name)) return fail(a, problem, "{s}: param {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, name });
+        if (sheet) |sh| if (sh.column(name) != null) return fail(a, problem, "{s}: param {s} is also a column of {s}", .{ shown, name, sh.source });
+        try params.put(a, name, switch (e.value_ptr.*) {
+            .string => |s| s,
+            .integer => |i| try std.fmt.allocPrint(a, "{d}", .{i.value}),
+            .boolean => |b| if (b) "true" else "false",
+            else => return fail(a, problem, "{s}: param {s} must be a string, number or boolean", .{ shown, name }),
+        });
+    }
+}
+
+/// A run file given beside a template: the run's own `[workflow]` keys,
+/// `[samples]` and `[params]`, so one template serves many runs.
+pub const RunFile = struct { path: []const u8, shown: []const u8 };
+const run_keys = [_][]const u8{ "workflow", "samples", "params" };
+
 /// Compiles the template at `path` into workflow text.
 pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error![]const u8 {
+    return compileWith(gpa, a, path, shown, null, problem);
+}
+
+/// The workflow a template describes, with a run file's values in place of
+/// the template's: its `[workflow]` keys and `[params]` one by one, and its
+/// `[samples]` whole, the sheet read beside the run file.
+pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, run: ?RunFile, problem: *Problem) Error![]const u8 {
     const source = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read {s}: {s}", .{ shown, sys.errorText(err) });
     defer gpa.free(source);
     var info: toml.ErrorInfo = .{};
@@ -384,60 +480,50 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
         return fail(a, problem, "{s}: unknown table '{s}'", .{ shown, e.key_ptr.* });
     };
 
-    // The sample sheet: a file beside the template, or a list of names.
-    var sheet: ?Sheet = null;
-    if (doc.get("samples")) |sv| {
-        if (sv != .table) return fail(a, problem, "{s}: samples must be a table with sheet or names", .{shown});
-        const st = sv.table;
-        var kit = st.iterator();
-        while (kit.next()) |e| if (!contains(&sample_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown key '{s}' in [samples]; use sheet or names", .{ shown, e.key_ptr.* });
-        if (st.get("sheet") != null and st.get("names") != null) return fail(a, problem, "{s}: [samples] takes sheet or names, not both", .{shown});
-        if (st.get("sheet")) |p| {
-            if (p != .string) return fail(a, problem, "{s}: samples.sheet must be a path", .{shown});
-            const dir = std.fs.path.dirname(path) orelse ".";
-            sheet = try readSheet(gpa, a, try sys.absolute(a, dir, p.string), p.string, problem);
-        } else if (st.get("names")) |n| {
-            if (n != .array) return fail(a, problem, "{s}: samples.names must be a list of names", .{shown});
-            var rows: std.ArrayList([]const []const u8) = .empty;
-            for (n.array.items) |item| {
-                if (item != .string or !workflow.validName(item.string)) return fail(a, problem, "{s}: samples.names holds an invalid sample name", .{shown});
-                const row = try a.alloc([]const u8, 1);
-                row[0] = item.string;
-                try rows.append(a, row);
-            }
-            const cols = try a.alloc([]const u8, 1);
-            cols[0] = "sample";
-            sheet = .{ .columns = cols, .rows = rows.items, .source = "samples.names" };
-        } else return fail(a, problem, "{s}: [samples] needs sheet or names", .{shown});
+    var run_doc: ?@TypeOf(doc) = null;
+    var run_source: []u8 = &.{};
+    defer if (run_doc) |d| toml.deinit(d, gpa);
+    defer gpa.free(run_source);
+    if (run) |r| {
+        run_source = sys.readFile(gpa, r.path, 64 << 20) catch |err| return fail(a, problem, "cannot read {s}: {s}", .{ r.shown, sys.errorText(err) });
+        var run_info: toml.ErrorInfo = .{};
+        run_doc = toml.parseSlice(gpa, run_source, &run_info) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return fail(a, problem, "{s}: line {d}, column {d}: {s}", .{ r.shown, run_info.line, run_info.col, run_info.message() }),
+        };
+        var rit = run_doc.?.iterator();
+        while (rit.next()) |e| if (!contains(&run_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown table '{s}'; a run file holds workflow, samples and params", .{ r.shown, e.key_ptr.* });
     }
 
+    // The sample sheet: a file beside the template, or a list of names; a
+    // run file's samples take the place of the template's.
+    const run_samples = if (run_doc) |d| d.get("samples") else null;
+    const sheet = try readSamples(gpa, a, run_samples orelse doc.get("samples"), if (run_samples != null) run.?.path else path, if (run_samples != null) run.?.shown else shown, problem);
+
     var params: std.StringArrayHashMapUnmanaged([]const u8) = .empty;
-    if (doc.get("params")) |pv| {
-        if (pv != .table) return fail(a, problem, "{s}: params must be a table", .{shown});
-        var pit = pv.table.iterator();
-        while (pit.next()) |e| {
-            const name = e.key_ptr.*;
-            if (!isIdent(name)) return fail(a, problem, "{s}: param '{s}' must be a name of letters, digits and '_'", .{ shown, name });
-            if (reserved(name)) return fail(a, problem, "{s}: param {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, name });
-            if (sheet) |sh| if (sh.column(name) != null) return fail(a, problem, "{s}: param {s} is also a column of {s}", .{ shown, name, sh.source });
-            try params.put(a, name, switch (e.value_ptr.*) {
-                .string => |s| s,
-                .integer => |i| try std.fmt.allocPrint(a, "{d}", .{i.value}),
-                .boolean => |b| if (b) "true" else "false",
-                else => return fail(a, problem, "{s}: param {s} must be a string, number or boolean", .{ shown, name }),
-            });
-        }
-    }
+    try addParams(a, problem, doc.get("params"), shown, sheet, &params);
+    if (run_doc) |d| try addParams(a, problem, d.get("params"), run.?.shown, sheet, &params);
 
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
-    try w.print("# Written by `workz prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
-    for ([_][]const u8{ "workflow", "defaults" }) |name| if (doc.get(name)) |v| {
-        if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
+    if (run) |r| {
+        try w.print("# Written by `workz prepare` from {s} with {s}: edit those files and run it\n# again, since changes made here are lost.\n\n", .{ std.fs.path.basename(shown), std.fs.path.basename(r.shown) });
+    } else try w.print("# Written by `workz prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
+    for ([_][]const u8{ "workflow", "defaults" }) |name| {
+        const over: ?toml.Value = if (eql(u8, name, "workflow")) (if (run_doc) |d| d.get("workflow") else null) else null;
+        const base = doc.get(name);
+        if (base == null and over == null) continue;
+        const merged = try a.create(toml.Table);
+        merged.* = .empty;
+        for ([_]?toml.Value{ base, over }, [_][]const u8{ shown, if (run) |r| r.shown else shown }) |part, place| if (part) |v| {
+            if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ place, name });
+            var mit = v.table.iterator();
+            while (mit.next()) |e| try merged.put(a, e.key_ptr.*, e.value_ptr.*);
+        };
         // Its values may name params, as every table's may.
         const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .place = name };
-        try writeTable(w, name, null, (try ruleValue(a, problem, scope, name, v)).table);
-    };
+        try writeTable(w, name, null, (try ruleValue(a, problem, scope, name, .{ .table = merged })).table);
+    }
     for ([_][]const u8{ "resource_groups", "shared" }) |name| if (doc.get(name)) |v| {
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
         var git = v.table.iterator();

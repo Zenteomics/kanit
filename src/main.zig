@@ -68,7 +68,7 @@ const commands = [_]Command{
     },
     .{
         .name = "prepare",
-        .args = "[TEMPLATE] [-o WORKFLOW] [--check]",
+        .args = "[TEMPLATE] [--params FILE] [-o WORKFLOW] [--check]",
         .summary = "write the workflow a pipeline template describes",
         .group = .write,
         .common = .none,
@@ -79,16 +79,21 @@ const commands = [_]Command{
         \\sample sheet, named SAMPLE__STEP and labelled with its step and sample.
         \\{name} takes a sample-sheet column, a [params] value or the step name; in
         \\shell, {input}, {output} and {threads} name the rule's own. Other braces stay
-        \\as written. The result is checked as validate would before it replaces the
-        \\workflow; --check prints the rules it would add, remove and change, and
-        \\exits 1 if any, without writing.
+        \\as written. --params FILE is a run file: its [workflow] keys and [params]
+        \\take the place of the template's, its [samples] replaces the template's
+        \\with a sheet read beside it, and the workflow goes beside it. The result is
+        \\checked as validate would before it replaces the workflow; --check prints
+        \\the rules it would add, remove and change, and exits 1 if any, without
+        \\writing.
         ,
         .options = &.{
+            .{ .flag = "--params FILE", .desc = "a run file: the run's workflow keys, samples and params" },
             .{ .flag = "-o, --output FILE", .desc = "the workflow to write (default: workflow.toml)" },
             .{ .flag = "--check", .desc = "compare with the current workflow; write nothing" },
         },
         .examples =
         \\workz prepare
+        \\workz prepare ../pipeline/pipeline.toml --params run.toml
         \\workz prepare --check
         \\workz prepare rnaseq.pipeline.toml -o rnaseq.toml
         ,
@@ -1238,6 +1243,7 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
 fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     var template: ?[]const u8 = null;
     var output: ?[]const u8 = null;
+    var run_file: ?[]const u8 = null;
     var check = false;
     var i: usize = 0;
     while (i < args.len) : (i += 1) {
@@ -1253,6 +1259,14 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         } else if (std.mem.startsWith(u8, arg, "--output=")) {
             output = arg["--output=".len..];
             if (output.?.len == 0) return fail("--output needs a value", .{});
+        } else if (std.mem.eql(u8, arg, "--params")) {
+            const next = if (i + 1 < args.len) args[i + 1] else "";
+            if (next.len == 0 or (next.len > 1 and next[0] == '-')) return fail("{s} needs a value", .{arg});
+            i += 1;
+            run_file = next;
+        } else if (std.mem.startsWith(u8, arg, "--params=")) {
+            run_file = arg["--params=".len..];
+            if (run_file.?.len == 0) return fail("--params needs a value", .{});
         } else if (arg.len > 1 and arg[0] == '-') {
             return try unknownOption(c, arg);
         } else if (template == null) {
@@ -1263,10 +1277,14 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     const shown = template orelse "pipeline.toml";
     const path = try sys.absolute(c.a, cwd, shown);
     if (!sys.exists(c.gpa, path)) return fail("no template {s}; a template is a pipeline file with [[steps]] (see workz help prepare)", .{shown});
-    const out_path = if (output) |o| try sys.absolute(c.a, cwd, o) else try std.fs.path.join(c.a, &.{ std.fs.path.dirname(path) orelse ".", default_workflow });
+    const run_spec: ?workz.prepare.RunFile = if (run_file) |r| .{ .path = try sys.absolute(c.a, cwd, r), .shown = r } else null;
+    if (run_spec) |r| if (!sys.exists(c.gpa, r.path)) return fail("no run file {s}", .{r.shown});
+    // The workflow goes beside the run file, which belongs to the run, or else beside the template.
+    const beside = if (run_spec) |r| r.path else path;
+    const out_path = if (output) |o| try sys.absolute(c.a, cwd, o) else try std.fs.path.join(c.a, &.{ std.fs.path.dirname(beside) orelse ".", default_workflow });
     if (std.mem.eql(u8, out_path, path)) return fail("the template and the workflow it prepares are the same file: give another with -o", .{});
     var problem: workz.prepare.Problem = .{};
-    const text = workz.prepare.compile(c.gpa, c.a, path, shown, &problem) catch |err| switch (err) {
+    const text = workz.prepare.compileWith(c.gpa, c.a, path, shown, run_spec, &problem) catch |err| switch (err) {
         error.Invalid => return fail("{s}", .{problem.message}),
         else => return err,
     };

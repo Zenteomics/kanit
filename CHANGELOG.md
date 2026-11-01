@@ -4,6 +4,13 @@
 
 All notable changes to workz will be documented in this file. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow [Semantic Versioning](https://semver.org/). Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; each version says first what such a change needs from you.
 
+## [Unreleased]
+
+### Added
+
+- **Run files.** `workz prepare TEMPLATE --params FILE` reads a run file beside the template: its `[workflow]` keys and `[params]` override the template's one by one, its `[samples]` replaces the template's with a sheet read beside the run file, and the workflow is written beside the run file. One template then serves every run; without `--params`, nothing changes.
+- **Sample-sheet defaults.** `[samples] defaults = { column = "value" }` in a pipeline template gives an empty cell of that column its default, and a column the sheet lacks the default on every row; a default may be empty. An empty cell of a column without a default is still refused. The prepared workflow holds the values, as before.
+
 ## [0.6.0] - 2026-10-31
 
 This version makes reuse and records hold where 0.5.0 could mislead: a directory input counts its whole shape, a failed rerun or a killed launch keeps the last result and its record, `plan` and `verify` decide as `run` does, a dead service fails the rules that used it, a stopped tool keeps its grace period, budget checks count only the rules that will run, and damaged records are named instead of shown. Containers and crashes can no longer cost the records, `{threads}` follows a `--threads` override, validation and the command line refuse what they cannot honor, and every record says its format version. workz reads workflows with z-toml 0.4.1.
