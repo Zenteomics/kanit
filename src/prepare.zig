@@ -14,7 +14,7 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
 const template_keys = [_][]const u8{ "workflow", "defaults", "resource_groups", "shared", "samples", "params", "steps" };
-const sample_keys = [_][]const u8{ "sheet", "names" };
+const sample_keys = [_][]const u8{ "sheet", "names", "defaults" };
 
 /// The sample sheet: column names, and one row of values per sample.
 pub const Sheet = struct {
@@ -41,10 +41,15 @@ fn fail(a: Allocator, problem: *Problem, comptime fmt: []const u8, args: anytype
     return error.Invalid;
 }
 
+/// Column defaults of a sample sheet: an empty cell of a column with a
+/// default takes it, and a column the sheet lacks takes it on every row.
+pub const Defaults = std.StringArrayHashMapUnmanaged([]const u8);
+
 /// Reads a TSV (or, for a `.csv` file, comma-separated) sample sheet with
 /// a header line naming its columns, one of them `sample`. Empty lines and
-/// lines starting with `#` are skipped.
-pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, problem: *Problem) Error!Sheet {
+/// lines starting with `#` are skipped. An empty cell is refused unless its
+/// column has a default.
+pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8, defaults: Defaults, problem: *Problem) Error!Sheet {
     const raw_bytes = sys.readFile(gpa, path, 64 << 20) catch |err| return fail(a, problem, "cannot read the sample sheet {s}: {s}", .{ shown, sys.errorText(err) });
     defer gpa.free(raw_bytes);
     // A spreadsheet program may start the file with a UTF-8 byte order mark.
@@ -70,7 +75,9 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
         }
         if (header) |h| {
             if (fields.items.len != h.len) return fail(a, problem, "{s} line {d}: {d} fields, but the header has {d}", .{ shown, n, fields.items.len, h.len });
-            for (fields.items, h) |v, col| if (v.len == 0) return fail(a, problem, "{s} line {d}: column {s} is empty", .{ shown, n, col });
+            for (fields.items, h) |*v, col| if (v.len == 0) {
+                v.* = defaults.get(col) orelse return fail(a, problem, "{s} line {d}: column {s} is empty", .{ shown, n, col });
+            };
             try rows.append(a, fields.items);
         } else header = fields.items;
     }
@@ -84,7 +91,23 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
         for (rows.items[0..k]) |earlier| if (eql(u8, earlier[si], row[si])) return fail(a, problem, "{s} lists sample {s} twice", .{ shown, row[si] });
     }
     if (rows.items.len == 0) return fail(a, problem, "{s} lists no sample", .{shown});
-    return sheet;
+    return withDefaults(a, sheet, defaults);
+}
+
+/// The sheet with a column for every default it lacks, holding the default on every row.
+fn withDefaults(a: Allocator, sheet: Sheet, defaults: Defaults) Error!Sheet {
+    var columns: std.ArrayList([]const u8) = .empty;
+    try columns.appendSlice(a, sheet.columns);
+    for (defaults.keys()) |col| if (sheet.column(col) == null) try columns.append(a, col);
+    if (columns.items.len == sheet.columns.len) return sheet;
+    const rows = try a.alloc([]const []const u8, sheet.rows.len);
+    for (sheet.rows, rows) |row, *out| {
+        const full = try a.alloc([]const u8, columns.items.len);
+        @memcpy(full[0..row.len], row);
+        for (columns.items[row.len..], full[row.len..]) |col, *v| v.* = defaults.get(col).?;
+        out.* = full;
+    }
+    return .{ .columns = columns.items, .rows = rows, .source = sheet.source };
 }
 
 /// The placeholders `workz prepare` fills from the step itself; a column or
@@ -390,12 +413,24 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
         if (sv != .table) return fail(a, problem, "{s}: samples must be a table with sheet or names", .{shown});
         const st = sv.table;
         var kit = st.iterator();
-        while (kit.next()) |e| if (!contains(&sample_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown key '{s}' in [samples]; use sheet or names", .{ shown, e.key_ptr.* });
+        while (kit.next()) |e| if (!contains(&sample_keys, e.key_ptr.*)) return fail(a, problem, "{s}: unknown key '{s}' in [samples]; use sheet, names or defaults", .{ shown, e.key_ptr.* });
         if (st.get("sheet") != null and st.get("names") != null) return fail(a, problem, "{s}: [samples] takes sheet or names, not both", .{shown});
+        var defaults: Defaults = .empty;
+        if (st.get("defaults")) |dv| {
+            if (dv != .table) return fail(a, problem, "{s}: samples.defaults must be a table of column = \"value\"", .{shown});
+            var dit = dv.table.iterator();
+            while (dit.next()) |e| {
+                const col = e.key_ptr.*;
+                if (e.value_ptr.* != .string) return fail(a, problem, "{s}: samples.defaults.{s} must be a string", .{ shown, col });
+                if (eql(u8, col, "sample")) return fail(a, problem, "{s}: samples.defaults cannot name sample; every row names its own", .{shown});
+                if (reserved(col)) return fail(a, problem, "{s}: samples.defaults.{s} has the name of a placeholder workz prepare fills; rename it", .{ shown, col });
+                try defaults.put(a, col, e.value_ptr.string);
+            }
+        }
         if (st.get("sheet")) |p| {
             if (p != .string) return fail(a, problem, "{s}: samples.sheet must be a path", .{shown});
             const dir = std.fs.path.dirname(path) orelse ".";
-            sheet = try readSheet(gpa, a, try sys.absolute(a, dir, p.string), p.string, problem);
+            sheet = try readSheet(gpa, a, try sys.absolute(a, dir, p.string), p.string, defaults, problem);
         } else if (st.get("names")) |n| {
             if (n != .array) return fail(a, problem, "{s}: samples.names must be a list of names", .{shown});
             var rows: std.ArrayList([]const []const u8) = .empty;
@@ -407,7 +442,7 @@ pub fn compile(gpa: Allocator, a: Allocator, path: []const u8, shown: []const u8
             }
             const cols = try a.alloc([]const u8, 1);
             cols[0] = "sample";
-            sheet = .{ .columns = cols, .rows = rows.items, .source = "samples.names" };
+            sheet = try withDefaults(a, .{ .columns = cols, .rows = rows.items, .source = "samples.names" }, defaults);
         } else return fail(a, problem, "{s}: [samples] needs sheet or names", .{shown});
     }
 
