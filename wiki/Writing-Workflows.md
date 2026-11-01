@@ -89,6 +89,7 @@ wrote .../workflow.toml: 3 rules from 2 steps. Next: workz graph --by step, then
 - `[samples] defaults = { adapter = "CTGTC" }` gives a column a value for rows that leave it empty, and for every row when the sheet has no such column, so a sheet lists only what differs. An empty cell of a column without a default is refused.
 - Only those names are replaced. Other braces stay as written, so awk's `{print $1}` and the shell's `${HOME}` need no escaping; anywhere but `shell` and a service's `command`, an unknown `{name}` is an error, and so is a column used outside a `for_each` step.
 - The workflow is checked as `validate` would before it replaces `workflow.toml`; one that is not valid is left beside it to read, and `workflow.toml` is unchanged.
+- A pipeline kept apart from its runs: `workz prepare /path/pipeline.toml --params run.toml` reads the run file's `[workflow]` keys (the run's name), `[params]` (its references and tools) and `[samples]` (its sheet, beside the run file) in place of the template's, and writes `workflow.toml` beside the run file. The template's steps stay one file for every run.
 - `workz prepare --check` prints the rules an edit would add, remove and change, and exits 1 if any, without writing: review it before a long launch.
 - `workz init --template` writes a commented starter template and sample sheet. The format is in the [workflow reference](Workflow-Reference.md#pipeline-templates).
 

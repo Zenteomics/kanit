@@ -8,6 +8,7 @@ All notable changes to workz will be documented in this file. The format follows
 
 ### Added
 
+- **Run files.** `workz prepare TEMPLATE --params FILE` reads a run file beside the template: its `[workflow]` keys and `[params]` override the template's one by one, its `[samples]` replaces the template's with a sheet read beside the run file, and the workflow is written beside the run file. One template then serves every run; without `--params`, nothing changes.
 - **Sample-sheet defaults.** `[samples] defaults = { column = "value" }` in a pipeline template gives an empty cell of that column its default, and a column the sheet lacks the default on every row; a default may be empty. An empty cell of a column without a default is still refused. The prepared workflow holds the values, as before.
 
 ## [0.6.0] - 2026-10-31
