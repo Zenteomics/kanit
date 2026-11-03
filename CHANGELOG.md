@@ -39,6 +39,10 @@ One change needs action:
 - **`workz watch` keys.** An Alt key, which a terminal sends as escape and the key at once, is ignored instead of leaving the table as escape does.
 - **`workz watch` start time.** A launch whose event stream has no readable event shows its elapsed time as unknown, and its timeline without a 1970 start.
 - **Control characters.** `watch`, `status` and `run` show C1 control characters (U+0080 to U+009F) of a log line or a reason as spaces, as they show other control characters, so a tool's output cannot move the cursor or change colors.
+- **`--threads` in reports.** A launch run with `--threads STEP=N` for a step whose name holds `=` shows the override in its reports, as `run` applied it.
+- **Budget use.** `report --bottlenecks` and the HTML page say that the budget use from run samples covers the time rules ran, which the bounds above it, averaged over the whole launch, do not.
+- **Critical path.** The launch's checks before its first rule, such as reading an input manifest or resolving images, are their own term of the elapsed time in `report --bottlenecks` and on the page, instead of time after the path ended.
+- **Memory of small commands.** A command's recorded peak memory includes the engine's own, because it starts as a copy of the engine. `record.json` adds `rusage.engine_maxrss_kib`, the engine's peak when the attempt started, and `report` and the page mark a `USED` figure no larger than it `<=`, with `used_basis` `engine_bound` in `--suggest`; suggestions still size from it, so they never fall below what a rule used.
 
 ## [0.6.0] - 2026-10-31
 

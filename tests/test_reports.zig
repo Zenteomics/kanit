@@ -672,3 +672,101 @@ test "[unit] - [report]: a launch without a summary and without its engine reads
     try testing.expectEqualStrings("unfinished", l.status);
     try testing.expectEqual(@as(f64, 4), l.elapsed_s);
 }
+
+test "[edge] - [report]: a --threads override of a step whose name holds '=' reaches the report" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try s.dir("launch");
+    _ = try s.file("launch/launch.json", try std.fmt.allocPrint(a, "{{\"workdir\":\"{s}\",\"thread_overrides\":[\"k=v=4\"]}}", .{s.path}));
+    _ = try s.file("launch/events.jsonl", "{\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"max_threads\":8,\"max_memory_mib\":64,\"rules\":[\"a\"]}\n");
+    _ = try s.file("launch/workflow", "[workflow]\nname = \"w\"\n\n[[rules]]\nname = \"a\"\nstep = \"k=v\"\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n");
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+
+    try testing.expectEqual(@as(u32, 4), l.wf.?.rules[0].threads);
+}
+
+test "[unit] - [report]: budget use from run samples says it covers the time rules ran" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try s.dir("launch");
+    _ = try s.file("launch/summary.json", "{\"status\":\"completed\",\"elapsed_s\":20.0,\"selected\":1}");
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"sample","running":1,"threads_reserved":2,"memory_reserved_mib":256,"cpu_cores_used":1.5}
+        \\{"time":"2026-01-01T00:00:10.000Z","event":"sample","running":1,"threads_reserved":2,"memory_reserved_mib":256,"cpu_cores_used":1.5}
+        \\
+    );
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, try std.fs.path.join(a, &.{ s.path, "launch" }), null);
+
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\nuse of the budget while rules ran (run samples every 5 s)\n  threads reserved 2.0 of 4 on average; CPU cores in use 1.5 on average\n") != null);
+}
+
+test "[unit] - [report]: the checks before the first rule are a term of the elapsed time, not time after the path" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/r", "launch/attempts/r/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/launch.json", try std.fmt.allocPrint(a, "{{\"workdir\":\"{s}\"}}", .{s.path}));
+    _ = try s.file("launch/workflow", "[workflow]\nname = \"w\"\n\n[[rules]]\nname = \"r\"\noutput = [\"r.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n");
+    // The launch opened 2 s before its rules: its elapsed time holds the checks.
+    _ = try s.file("launch/summary.json", "{\"status\":\"completed\",\"elapsed_s\":5.0,\"selected\":1}");
+    _ = try s.file("launch/events.jsonl", "{\"time\":\"2026-01-01T00:00:02.000Z\",\"event\":\"launch_started\",\"max_threads\":1,\"max_memory_mib\":64,\"rules\":[\"r\"],\"checks_s\":2.0}\n");
+    _ = try s.file("launch/attempts/r/001/record.json",
+        \\{"rule":"r","attempt":1,"status":"completed","wall_s":3.0,"cpu_s":3.0,"started":"2026-01-01T00:00:02.000Z","request":{"threads":1,"memory_mib":1}}
+    );
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+
+    try testing.expectEqual(@as(f64, 2), l.path_checks_s);
+    try testing.expectEqual(@as(f64, 0), l.path_after_s);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, try std.fs.path.join(a, &.{ s.path, "launch" }), null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "2.0 s of checks before the first rule") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "after the path did") == null);
+}
+
+test "[unit] - [report]: a process figure no larger than the engine's memory is shown as at most that" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/small", "launch/attempts/small/001", "launch/attempts/large", "launch/attempts/large/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/summary.json", "{\"status\":\"completed\",\"elapsed_s\":2.0,\"selected\":2}");
+    _ = try s.file("launch/events.jsonl", "{\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"max_threads\":2,\"max_memory_mib\":1024}\n");
+    // A small tool reports the engine's 14 MiB; a large one its own 600 MiB.
+    _ = try s.file("launch/attempts/small/001/record.json",
+        \\{"rule":"small","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"request":{"threads":1,"memory_mib":256},"rusage":{"maxrss_kib":14000,"engine_maxrss_kib":14336}}
+    );
+    _ = try s.file("launch/attempts/large/001/record.json",
+        \\{"rule":"large","attempt":1,"status":"completed","wall_s":1.0,"cpu_s":1.0,"request":{"threads":1,"memory_mib":1024},"rusage":{"maxrss_kib":614400,"engine_maxrss_kib":14336}}
+    );
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+    for (l.steps) |st| try testing.expectEqual(std.mem.eql(u8, st.name, "small"), st.used_bound);
+
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.report.writeSuggestions(&out.writer, &l, .table);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "<=14 MiB") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "<=600 MiB") == null);
+    out.clearRetainingCapacity();
+    try workz.report.writeSuggestions(&out.writer, &l, .tsv);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\tengine_bound\t") != null);
+}

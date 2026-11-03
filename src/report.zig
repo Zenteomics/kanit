@@ -148,7 +148,7 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: Sugge
             .suggest_threads = s.sizing.threads,
             .memory_mib = s.request_mib,
             .used_mib = s.used_mib,
-            .used_basis = if (s.used_is_peak) "cgroup" else "process",
+            .used_basis = if (s.used_is_peak) "cgroup" else if (s.used_bound) "engine_bound" else "process",
             .peak_mib = s.peak_mib,
             .suggest_mib = s.sizing.memory_mib,
             .note = @tagName(s.sizing.note),
@@ -162,7 +162,7 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: Sugge
             try w.print("  {f} {d:>5} {d:>8.0} {d:>8.0} ", .{ units.field(s.step, 30), s.runs, s.threads, s.suggest_threads });
             try units.right(w, 10, units.size, .{s.memory_mib});
             try w.writeAll(" ");
-            try units.right(w, 10, units.size, .{s.used_mib});
+            try usedCell(w, s.used_mib, std.mem.eql(u8, s.used_basis, "engine_bound"));
             try w.writeAll(" ");
             try units.right(w, 10, units.size, .{s.suggest_mib});
             try w.print("  {s}", .{s.note});
@@ -170,6 +170,10 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: Sugge
             if (s.runs < 3) try w.print("; from {d} {s}", .{ s.runs, if (s.runs == 1) "run" else "runs" });
             try w.writeAll("\n");
         }
+        for (list.items) |s| if (std.mem.eql(u8, s.used_basis, "engine_bound")) {
+            try w.writeAll(bound_note);
+            break;
+        };
         return;
     }
     try w.writeAll("step\truns\tthreads\tthreads_used\tsuggest_threads\tmemory_mib\tused_mib\tused_basis\tpeak_mib\tsuggest_mib\tnote\tat_thread_limit\n");
@@ -479,6 +483,11 @@ fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll(" waiting once ready, ");
     try units.duration(w, l.path_held_s);
     try w.writeAll(" held for producers off the path");
+    if (l.path_checks_s >= 0.05) {
+        try w.writeAll(", ");
+        try units.duration(w, l.path_checks_s);
+        try w.writeAll(" of checks before the first rule");
+    }
     if (l.path_between_s >= 0.05) {
         try w.writeAll(", ");
         try units.duration(w, l.path_between_s);
@@ -546,7 +555,7 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
             try units.right(w, 10, units.size, .{s.request_mib});
             try w.writeAll(" ");
             if (s.mostlyIdle()) try w.print("{s:>10} {s:>10}", .{ "-", "-" }) else {
-                try units.right(w, 10, units.size, .{s.used_mib});
+                try usedCell(w, s.used_mib, s.used_bound);
                 try w.writeAll(" ");
                 try units.right(w, 10, units.size, .{s.peak_mib});
             }
@@ -578,6 +587,24 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
     }
     try w.writeAll("  USED: the largest resident memory of one process, or the cgroup peak for rules with shared inputs or containers\n");
     try w.writeAll("  PEAK: the memory charged to the rule's cgroup, page cache included; libraries already in memory count in USED only\n");
+    for (l.steps) |s| if (s.used_bound) {
+        try w.writeAll(bound_note);
+        break;
+    };
+}
+
+/// The legend of a USED figure marked `<=`.
+const bound_note = "  <=: at most this; a process started from the engine counts the engine's memory, which was larger\n";
+
+/// A USED figure, right-aligned in 10 columns, marked `<=` when it is only an
+/// upper bound.
+fn usedCell(w: *std.Io.Writer, mib: f64, bound: bool) !void {
+    if (!bound) return units.right(w, 10, units.size, .{mib});
+    var buf: [32]u8 = undefined;
+    var cell: std.Io.Writer = .fixed(&buf);
+    cell.writeAll("<=") catch {};
+    units.size(&cell, mib) catch {};
+    try w.print("{s:>10}", .{cell.buffered()});
 }
 
 /// CPU time per category and per tool, and per sample with its slowest
@@ -653,7 +680,7 @@ fn writeShared(w: *std.Io.Writer, l: *const model.Launch) !void {
 }
 
 fn writeUtilization(w: *std.Io.Writer, l: *const model.Launch) !void {
-    try w.writeAll("\nuse of the budget (run samples every 5 s)\n");
+    try w.writeAll("\nuse of the budget while rules ran (run samples every 5 s)\n");
     const samples = l.usage();
     if (samples.len == 0) return w.writeAll("  no samples: the run was shorter than one interval, or its engine did not record them\n");
     var threads: f64 = 0;

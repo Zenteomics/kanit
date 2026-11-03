@@ -350,7 +350,7 @@ const Page = struct {
         }
         try w.writeAll("<div class=\"cell\"><span class=\"k\">CPU</span><div class=\"big\">");
         if (cores_n > 0) {
-            try w.print("{d:.1}</div><div class=\"sub\">cores in use on average, of {d:.0} threads", .{ cores / cores_n, l.max_threads });
+            try w.print("{d:.1}</div><div class=\"sub\">cores in use on average while rules ran, of {d:.0} threads", .{ cores / cores_n, l.max_threads });
         } else try w.print("{d:.0}</div><div class=\"sub\">threads in the budget; no run samples", .{l.max_threads});
         try w.writeAll("</div></div>\n<div class=\"cell\"><span class=\"k\">memory</span><div class=\"big\">");
         if (mem > 0) {
@@ -887,6 +887,7 @@ const Page = struct {
                 const req = @max(s.request_mib, 1);
                 const cache = @max(s.peak_mib - s.used_mib, 0);
                 try w.print("<td><div class=\"hbar\"><div class=\"bar\" title=\"used {d:.0} MiB, cgroup peak {d:.0} MiB, request {d:.0} MiB\"><i class=\"b-cache\" style=\"width:{d:.2}%\"></i><i class=\"b-use\" style=\"width:{d:.2}%\"></i></div><span>", .{ s.used_mib, s.peak_mib, s.request_mib, @min((s.used_mib + cache) / req * 100, 100), @min(@max(s.used_mib / req * 100, 0.5), 100) });
+                if (s.used_bound) try w.writeAll("&le;");
                 try size(w, s.used_mib);
                 try w.writeAll(" of ");
                 try size(w, s.request_mib);
@@ -1176,6 +1177,11 @@ const Page = struct {
             try w.writeAll(", and they were held ");
             try duration(w, l.path_held_s);
             try w.writeAll(" for producers off the path");
+            if (l.path_checks_s >= 0.05) {
+                try w.writeAll("; the launch's checks took ");
+                try duration(w, l.path_checks_s);
+                try w.writeAll(" before the first rule");
+            }
             if (l.path_between_s >= 0.05) {
                 try w.writeAll("; ");
                 try duration(w, l.path_between_s);

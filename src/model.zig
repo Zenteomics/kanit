@@ -50,6 +50,10 @@ pub const Attempt = struct {
     /// cgroup peak (includes page cache) and process peak RSS.
     peak_mib: ?f64,
     rss_mib: f64,
+    /// `rss_mib` is at most the engine's own resident memory when the
+    /// attempt started: a process started from the engine counts the
+    /// engine's memory, so only an upper bound of its own is known.
+    rss_bound: bool = false,
     /// The largest anonymous memory the cgroup was seen to hold while the
     /// attempt ran, sampled; null without isolation or in older records.
     anon_mib: ?f64 = null,
@@ -116,6 +120,11 @@ pub const Attempt = struct {
     pub fn usedMib(self: Attempt) f64 {
         if (self.uses_shared or self.in_container) if (self.peak_mib) |p| return p;
         return @max(self.rss_mib, self.anon_mib orelse 0);
+    }
+
+    /// Whether `usedMib` is the process figure and only an upper bound.
+    pub fn usedIsBound(self: Attempt) bool {
+        return self.rss_bound and !self.usedIsPeak();
     }
 
     /// Whether `usedMib` comes from the cgroup's counters, not the process.
@@ -235,6 +244,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
         .groups = groups.items,
         .peak_mib = if (cg) |c| if (num(get(c, "memory_peak"))) |p| p / 1048576.0 else null else null,
         .rss_mib = if (get(v, "rusage")) |ru| (num(get(ru, "maxrss_kib")) orelse 0) / 1024.0 else 0,
+        .rss_bound = if (get(v, "rusage")) |ru| if (num(get(ru, "engine_maxrss_kib"))) |e| (num(get(ru, "maxrss_kib")) orelse 0) <= e else false else false,
         .anon_mib = if (cg) |c| if (num(get(c, "anon_peak"))) |p| p / 1048576.0 else null else null,
         .oom_kill = if (cg) |c| num(get(c, "oom_kill")) orelse 0 else 0,
         .limit_events = if (cg) |c| num(get(c, "memory_max_events")) orelse 0 else 0,
@@ -390,6 +400,8 @@ pub const Step = struct {
     /// The largest `Attempt.usedMib` and cgroup peak of the runs.
     used_mib: f64 = 0,
     used_is_peak: bool = false,
+    /// `used_mib` is a process figure that is only an upper bound.
+    used_bound: bool = false,
     peak_mib: f64 = 0,
     idle: usize = 0,
     limit_events: f64 = 0,
@@ -583,9 +595,11 @@ pub const Launch = struct {
     path_waited_s: f64 = 0,
     path_held_s: f64 = 0,
     path_between_s: f64 = 0,
+    /// Seconds the launch spent on its checks before the first rule.
+    path_checks_s: f64 = 0,
     /// Seconds from the end of the path's last rule to the end of the
-    /// launch: rules off the path still ran. Held, waited, ran, between and
-    /// after add up to the elapsed time.
+    /// launch: rules off the path still ran. Checks, held, waited, ran,
+    /// between and after add up to the elapsed time.
     path_after_s: f64 = 0,
     /// Lower bounds on the elapsed time, and the largest of them: what
     /// limited the launch.
@@ -844,7 +858,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
         if (workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
             l.wf = wf;
             // The launch ran with its `--threads` overrides.
-            for (l.thread_overrides) |o| if (std.mem.indexOfScalar(u8, o, '=')) |eq| {
+            for (l.thread_overrides) |o| if (std.mem.lastIndexOfScalar(u8, o, '=')) |eq| {
                 const n = std.fmt.parseInt(u32, o[eq + 1 ..], 10) catch continue;
                 _ = l.wf.?.overrideThreads(o[0..eq], n);
             };
@@ -980,6 +994,7 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
         if (run.usedMib() >= s.used_mib) {
             s.used_mib = run.usedMib();
             s.used_is_peak = run.usedIsPeak();
+            s.used_bound = run.usedIsBound();
         }
         s.peak_mib = @max(s.peak_mib, run.peak_mib orelse run.rss_mib);
         s.idle += @intFromBool(run.idle());
@@ -1133,7 +1148,10 @@ fn collectPath(a: Allocator, l: *Launch) !void {
         l.path_held_s += p.held_s;
         l.path_between_s += p.between_s;
     }
-    l.path_after_s = @max(l.elapsed_s - prev_end, 0);
+    // Path times count from `launch_started`; the elapsed time from the
+    // launch's opening, before its checks.
+    l.path_checks_s = @min(l.tracker.checks_s, l.elapsed_s);
+    l.path_after_s = @max(l.elapsed_s - l.path_checks_s - prev_end, 0);
     l.path = rows.items;
 }
 

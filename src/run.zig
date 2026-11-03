@@ -90,6 +90,9 @@ const Task = struct {
     dir: []const u8 = "",
     started_ns: i128 = 0,
     started_real: i128 = 0,
+    /// The engine's own peak resident memory when the attempt started, in
+    /// KiB: a process started from the engine counts at least that much.
+    engine_rss_kib: i64 = 0,
     deadline_ns: ?i128 = null,
     kill_at: ?i128 = null,
     /// The exit of a stopped attempt's shell, kept while processes it
@@ -998,6 +1001,7 @@ const Engine = struct {
         for (r.shared_index) |hi| self.holders[hi].served += 1;
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
+        t.engine_rss_kib = engineMaxRssKib();
         t.deadline_ns = if (self.timeoutOf(r)) |s| t.started_ns + @as(i128, s) * std.time.ns_per_s else null;
         self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
         self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
@@ -1639,6 +1643,7 @@ const Engine = struct {
             .rusage = .{
                 .cpu_s = reaped.cpuSeconds(),
                 .maxrss_kib = reaped.usage.maxrss,
+                .engine_maxrss_kib = t.engine_rss_kib,
             },
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .reserved_mib = reservedMib(r), .groups = r.groups, .shared = r.shared, .container = r.container },
@@ -2591,6 +2596,15 @@ fn writePage(gpa: Allocator, path: []const u8, launch_dir: []const u8) !void {
 fn writeSummary(gpa: Allocator, a: Allocator, events: *records.Events, s: Summary) !void {
     events.emit("launch_finished", .{ .status = s.status, .counts = s.counts, .elapsed_s = s.elapsed_s, .@"error" = s.@"error" });
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ s.launch_dir, "summary.json" }), s);
+}
+
+/// The engine's own peak resident memory so far, in KiB. A task started from
+/// the engine reports at least this as its own peak (`ru_maxrss` takes the
+/// peak of the memory it was started from), so a smaller one is not its own.
+fn engineMaxRssKib() i64 {
+    var ru: linux.rusage = undefined;
+    _ = linux.getrusage(linux.rusage.SELF, &ru);
+    return ru.maxrss;
 }
 
 fn engineCost() EngineCost {

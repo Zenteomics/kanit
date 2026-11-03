@@ -138,6 +138,8 @@ pub const Tracker = struct {
     /// began its rules after its checks.
     started_ns: i128 = 0,
     launch_ns: i128 = 0,
+    /// Seconds the launch spent on its checks before `launch_started`.
+    checks_s: f64 = 0,
     /// Lines of the event stream that were not valid JSON, and were skipped.
     unreadable_lines: usize = 0,
     max_threads: u32 = 0,
@@ -293,6 +295,7 @@ pub const Tracker = struct {
         const eql = std.mem.eql;
         if (eql(u8, ev, "launch_started")) {
             self.launch_ns = at;
+            self.checks_s = @max(fields.float(v, "checks_s") orelse 0, 0);
             self.selected = whole(u32, v, "selected") orelse 0;
             self.max_threads = whole(u32, v, "max_threads") orelse 0;
             self.max_memory_mib = whole(u64, v, "max_memory_mib") orelse 0;

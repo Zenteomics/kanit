@@ -115,7 +115,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `started`, `finished`  | UTC times; `started` is `null` if it never started         |
 | `wall_s`, `cpu_s`      | elapsed and CPU seconds                                    |
 | `cpu_source`           | `cgroup` or `rusage`                                       |
-| `rusage`               | `cpu_s` and `maxrss_kib` of the process tree               |
+| `rusage`               | `cpu_s`, `maxrss_kib` and `engine_maxrss_kib`              |
 | `cgroup`               | the attempt's cgroup counters, or `null` without isolation |
 | `request`              | `threads`, `memory_mib`, `groups`, `shared`, `container`   |
 | `request.reserved_mib` | memory admission reserved, a Podman client included        |
@@ -126,6 +126,8 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 | `version`              | the rule's version command, else `null`                    |
 | `queue`                | `waited_s`, and `reasons`: each `reason` with its `seconds` |
 | `key`                  | the rule key the attempt ran under                         |
+
+`rusage.engine_maxrss_kib` is the engine's own peak resident memory when the attempt started. A process started from the engine counts that much as its own peak, so a `maxrss_kib` no larger only says the command used at most that much; reports mark such a figure `<=`.
 
 The `cgroup` object holds:
 
