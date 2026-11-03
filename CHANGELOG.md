@@ -35,6 +35,10 @@ One change needs action:
 - **Unreadable records.** `report --bottlenecks`, `--compare` and `--format html` name an attempt record that does not parse and exit 1, as the attempt table and `--suggest` do, instead of leaving it out unsaid.
 - **Large launches.** `status`, `status --history`, `report` and the page read a `summary.json` of any size up to 256 MiB; one over 1 MiB, as an interrupted launch of some ten thousand rules writes, made `status` fail and read as unfinished.
 - **HTML page.** An attempt's status and a resource group's name are escaped like every other text on the page.
+- **Killed launches.** The interactive `watch`, `report` and the HTML page show a launch whose engine ended without recording its end as `unfinished`, as of its last event, with the rules it was running cancelled: the view no longer counts its time up or sends it commands, and the page no longer reloads.
+- **`workz watch` keys.** An Alt key, which a terminal sends as escape and the key at once, is ignored instead of leaving the table as escape does.
+- **`workz watch` start time.** A launch whose event stream has no readable event shows its elapsed time as unknown, and its timeline without a 1970 start.
+- **Control characters.** `watch`, `status` and `run` show C1 control characters (U+0080 to U+009F) of a log line or a reason as spaces, as they show other control characters, so a tool's output cannot move the cursor or change colors.
 
 ## [0.6.0] - 2026-10-31
 

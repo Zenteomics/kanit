@@ -414,3 +414,78 @@ test "[failure] - [run]: the text view of a running launch whose events cannot b
     try testing.expect(std.mem.indexOf(u8, text, "running, started at an unknown time") != null);
     try testing.expect(std.mem.indexOf(u8, text, "1 line of events.jsonl could not be read and is left out") != null);
 }
+
+test "[unit] - [watch]: a launch whose engine died reads as unfinished in the interactive view, ended at its last event" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+
+    t.markUnfinished();
+
+    try testing.expect(t.finished);
+    try testing.expectEqual(workz.tracker.parseTime("2026-01-01T00:00:04.000Z").?, t.finished_ns);
+    var ui: workz.tui.Ui = .{};
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const hour_later = workz.tracker.parseTime("2026-01-01T01:00:00.000Z").?;
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 12, hour_later, false);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "unfinished") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "1h") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "running") == null);
+    try testing.expectEqual(workz.tracker.Status.cancelled, t.rules.items[0].status);
+}
+
+test "[edge] - [watch]: an Alt key is no key of the view, and two escapes are two" {
+    const tui = workz.tui;
+    var used: usize = 0;
+    try testing.expectEqual(@as(?tui.Key, null), tui.decode("\x1bq", &used));
+    try testing.expectEqual(@as(usize, 2), used);
+    try testing.expectEqual(tui.Key.escape, tui.decode("\x1b\x1b", &used).?);
+    try testing.expectEqual(@as(usize, 1), used);
+}
+
+test "[failure] - [watch]: the interactive view of a launch with no readable event shows an unknown start, not 1970" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", "garbage\n");
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
+    for ([_]workz.tui.Mode{ .table, .timeline }) |mode| {
+        var ui: workz.tui.Ui = .{ .mode = mode };
+        out.clearRetainingCapacity();
+        try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 12, now, false);
+        try testing.expect(std.mem.indexOf(u8, out.written(), "-:--") != null);
+        try testing.expect(std.mem.indexOf(u8, out.written(), "49") == null);
+    }
+}
+
+test "[failure] - [watch]: C1 control characters in a log line or a reason reach the terminal as spaces" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const log = try s.file("stderr.log", "red \xc2\x9b31mtext\xc2\xa0end \xe2\x82\xac\n");
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+
+    const lines = workz.monitor.lastLines(testing.allocator, arena.allocator(), log, 1, 200);
+
+    try testing.expectEqualStrings("red  31mtext\xc2\xa0end \xe2\x82\xac", lines[0]);
+
+    _ = try s.file("events.jsonl", ev_start ++ "{\"v\":1,\"time\":\"2026-01-01T00:00:01.000Z\",\"event\":\"task_finished\",\"rule\":\"r\",\"attempt\":1,\"status\":\"failed\",\"reason\":\"bad \\u009b31m news\"}\n");
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var ui: workz.tui.Ui = .{ .mode = .details };
+    ui.selected = 0;
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 14, workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?, false);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\xc2\x9b") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "31m news") != null);
+}

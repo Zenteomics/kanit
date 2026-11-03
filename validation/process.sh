@@ -1648,6 +1648,22 @@ tm send-keys -t "$sess" S
 wait $runner
 check "S stops the selected running rule through the control file" 'jq -e "select(.event == \"control\" and .command == \"stop\" and .rule == \"long\")" "$(last_launch)/events.jsonl" > /dev/null && [ "$(status_of s.json cancelled)" = 1 ]'
 tm send-keys -t "$sess" q q
+# A launch whose engine was killed: the view and the page say it did not
+# finish, and the view sends it no command.
+new watch-dead
+{ header watch-dead; rule long '[]' '["l.txt"]' '"sleep 30; touch l.txt"'; } > wf.toml
+"$workz" run wf.toml "${iso[@]}" -q > s.json 2> /dev/null &
+runner=$!
+for _ in $(seq 50); do grep -qs task_started .workz/launches/*/events.jsonl && break; sleep 0.1; done
+kill -KILL $runner
+wait $runner 2> /dev/null
+sess=w5; start -s "$sess" -x 120 -y 12 "NO_COLOR=1 \"$workz\" watch -d . --interval 200"
+check "the interactive view of a killed launch says it did not finish and shows nothing running" 'wait_for "unfinished" && ! screen | grep -q "running"'
+tm send-keys -t "$sess" S
+check "the view sends no command to a launch without its engine" 'wait_for "the launch has ended" && [ ! -s "$(last_launch)/control" ]'
+tm send-keys -t "$sess" q q
+"$workz" report -d . --format html -o page.html
+check "the page of a killed launch says it did not finish and does not reload" 'grep -q "unfinished" page.html && ! grep -q "http-equiv=\"refresh\"" page.html'
 
 # run and status on a terminal: event lines, a failure's error lines and a
 # readable summary; --json and --no-color restore the output for scripts.

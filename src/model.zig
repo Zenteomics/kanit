@@ -809,6 +809,8 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     l.selected = tr.selected;
 
     const summary = try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), &l.unreadable);
+    // Without a summary, a launch whose engine is gone reads as unfinished.
+    if (summary == null) _ = try tr.settleEnd();
     if (summary) |s| {
         l.finished = true;
         l.status = str(s, "status");

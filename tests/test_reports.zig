@@ -651,3 +651,24 @@ test "[failure] - [report]: an attempt's status from its record is escaped on th
     try testing.expect(std.mem.indexOf(u8, out.written(), "<x-odd") == null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "&lt;x-odd&gt;") != null);
 }
+
+test "[unit] - [report]: a launch without a summary and without its engine reads as unfinished, as of its last event" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/L1" }) |d| _ = try s.dir(d);
+    _ = try s.file(".workz/launches/L1/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":1,"max_memory_mib":64}
+        \\{"time":"2026-01-01T00:00:04.000Z","event":"task_started","rule":"r","attempt":1,"directory":""}
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, ".workz/launches/L1" }));
+    defer l.deinit();
+
+    try testing.expect(l.finished);
+    try testing.expectEqualStrings("unfinished", l.status);
+    try testing.expectEqual(@as(f64, 4), l.elapsed_s);
+}

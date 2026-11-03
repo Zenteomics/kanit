@@ -62,3 +62,22 @@ pub const Style = struct {
         return if (s.on) "\x1b[36m" else "";
     }
 };
+
+/// Makes text safe to show on a terminal, in place: each C0 control
+/// character and DEL becomes a space, and so does each C1 control character
+/// (U+0080 to U+009F, two bytes in UTF-8), which some terminals act on as
+/// they do on escape. Returns the text, shorter by one byte per C1 character.
+pub fn blankControls(s: []u8) []u8 {
+    var w: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (i += 1) {
+        var c = s[i];
+        if (c == 0xc2 and i + 1 < s.len and s[i + 1] >= 0x80 and s[i + 1] <= 0x9f) {
+            c = ' ';
+            i += 1;
+        } else if (c < 0x20 or c == 0x7f) c = ' ';
+        s[w] = c;
+        w += 1;
+    }
+    return s[0..w];
+}

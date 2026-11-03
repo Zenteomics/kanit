@@ -68,10 +68,7 @@ pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: 
         if (found.items.len == n) break;
         const line = std.mem.trimEnd(u8, raw, " \r");
         if (line.len == 0) continue;
-        const out = a.dupe(u8, sys.utf8Text(a, sys.utf8Prefix(line, max)) catch break) catch break;
-        for (out) |*c| if (c.* < 0x20 or c.* == 0x7f) {
-            c.* = ' ';
-        };
+        const out = term.blankControls(a.dupe(u8, sys.utf8Text(a, sys.utf8Prefix(line, max)) catch break) catch break);
         found.append(a, out) catch break;
     }
     std.mem.reverse([]const u8, found.items);

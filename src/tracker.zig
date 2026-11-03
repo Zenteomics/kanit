@@ -7,7 +7,8 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const fields = @import("fields.zig");
-const event_version = @import("records.zig").event_version;
+const records = @import("records.zig");
+const event_version = records.event_version;
 const Allocator = std.mem.Allocator;
 const str = fields.str;
 const int = fields.int;
@@ -149,6 +150,8 @@ pub const Tracker = struct {
     finished: bool = false,
     finished_ns: i128 = 0,
     final_status: []const u8 = "",
+    /// Time of the newest event.
+    last_ns: i128 = 0,
     final_error: []const u8 = "",
     /// The run's memory in use and CPU cores used: from the last sample, or
     /// read live by the interactive view.
@@ -189,6 +192,32 @@ pub const Tracker = struct {
     pub fn deinit(self: *Tracker) void {
         self.partial.deinit(self.gpa);
         self.arena.deinit();
+    }
+
+    /// Ends the view of a launch whose engine ended without recording its
+    /// end: it reads as `unfinished`, as of its newest event, and the rules
+    /// it was running as cancelled, since its tasks end with their engine.
+    pub fn markUnfinished(self: *Tracker) void {
+        self.finished = true;
+        self.final_status = "unfinished";
+        self.finished_ns = self.last_ns;
+        for (self.rules.items) |*r| if (r.status == .running or r.status == .cancelling) {
+            r.status = .cancelled;
+            r.reason = "its engine ended without recording its end";
+            if (r.finished_ns == 0) r.finished_ns = self.last_ns;
+        };
+    }
+
+    /// Whether the launch has ended: recorded, or with no engine left to
+    /// record it, in which case it is marked unfinished. A launch that ended
+    /// between the two reads has recorded its end.
+    pub fn settleEnd(self: *Tracker) !bool {
+        if (self.finished) return true;
+        const dir = std.fs.path.dirname(self.events_path) orelse return false;
+        if (records.launchActive(self.gpa, dir)) return false;
+        _ = try self.update();
+        if (!self.finished) self.markUnfinished();
+        return true;
     }
 
     /// Reads and applies the events appended since the last call; true when
@@ -260,6 +289,7 @@ pub const Tracker = struct {
         const ev = str(v, "event") orelse return;
         const at = parseTime(str(v, "time") orelse "") orelse 0;
         if (self.started_ns == 0) self.started_ns = at;
+        if (at > self.last_ns) self.last_ns = at;
         const eql = std.mem.eql;
         if (eql(u8, ev, "launch_started")) {
             self.launch_ns = at;

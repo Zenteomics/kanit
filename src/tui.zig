@@ -48,7 +48,12 @@ pub fn decode(in: []const u8, used: *usize) ?Key {
         0x1b => {},
         else => return .{ .char = in[0] },
     }
-    if (in.len == 1 or (in[1] != '[' and in[1] != 'O')) return .escape;
+    if (in.len == 1 or in[1] == 0x1b) return .escape;
+    // Escape and a key at once is an Alt key, which this view does not use.
+    if (in[1] != '[' and in[1] != 'O') {
+        used.* = 2;
+        return null;
+    }
     // CSI: parameters and intermediates, then one final byte in 0x40-0x7e.
     var i: usize = 2;
     while (i < in.len and (in[i] < 0x40 or in[i] > 0x7e)) i += 1;
@@ -435,10 +440,9 @@ const Line = struct {
         const cut = s[0..fit(s, self.cols -| self.used)];
         const start = self.len;
         self.raw(cut);
-        for (self.buf[start..self.len]) |*c| if (c.* < 0x20 or c.* == 0x7f) {
-            c.* = ' ';
-        };
-        for (cut) |c| self.used += @intFromBool(c & 0xc0 != 0x80);
+        const shown = term.blankControls(self.buf[start..self.len]);
+        self.len = start + shown.len;
+        for (shown) |c| self.used += @intFromBool(c & 0xc0 != 0x80);
     }
 
     /// Text that ends with "..." where the rest of the line cannot hold it,
@@ -661,7 +665,8 @@ pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols:
 fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     var cb: [16]u8 = undefined;
     const state = if (t.finished) t.final_status else "running";
-    const elapsed = clock(&cb, end_ns - t.started_ns);
+    // Without a readable event the start is unknown.
+    const elapsed = if (t.started_ns == 0) "-:--" else clock(&cb, end_ns - t.started_ns);
     // Title bar: the whole line in reverse video, the state as a badge.
     var l = f.begin();
     l.sgr(reverse ++ bold);
@@ -938,7 +943,9 @@ fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected:
 fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page: usize, end_ns: i128) !void {
     const name_w = std.math.clamp(f.cols / 4, 10, 32);
     const axis_w = f.cols -| (2 + name_w + 1);
-    const span: i128 = @max(end_ns - t.started_ns, std.time.ns_per_s);
+    // The axis starts at the first event, or at the end without one.
+    const origin = if (t.started_ns != 0) t.started_ns else end_ns;
+    const span: i128 = @max(end_ns - origin, std.time.ns_per_s);
     const span_s: u64 = @intCast(@divFloor(span + std.time.ns_per_s - 1, std.time.ns_per_s));
     // Ticks at a round step, at most one per ten columns.
     const steps = [_]u64{ 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400 };
@@ -964,7 +971,7 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
     var tick: u64 = 0;
     const base = l.used;
     while (tick <= span_s) : (tick += step) {
-        const x = base + col(t.started_ns + @as(i128, tick) * std.time.ns_per_s, t.started_ns, span, axis_w);
+        const x = base + col(origin + @as(i128, tick) * std.time.ns_per_s, origin, span, axis_w);
         const label = tickLabel(&tb, tick);
         if (x < l.used or x + label.len > f.cols) continue;
         l.to(x);
@@ -988,9 +995,9 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
         l.text(" ");
         // Each column is blank, waiting, or the attempt's run in its result.
         var x: usize = 0;
-        const ready_at = if (r.ready_ns > 0) col(r.ready_ns, t.started_ns, span, axis_w) else axis_w;
-        const start_at = if (r.started_ns > 0) col(r.started_ns, t.started_ns, span, axis_w) else axis_w;
-        const stop_at = if (r.started_ns > 0) col(if (r.finished_ns > 0) r.finished_ns else end_ns, t.started_ns, span, axis_w) + 1 else axis_w;
+        const ready_at = if (r.ready_ns > 0) col(r.ready_ns, origin, span, axis_w) else axis_w;
+        const start_at = if (r.started_ns > 0) col(r.started_ns, origin, span, axis_w) else axis_w;
+        const stop_at = if (r.started_ns > 0) col(if (r.finished_ns > 0) r.finished_ns else end_ns, origin, span, axis_w) + 1 else axis_w;
         if (ready_at > 0) l.spaces(@min(ready_at, axis_w));
         x = @min(ready_at, axis_w);
         if (start_at > x) {
@@ -1429,6 +1436,7 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
         const now = sys.monoNs();
         if (now >= next_ns) {
             _ = try t.update();
+            _ = try t.settleEnd();
             sampler.sample(gpa, t, now);
             next_ns = now + @as(i128, interval_ms) * std.time.ns_per_ms;
         }
