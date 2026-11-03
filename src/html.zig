@@ -145,7 +145,12 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
     var l = try model.load(gpa, a, launch_dir);
     defer l.deinit();
     if (unread) |u| try u.appendSlice(a, l.unreadable.items);
-    const p: Page = .{ .a = a, .w = w, .l = &l, .groups = try groups(a, &l) };
+    try writeLaunch(a, w, &l);
+}
+
+/// The page for a launch already read, such as one a `model.Live` keeps.
+pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
+    const p: Page = .{ .a = a, .w = w, .l = l, .groups = try groups(a, l) };
 
     try w.writeAll("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     // A running launch's page asks to be loaded again with its next state.
