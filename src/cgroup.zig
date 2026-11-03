@@ -200,9 +200,11 @@ pub fn cpuUsage(gpa: Allocator, path: []const u8) ?u64 {
     return field(kv, "usage_usec");
 }
 
-/// True while any process remains in the group.
+/// True while any process remains in the group. A group whose events cannot
+/// be read counts as populated: its processes are then stopped by the kill
+/// that ends a stop's grace period, not left running.
 pub fn populated(gpa: Allocator, path: []const u8) bool {
-    const kv = readKeyed(gpa, path, "cgroup.events") orelse return false;
+    const kv = readKeyed(gpa, path, "cgroup.events") orelse return true;
     defer gpa.free(kv);
     return (field(kv, "populated") orelse 0) != 0;
 }

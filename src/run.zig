@@ -172,6 +172,8 @@ const Guard = struct {
     /// Ends the guard; it kills the process groups of tasks still noted.
     fn stop(self: Guard) void {
         sys.close(self.fd);
+        // A guard that ended before the engine was reaped then.
+        if (self.pid == 0) return;
         var status: u32 = 0;
         _ = linux.wait4(self.pid, &status, 0, null);
     }
@@ -226,9 +228,13 @@ const Network = struct {
     fn stop(self: Network) void {
         sys.close(self.userns);
         sys.close(self.netns);
-        process.signalPid(self.pid, .KILL);
-        var status: u32 = 0;
-        _ = linux.wait4(self.pid, &status, 0, null);
+        // A holder that ended before the engine was reaped then, and its
+        // number may belong to another process now.
+        if (self.pid > 0) {
+            process.signalPid(self.pid, .KILL);
+            var status: u32 = 0;
+            _ = linux.wait4(self.pid, &status, 0, null);
+        }
         sys.close(self.alive);
     }
 };
@@ -2244,6 +2250,25 @@ const Engine = struct {
         try records.writeJson(self.gpa, try std.fs.path.join(self.a, &.{ self.launch_dir, "versions.json" }), .{ .v = records.record_version, .commands = entries.items });
     }
 
+    /// Whether `rp` is the run's network holder or the guard of a run without
+    /// isolation, which ended before the engine. Its tasks go on, but a
+    /// killed engine would no longer take them with it: that is recorded once.
+    fn keeperEnded(self: *Engine, rp: process.Reaped) bool {
+        if (self.network) |*n| if (n.pid == rp.pid) {
+            n.pid = 0;
+            self.events.emit("network_holder_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
+            self.alert("warning", "the run's network holder ended; a killed engine would no longer end its tasks", .{});
+            return true;
+        };
+        if (self.guard) |*g| if (g.pid == rp.pid) {
+            g.pid = 0;
+            self.events.emit("guard_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
+            self.alert("warning", "the guard of tasks without isolation ended; a killed engine would leave its tasks running", .{});
+            return true;
+        };
+        return false;
+    }
+
     fn helper(self: *Engine, pid: ?linux.pid_t) void {
         if (pid) |p| self.helpers.append(self.gpa, p) catch {};
     }
@@ -2290,6 +2315,8 @@ const Engine = struct {
                 }
             } else if (rp.pid == self.versionPid()) {
                 self.versionExited(rp);
+            } else if (self.keeperEnded(rp)) {
+                continue;
             } else for (self.helpers.items, 0..) |pid, k| {
                 if (pid == rp.pid) {
                     _ = self.helpers.swapRemove(k);
@@ -2795,9 +2822,9 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         const tc = sys.monoNs();
         podman = (try container.findPodman(gpa, a, environ.get("PATH") orelse "/usr/bin:/bin")) orelse
             return refusal.refuse(.invalid, "the workflow has container rules but podman is not on PATH");
-        var missing: ?[]const u8 = null;
-        images = try container.resolveImages(gpa, a, podman.?, refs, &host_envp, devnull, &missing);
-        if (missing) |m| return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "container image {s} is not available locally; workz does not pull images", .{m}));
+        var unresolved: ?container.Unresolved = null;
+        images = try container.resolveImages(gpa, a, podman.?, refs, &host_envp, devnull, &unresolved);
+        if (unresolved) |u| return refusal.refuse(.invalid, try u.text(a));
         const removed = try container.removeLeftovers(gpa, a, podman.?, wf.root, &host_envp, devnull);
         events.emit("containers_checked", .{ .images = images.count(), .leftovers_removed = removed, .seconds = @as(f64, @floatFromInt(sys.monoNs() - tc)) / 1e9 });
     }

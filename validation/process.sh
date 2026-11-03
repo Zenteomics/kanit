@@ -1196,6 +1196,33 @@ scope2=$(jq -r 'select(.event == "launch_started") | .cgroup' "$(last_launch)/ev
 check "an inherited isolation marker does not skip the run's scope" '[ "$(status_of s1.json completed)" = 1 ] && [[ "$scope1" == */workz-*.scope* ]] && [ "$(status_of s2.json completed)" = 1 ] && [[ "$scope2" == */workz-*.scope* ]] && [[ "$scope2" != */workz-1-1.scope* ]]'
 check "the records directory is private to its owner" '[ "$(stat -c %a .workz)" = 700 ]'
 
+# A stand-in systemd-run that writes down its arguments shows what the launcher asks for.
+new launcher-args
+mkdir bin
+cat > bin/systemd-run <<'STUB'
+#!/bin/sh
+printf '%s\n' "$@" > args.txt
+STUB
+chmod +x bin/systemd-run
+{ header launcher-args; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
+cp wf.toml 'w$x.toml'
+PATH="$PWD/bin:$PATH" "$workz" run wf.toml > /dev/null 2>&1 && mv args.txt plain.txt
+PATH="$PWD/bin:$PATH" "$workz" run 'w$x.toml' > /dev/null 2>&1 && mv args.txt dollar.txt
+check "the launcher asks systemd-run to keep \$ literal only for an argument that holds one" '[ -s plain.txt ] && ! grep -q -- --expand-environment plain.txt && grep -qx -- --expand-environment=no dollar.txt && grep -qx "w\$x.toml" dollar.txt'
+
+# Stand-ins for a Podman whose image store fails, and one without the image.
+new podman-failure
+mkdir broken absent
+printf '#!/bin/sh\necho "Error: database is locked" >&2\nexit 125\n' > broken/podman
+printf '#!/bin/sh\n[ "$2" = exists ] && exit 1\necho "Error: no such image" >&2\nexit 125\n' > absent/podman
+chmod +x broken/podman absent/podman
+{ header podman-failure; rule a '[]' '["a.txt"]' '"touch a.txt"' 'container = "quay.io/x/tool:1"'; } > wf.toml
+PATH="$PWD/broken:$PATH" "$workz" run wf.toml --no-isolation -q > /dev/null 2> broken.txt
+brc=$?
+PATH="$PWD/absent:$PATH" "$workz" run wf.toml --no-isolation -q > /dev/null 2> absent.txt
+arc=$?
+check "a failing Podman is named as failing, not as a missing image" '[ $brc = 2 ] && grep -q "podman image inspect quay.io/x/tool:1 failed" broken.txt && ! grep -q "not available locally" broken.txt && [ $arc = 2 ] && grep -q "not available locally" absent.txt'
+
 new corrupt-records
 { header corrupt-records; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
 "$workz" run wf.toml --no-isolation -q > /dev/null
@@ -1711,6 +1738,22 @@ check "a rule cannot reach a listener on the host's loopback" '[ "$(cat out.txt)
 { header loopback; rule lo '[]' '["lo.txt"]' "\"id -u > lo.txt; python3 -I -c 'import socket; s = socket.socket(); s.bind((\\\"127.0.0.1\\\", 0)); s.listen(); socket.create_connection(s.getsockname()); print(\\\"ok\\\")' >> lo.txt\""; } > lo.toml
 "$workz" run lo.toml "${iso[@]}" -q > lo.json
 check "a rule runs as the user and has its own loopback" '[ "$(head -1 lo.txt)" = "$(id -u)" ] && [ "$(tail -1 lo.txt)" = ok ]'
+
+# The engine's child that holds the run's network (or, without isolation,
+# guards its tasks) is killed while a rule runs.
+new keeper-ends
+{ header keeper-ends; rule a '[]' '["a.txt"]' '"sleep 2; touch a.txt"'; } > wf.toml
+for mode in netns guard; do
+  if [ $mode = netns ]; then "$workz" run wf.toml "${iso[@]}" -q > $mode.json 2> $mode.err &
+  else "$workz" run wf.toml --no-isolation --rerun -q > $mode.json 2> $mode.err & fi
+  engine=$!
+  keeper=""
+  for _ in $(seq 50); do keeper=$(ps -o pid=,args= --ppid $engine | awk -v want="__$mode" '$3 == want {print $1}'); [ -n "$keeper" ] && break; sleep 0.1; done
+  [ -n "$keeper" ] && kill -KILL "$keeper"
+  wait $engine
+  echo "$keeper" > $mode.pid
+done
+check "a run notes that its network holder or guard ended, and its rule goes on" '[ -s netns.pid ] && [ "$(status_of netns.json completed)" = 1 ] && grep -q "network holder ended" netns.err && [ -s guard.pid ] && [ "$(status_of guard.json completed)" = 1 ] && grep -q "guard of tasks without isolation ended" guard.err && [ "$(grep -c "\"event\":\"\(network_holder\|guard\)_ended\"" .workz/launches/*/events.jsonl | awk -F: "{ n += \$2 } END { print n }")" = 2 ]'
 
 new terminate
 { header terminate; rule slow '[]' '["done.txt"]' '"sleep 8 & echo $! > child.pid; echo started > started.txt; wait; echo late > done.txt"'; } > wf.toml

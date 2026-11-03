@@ -310,3 +310,88 @@ test "[unit] - [views]: a focus on a rule named with digits reads as that rule" 
     try testing.expectEqualStrings("b", up.rule);
     try testing.expectEqual(@as(?u32, 1), up.up);
 }
+
+test "[failure] - [process]: a program on PATH must be executable, and a later one is found" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const plain = try s.dir("plain");
+    const exec = try s.dir("exec");
+    _ = try s.file("plain/tool", "#!/bin/sh\n");
+    const real = try s.file("exec/tool", "#!/bin/sh\n");
+    const z = try testing.allocator.dupeZ(u8, real);
+    defer testing.allocator.free(z);
+    _ = try sys.check(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z, 0o755));
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const path_env = try std.fmt.allocPrint(arena.allocator(), "{s}:{s}", .{ plain, exec });
+
+    const found = try workz.process.findProgram(testing.allocator, arena.allocator(), path_env, "tool");
+
+    try testing.expectEqualStrings(real, found.?);
+}
+
+test "[failure] - [cgroup]: a group whose events cannot be read counts as still populated" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("cgroup.events", "populated 0\nfrozen 0\n");
+    try testing.expect(!workz.cgroup.populated(testing.allocator, s.path));
+    const gone = try std.fs.path.join(testing.allocator, &.{ s.path, "gone" });
+    defer testing.allocator.free(gone);
+    try testing.expect(workz.cgroup.populated(testing.allocator, gone));
+}
+
+/// Runs `clean` on scratch records without Podman: PATH names an empty directory.
+fn cleanScratch(s: *Scratch, a: std.mem.Allocator, opts: workz.clean.Options, out: *std.Io.Writer) !workz.clean.Result {
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", try s.dir("no-podman"));
+    return workz.clean.run(testing.allocator, a, s.path, opts, &env, out);
+}
+
+test "[failure] - [clean]: --keep goes on past a launch it cannot remove" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/L1", ".workz/launches/L2", ".workz/launches/L3" }) |d| _ = try s.dir(d);
+    const locked = try s.dir(".workz/launches/L1/locked");
+    _ = try s.file(".workz/launches/L2/f", "x");
+    _ = try s.file(".workz/lock", "");
+    const z = try a.dupeZ(u8, locked);
+    _ = try sys.check(std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z, 0));
+    defer _ = std.os.linux.fchmodat(std.os.linux.AT.FDCWD, z, 0o700);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    const r = try cleanScratch(&s, a, .{ .keep = 1 }, &out.writer);
+
+    try testing.expectEqual(@as(usize, 1), r.failed);
+    try testing.expectEqual(@as(usize, 1), r.launches);
+    try testing.expect(!sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".workz/launches/L2" })));
+    try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".workz/launches/L3" })));
+    try testing.expect(std.mem.indexOf(u8, out.written(), "cannot remove launch L1") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "removed launch L2") != null);
+}
+
+test "[failure] - [clean]: --previous does not follow a launch directory that is a symlink" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ ".workz", ".workz/launches", "outside", "outside/attempts", "outside/attempts/r", "outside/attempts/r/001", "outside/attempts/r/001/previous" }) |d| _ = try s.dir(d);
+    const kept = try s.file("outside/attempts/r/001/previous/0-out.txt", "elsewhere");
+    for ([_][]const u8{ ".workz/launches/L1", ".workz/launches/L1/attempts", ".workz/launches/L1/attempts/r", ".workz/launches/L1/attempts/r/001", ".workz/launches/L1/attempts/r/001/previous" }) |d| _ = try s.dir(d);
+    const own = try s.file(".workz/launches/L1/attempts/r/001/previous/0-out.txt", "own");
+    try s.link(".workz/launches/L0", "../../outside");
+    _ = try s.file(".workz/lock", "");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    const r = try cleanScratch(&s, a, .{ .previous = true }, &out.writer);
+
+    try testing.expect(sys.exists(testing.allocator, kept));
+    try testing.expect(!sys.exists(testing.allocator, own));
+    try testing.expectEqual(@as(usize, 1), r.previous);
+}

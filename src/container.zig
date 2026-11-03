@@ -16,23 +16,43 @@ pub fn findPodman(gpa: Allocator, a: Allocator, path_env: []const u8) !?[]const 
     return process.findProgram(gpa, a, path_env, "podman");
 }
 
-/// Resolves each distinct image reference to its local image ID. A missing
-/// image is reported in `missing`.
-pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []const []const u8, envp: *const process.Vec, devnull: sys.Fd, missing: *?[]const u8) !std.StringHashMapUnmanaged([]const u8) {
+/// An image reference that could not be resolved: missing from local
+/// storage, or Podman failed while looking (`status` is its exit status).
+pub const Unresolved = struct {
+    ref: []const u8,
+    missing: bool,
+    status: u32 = 0,
+
+    /// What a launch says when it refuses for this image.
+    pub fn text(self: Unresolved, a: Allocator) ![]const u8 {
+        if (self.missing) return std.fmt.allocPrint(a, "container image {s} is not available locally; workz does not pull images", .{self.ref});
+        if (linux.W.IFEXITED(self.status)) return std.fmt.allocPrint(a, "podman image inspect {s} failed with status {d}; run it to see why", .{ self.ref, linux.W.EXITSTATUS(self.status) });
+        return std.fmt.allocPrint(a, "podman image inspect {s} failed; run it to see why", .{self.ref});
+    }
+};
+
+/// Resolves each distinct image reference to its local image ID; the first
+/// that cannot be resolved is reported in `unresolved`.
+pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []const []const u8, envp: *const process.Vec, devnull: sys.Fd, unresolved: *?Unresolved) !std.StringHashMapUnmanaged([]const u8) {
     var ids: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (refs) |ref| {
         if (ids.contains(ref)) continue;
         var status: u32 = 0;
         const out = process.capture(gpa, a, &.{ podman, "image", "inspect", "--format", "{{.Id}}", ref }, envp, devnull, &status) catch |err| switch (err) {
             error.CommandFailed => {
-                missing.* = ref;
+                // `podman image exists` exits 1 for a missing image alone; any
+                // other failure is Podman's own.
+                var exists_status: u32 = 0;
+                _ = process.capture(gpa, a, &.{ podman, "image", "exists", ref }, envp, devnull, &exists_status) catch {};
+                const gone = linux.W.IFEXITED(exists_status) and linux.W.EXITSTATUS(exists_status) == 1;
+                unresolved.* = .{ .ref = ref, .missing = gone, .status = status };
                 return ids;
             },
             else => return err,
         };
         const id = std.mem.trim(u8, out, " \n");
         if (id.len == 0) {
-            missing.* = ref;
+            unresolved.* = .{ .ref = ref, .missing = true };
             return ids;
         }
         try ids.put(a, ref, try a.dupe(u8, id));

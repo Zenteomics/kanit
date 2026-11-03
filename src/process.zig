@@ -193,12 +193,15 @@ pub const Vec = struct {
     }
 };
 
-/// The executable `name` on PATH, or null.
+/// The executable `name` on PATH, or null: the first regular file of that
+/// name the user may execute, as the shell finds it.
 pub fn findProgram(gpa: Allocator, a: Allocator, path_env: []const u8, name: []const u8) !?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
     while (it.next()) |dir| {
         const p = try std.fs.path.join(a, &.{ dir, name });
-        if (try sys.stat(gpa, p)) |id| if (id.isReg()) return p;
+        const id = (try sys.stat(gpa, p)) orelse continue;
+        if (!id.isReg()) continue;
+        if (linux.errno(linux.access((try a.dupeZ(u8, p)).ptr, linux.X_OK)) == .SUCCESS) return p;
     }
     return null;
 }

@@ -118,30 +118,65 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             result.kept_for_recovery += 1;
             continue;
         }
-        result.bytes += try removeAt(gpa, launches_fd, try a.dupeZ(u8, name), opts.dry_run, 0);
+        // One launch that cannot be removed, such as one holding a file of
+        // another owner, leaves the others to remove.
+        result.bytes += removeAt(gpa, launches_fd, try a.dupeZ(u8, name), opts.dry_run, 0) catch |err| switch (err) {
+            error.OutOfMemory => return err,
+            else => {
+                try w.print("cannot remove launch {s}: {s}\n", .{ name, sys.errorText(err) });
+                result.failed += 1;
+                continue;
+            },
+        };
         result.launches += 1;
         try w.print("{s} launch {s}\n", .{ if (opts.dry_run) "would remove" else "removed", name });
     }
     return result;
 }
 
+/// The directory `name` below the open directory `parent`, or null when it
+/// is absent, not a directory, or a symlink, which is never followed.
+fn openBelow(parent: sys.Fd, name: [:0]const u8) ?sys.Fd {
+    const rc = linux.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
+    if (linux.errno(rc) != .SUCCESS) return null;
+    return @intCast(rc);
+}
+
+/// The names in the open directory `fd`, without hidden ones.
+fn namesIn(a: Allocator, fd: sys.Fd) ![]const [:0]const u8 {
+    var names: std.ArrayList([:0]const u8) = .empty;
+    var entries: sys.DirEntries = .{ .fd = fd };
+    while (try entries.next()) |e| if (e.name[0] != '.') try names.append(a, try a.dupeZ(u8, e.name));
+    return names.items;
+}
+
 /// Removes the `previous/` directory of every attempt in every launch,
-/// with a line for each launch that had any.
+/// with a line for each launch that had any. Each directory is opened below
+/// the one before without following a symlink, so a link planted among the
+/// records cannot lead the removal elsewhere.
 fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, pending: []const records.Pending, dry: bool, result: *Result, w: *std.Io.Writer) !void {
+    const launches_fd = openDir(gpa, try std.fs.path.join(a, &.{ rec, "launches" })) catch return;
+    defer sys.close(launches_fd);
     for (try records.launchNames(gpa, a, rec)) |launch| {
+        const launch_fd = openBelow(launches_fd, try a.dupeZ(u8, launch)) orelse continue;
+        defer sys.close(launch_fd);
+        const attempts_fd = openBelow(launch_fd, "attempts") orelse continue;
+        defer sys.close(attempts_fd);
         const attempts = try std.fs.path.join(a, &.{ rec, "launches", launch, "attempts" });
         var dirs: usize = 0;
         var bytes: u64 = 0;
-        for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {
+        for (try namesIn(a, attempts_fd)) |rule| {
+            const rule_fd = openBelow(attempts_fd, rule) orelse continue;
+            defer sys.close(rule_fd);
             const rule_dir = try std.fs.path.join(a, &.{ attempts, rule });
-            for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n| {
+            for (try namesIn(a, rule_fd)) |n| {
                 const attempt = try std.fs.path.join(a, &.{ rule_dir, n });
                 if (isPending(pending, attempt)) {
                     try w.print("kept {s}/previous: it holds outputs the next launch puts back\n", .{attempt});
                     result.kept_for_recovery += 1;
                     continue;
                 }
-                const fd = openDir(gpa, attempt) catch continue;
+                const fd = openBelow(rule_fd, n) orelse continue;
                 defer sys.close(fd);
                 bytes += removeAt(gpa, fd, "previous", dry, 0) catch |err| switch (err) {
                     error.FileNotFound => continue,

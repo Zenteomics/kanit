@@ -1866,16 +1866,6 @@ fn knownRules(a: std.mem.Allocator, wf: *const workflow.Workflow, names: []const
     return true;
 }
 
-fn findProgram(c: Ctx, name: []const u8) !?[]const u8 {
-    const path = c.env.get("PATH") orelse "/usr/bin:/bin";
-    var it = std.mem.tokenizeScalar(u8, path, ':');
-    while (it.next()) |dir| {
-        const p = try std.fs.path.join(c.a, &.{ dir, name });
-        if (try sys.stat(c.gpa, p)) |id| if (id.isReg()) return p;
-    }
-    return null;
-}
-
 /// Re-executes the run inside a delegated systemd user scope: cgroup limits
 /// for the whole run, swap off. `systemd-run --scope` execs the engine in this
 /// same process, so interrupt signals reach the engine directly.
@@ -1894,14 +1884,21 @@ fn insideOwnScope(c: Ctx) !bool {
 }
 
 fn isolate(c: Ctx, opts: run.Options) !Exit {
-    const systemd_run = (try findProgram(c, "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
+    const systemd_run = (try workz.process.findProgram(c.gpa, c.a, c.env.get("PATH") orelse "/usr/bin:/bin", "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
     const threads = opts.max_threads orelse run.defaultThreads();
     var memory = opts.max_memory_mib orelse run.defaultMemoryMib(c.gpa);
     // The engine and its network holder need a little memory beside the tasks.
     memory += 256;
     const exe = try sys.selfExe(c.a);
     var argv: std.ArrayList([]const u8) = .empty;
-    try argv.appendSlice(c.a, &.{ systemd_run, "--user", "--scope", "--quiet", "--expand-environment=no" });
+    try argv.appendSlice(c.a, &.{ systemd_run, "--user", "--scope", "--quiet" });
+    // systemd-run 254 and newer can expand `$NAME` in the command it starts,
+    // and older ones neither expand nor know the option that stops it: it is
+    // given only when an argument holds a `$`.
+    const dollar = std.mem.indexOfScalar(u8, exe, '$') != null or for (c.argv[1..]) |arg| {
+        if (std.mem.indexOfScalar(u8, arg, '$') != null) break true;
+    } else false;
+    if (dollar) try argv.append(c.a, "--expand-environment=no");
     // systemd-run names a scope after its own pid. When workz itself was
     // started by `systemd-run --scope`, that pid is ours and its scope is still
     // loaded, so the run's scope gets a name of its own.

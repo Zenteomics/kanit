@@ -20,6 +20,13 @@ All notable changes to workz will be documented in this file. The format follows
   - An empty `samples.names` list is refused, as an empty sheet is, instead of preparing a workflow without the per-sample rules.
   - `prepare --check` names a change of rule order, or of the blank lines and comments between rules, instead of exiting 1 with nothing to show.
 - **Bash completion.** A file name or workflow name with a space is offered and read whole, and `prepare --params` is offered with its file.
+- **Older systemd.** `workz run` gives `systemd-run` the option that keeps `$` as written only when the command line holds one. systemd releases before 254, such as those of Debian 12, RHEL 9 and Ubuntu 22.04, do not know that option and refused every isolated run.
+- **Container images.** A launch that Podman cannot answer about an image says that `podman image inspect` failed, with its status, instead of calling the image missing.
+- **Programs on PATH.** `podman`, `systemd-run` and `systemctl` are taken from the first file of that name on `PATH` that may be executed, as the shell takes them, not from a file that may not.
+- **Stopping.** An attempt whose cgroup events cannot be read counts as still running, so a stop ends it by the kill after its grace period instead of leaving its processes.
+- **`workz clean --keep`.** A launch that cannot be removed is named and counted, and the older launches after it are still removed; one such launch ended the clean before.
+- **`workz clean --previous`.** A launch, rule or attempt directory among the records that is a symlink is not followed, so only `previous/` directories inside the records are removed.
+- **Isolation keepers.** When the process holding a run's private network, or guarding the tasks of a run without isolation, ends before the engine, the launch says so on standard error and in a `network_holder_ended` or `guard_ended` event, and the engine no longer signals its process number at the end.
 
 ## [0.6.0] - 2026-10-31
 

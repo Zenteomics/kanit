@@ -4,7 +4,7 @@ workz is one executable. This page lists what it needs from the system, builds i
 
 - **Linux on x86-64.** Other systems and architectures are not supported.
 - **cgroup v2.** `stat -fc %T /sys/fs/cgroup` prints `cgroup2fs`.
-- **A systemd user manager with delegated controllers.** `systemctl --user status` works in your session, and the `cpu`, `memory` and `pids` controllers are delegated to it (see [below](#check-isolation)).
+- **A systemd user manager with delegated controllers.** `systemctl --user status` works in your session, and the `cpu`, `memory` and `pids` controllers are delegated to it (see [below](#check-isolation)). A command line that holds a `$`, such as a workflow path with one, needs systemd 254 or newer (`systemctl --version`), which can be told to keep it as written.
 - **Unprivileged user namespaces**, for the run's private network. Most distributions allow them; `sysctl user.max_user_namespaces` prints a number above 0.
 - **bash** at `/bin/bash`, `/usr/bin/bash` or `/usr/local/bin/bash`, for rule commands.
 - **Rootless Podman**, only for [container rules and services](Containers-and-Services.md).

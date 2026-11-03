@@ -155,6 +155,7 @@ Launch events:
 - `sample`: `running`, `ready`, `threads_reserved`, `memory_reserved_mib` (with `shared_reserved_mib`, the part shared inputs hold), `memory_current`, `cpu_cores_used`.
 - `control`: `command`, `rule`, `result`.
 - `cancel_requested`: `signal`.
+- `network_holder_ended`, `guard_ended`: `exit_code`, `signal`. The engine's child that holds the run's private network, or guards the tasks of a run without isolation, ended before the engine; the rules go on, but a killed engine would no longer end them.
 
 Rule events:
 

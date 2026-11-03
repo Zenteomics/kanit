@@ -79,9 +79,9 @@ pub const Context = struct {
             const envp = try process.Vec.init(self.a, try state.hostEnv(self.a, self.environ, self.pass_env));
             const devnull = try sys.openRead(self.gpa, "/dev/null");
             defer sys.close(devnull);
-            var missing: ?[]const u8 = null;
-            images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &missing);
-            if (missing) |m| std.debug.print("workz: container image {s} is not available locally; a run would refuse\n", .{m});
+            var unresolved: ?container.Unresolved = null;
+            images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &unresolved);
+            if (unresolved) |u| std.debug.print("workz: a run would refuse: {s}\n", .{try u.text(self.a)});
         }
         return container.ruleExtras(self.a, self.wf, &images);
     }
