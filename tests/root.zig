@@ -19,6 +19,21 @@ test {
     testing.refAllDecls(workz.fields);
     testing.refAllDecls(workz.report);
     testing.refAllDecls(workz.sys);
+    // Every module, so code the command line does not reach still compiles.
+    testing.refAllDecls(workz.run);
+    testing.refAllDecls(workz.container);
+    testing.refAllDecls(workz.clean);
+    testing.refAllDecls(workz.logs);
+    testing.refAllDecls(workz.html);
+    testing.refAllDecls(workz.model);
+    testing.refAllDecls(workz.units);
+    testing.refAllDecls(workz.term);
+    testing.refAllDecls(workz.tui);
+    testing.refAllDecls(workz.views);
+    testing.refAllDecls(workz.methods);
+    testing.refAllDecls(workz.lint);
+    testing.refAllDecls(workz.schema);
+    testing.refAllDecls(workz.prepare);
     _ = @import("test_workflow.zig");
     _ = @import("test_reuse.zig");
     _ = @import("test_engine.zig");

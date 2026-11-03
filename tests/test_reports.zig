@@ -413,6 +413,8 @@ test "[edge] - [report]: durations and sizes print for any number" {
     try testing.expectEqualStrings("-", w.buffered());
     w = .fixed(&buf);
     try workz.units.duration(&w, 1e25);
+    // Hours stop at the largest whole number of seconds, rather than wrap.
+    try testing.expectEqualStrings("5124095576030431h 00m", w.buffered());
     w = .fixed(&buf);
     try workz.units.size(&w, std.math.nan(f64));
     try testing.expectEqualStrings("-", w.buffered());

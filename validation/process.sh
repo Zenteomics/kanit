@@ -4,14 +4,22 @@
 # OUTPUT_DIR must not exist; every check gets its own working directory there.
 # A SECTION is the first word of a section heading below, such as reuse,
 # container or monitoring; without one, every section runs. Exit status: 0
-# when every check passed, 1 when one failed, 3 when none failed but some
-# were skipped for a missing tool or image.
+# when every check passed, 1 when one failed, 2 when OUTPUT_DIR exists or a
+# SECTION names none, 3 when none failed but some were skipped for a missing
+# tool or image.
+# Two suites at once share the names of temporary Podman images: run one at a
+# time.
 set -uo pipefail
 
 # A selection runs a copy of this script without the other sections: the
 # setup before the first section, every helper function, the gates of the
 # optional tools, and the selected sections.
 if [ $# -gt 2 ]; then
+  # A misspelled section would select nothing and pass.
+  sections=$(sed -n 's/^# -\{64\} \([^ ,]*\).*/\1/p' "$0")
+  for name in "${@:3}"; do
+    grep -qx -- "$name" <<< "$sections" || { echo "no section named $name; the sections are:" $sections >&2; exit 2; }
+  done
   sel=" ${*:3} "
   copy=$(mktemp /var/tmp/workz-process.XXXXXX)
   awk -v sel="$sel" '
@@ -23,7 +31,7 @@ if [ $# -gt 2 ]; then
     fn == "block" { print; if ($0 ~ /^\}$/) fn = ""; next }
     fn == "line" { print; if ($0 ~ /; \}$/) fn = ""; next }
     /^else skip / { print (inside ? $0 : "fi"); next }
-    /^(if have_images |if command -v tmux )/ { print; print "  :"; next }
+    /^(if have_images |if command -v (tmux|python3) )/ { print; print "  :"; next }
     /^trap / { print; next }
     inside { print }
   ' "$0" > "$copy"
@@ -377,12 +385,17 @@ runner=$!
 # process that does carry the value shows the scan can see one.
 bash -c 'sleep 3; :' passed-secret-value &
 decoy=$!
+# The decoy shows its value once bash has started.
+for _ in $(seq 40); do grep -qa "passed-secre[t]-value" "/proc/$decoy/cmdline" 2> /dev/null && break; sleep 0.05; done
 control=0
-grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q "/proc/$decoy/" && control=1
+# Whole lists, not `| grep -q`: under pipefail, grep -q leaving early can
+# fail the pipeline through SIGPIPE although it matched.
+found=$(grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null)
+[[ $found == *"/proc/$decoy/"* ]] && control=1
 kill $decoy
 wait $decoy 2> /dev/null
 seen=0
-for _ in $(seq 25); do grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null | grep -q . && seen=1; sleep 0.1; done
+for _ in $(seq 25); do [ -n "$(grep -la "passed-secre[t]-value" /proc/[0-9]*/cmdline 2> /dev/null)" ] && seen=1; sleep 0.1; done
 wait $runner
 check "a passed variable reaches a container rule without its value in Podman's arguments" '[ $control = 1 ] && [ "$(status_of s.json completed)" = 1 ] && [ "$(cat s.txt)" = passed-secret-value ] && [ $seen = 0 ]'
 
@@ -878,12 +891,12 @@ new escaped
   rule leaver '[]' '["l.txt"]' '"setsid sleep 300 < /dev/null > /dev/null 2>&1 & echo $! > ../escaped.pid; echo ok > l.txt"'
 } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
-sleep 0.5
 pid=$(cat ../escaped.pid)
+for _ in $(seq 50); do [ -n "$pid" ] && alive "$pid" || break; sleep 0.1; done
 check "a process that leaves the task's session is ended with its cgroup" '[ -n "$pid" ] && ! alive $pid'
 
 new oom
-{ header oom; rule hog '[]' '["h.txt"]' '"python3 -I -c \"b = bytearray(300 * 1024 * 1024)\"; touch h.txt"'; } > wf.toml
+{ header oom; rule hog '[]' '["h.txt"]' '"dd if=/dev/zero of=/dev/null bs=300M count=1 2> /dev/null; touch h.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "a task above its memory request is OOM-killed and reported" 'grep -q "out of memory: could not stay within its 64 MiB request" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
 check "an OOM kill ends the whole task, its shell included" 'jq -e ".signal == 9 and .exit_code == null" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
@@ -894,7 +907,7 @@ check "the run's scope allows tasks no swap" '[ "$(cat s.txt)" = 0 ]'
 
 # Anonymous memory is gone when the processes exit, so it is sampled while the attempt runs.
 new anon
-{ header anon; rule heap '[]' '["h.txt"]' '"python3 -I -c \"import time; b = bytearray(100 * 1024 * 1024); time.sleep(6)\"; touch h.txt"' | sed 's/memory = "64M"/memory = "256M"/'; } > wf.toml
+{ header anon; rule heap '[]' '["h.txt"]' '"x=$(head -c 100M /dev/zero | tr -c a a); sleep 6; touch h.txt"' | sed 's/memory = "64M"/memory = "512M"/'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json
 check "an attempt's record keeps the largest anonymous memory sampled while it ran" 'jq -e ".cgroup.anon_peak >= 90 * 1048576 and (.cgroup | has(\"anon\") | not)" "$(last_launch)/attempts/heap/001/record.json" > /dev/null'
 
@@ -905,7 +918,7 @@ new interrupt
 } > wf.toml
 setsid "$workz" run wf.toml "${iso[@]}" --grace 1 > s.json 2> err.txt &
 launcher=$!
-sleep 1.5
+for _ in $(seq 100); do [ "$(grep -hs task_started .workz/launches/*/events.jsonl | wc -l)" -ge 2 ] && break; sleep 0.1; done
 kill -INT -- -$launcher
 wait $launcher
 rc=$?
@@ -1027,7 +1040,7 @@ mkdir ref && head -c $((1024 * 1024)) /dev/urandom > ref/index.bin
 cp "$workz" ./workz
 ./workz run wf.toml --no-isolation --max-threads 1 --max-memory 1G -q > s.json 2> err.txt &
 engine=$!
-sleep 0.3
+for _ in $(seq 50); do grep -qs task_started .workz/launches/*/events.jsonl && break; sleep 0.1; done
 cp ./workz ./workz.new && mv ./workz.new ./workz
 wait $engine
 check "a launch whose binary is replaced while it runs still starts its guard and holders" '[ "$(status_of s.json completed)" = 2 ] && [ ! -s err.txt ]'
@@ -1476,7 +1489,7 @@ new watch
 { header watch; rule w '[]' '["w.txt"]' '"echo working >&2; sleep 3; touch w.txt"'; } > wf.toml
 "$workz" run wf.toml "${iso[@]}" -q > s.json &
 runner=$!
-sleep 1.2
+for _ in $(seq 50); do grep -qs working .workz/launches/*/attempts/w/001/stderr.log && break; sleep 0.1; done
 cp "$(last_launch)/report.html" live.html
 "$workz" watch -d . --once > view.txt
 "$workz" status -d . --json > running.json
@@ -1746,6 +1759,9 @@ new environment
 OPENAI_API_KEY=canary AWS_SECRET_ACCESS_KEY=canary BASH_ENV=/nonexistent "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
 check "credentials and shell start-up variables do not reach rules" '[ "$(status_of s.json completed)" = 1 ]'
 
+# python3 opens the listening sockets these checks need, which bash and the
+# coreutils cannot.
+if command -v python3 > /dev/null; then
 new network
 python3 -I -m http.server --bind 127.0.0.1 0 > server.log 2>&1 &
 server=$!
@@ -1759,6 +1775,7 @@ check "a rule cannot reach a listener on the host's loopback" '[ "$(cat out.txt)
 { header loopback; rule lo '[]' '["lo.txt"]' "\"id -u > lo.txt; python3 -I -c 'import socket; s = socket.socket(); s.bind((\\\"127.0.0.1\\\", 0)); s.listen(); socket.create_connection(s.getsockname()); print(\\\"ok\\\")' >> lo.txt\""; } > lo.toml
 "$workz" run lo.toml "${iso[@]}" -q > lo.json
 check "a rule runs as the user and has its own loopback" '[ "$(head -1 lo.txt)" = "$(id -u)" ] && [ "$(tail -1 lo.txt)" = ok ]'
+else skip "network and loopback (needs python3)"; fi
 
 # The engine's child that holds the run's network (or, without isolation,
 # guards its tasks) is killed while a rule runs.
@@ -1784,8 +1801,8 @@ for _ in $(seq 100); do [ -f started.txt ] && break; sleep 0.05; done
 kill -TERM $launcher
 wait $launcher
 rc=$?
-sleep 0.5
 child=$(cat child.pid)
+for _ in $(seq 50); do [ -n "$child" ] && alive "$child" || break; sleep 0.1; done
 check "SIGTERM to the launcher stops the run and its children" '[ $rc = 130 ] && [ ! -e done.txt ] && [ -n "$child" ] && ! alive $child'
 { header terminate; rule slow '[]' '["done.txt"]' '"echo resumed > done.txt"'; } > wf.toml
 "$workz" run wf.toml --max-threads 2 --max-memory 256M -q > s2.json

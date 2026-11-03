@@ -83,7 +83,7 @@ test "the watch selection moves, scrolls and survives filters" {
     // A selected rule that left the view gives way to a visible one.
     const fewer = [_]usize{ 4, 0 };
     ui.settle(&fewer, 2);
-    try testing.expect(ui.selected.? == 4 or ui.selected.? == 0);
+    try testing.expectEqual(@as(?usize, 0), ui.selected);
     ui.key(.{ .char = 'q' }, &fewer, 2);
     try testing.expect(ui.quit);
 }
