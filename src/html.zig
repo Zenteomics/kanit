@@ -19,6 +19,15 @@ const eql = std.mem.eql;
 const duration = units.duration;
 const size = units.size;
 
+/// A bound's name as the text reports write it, escaped: a group's name
+/// comes from the workflow.
+fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
+    var buf: [256]u8 = undefined;
+    var name: std.Io.Writer = .fixed(&buf);
+    report.boundName(&name, b) catch {};
+    try escape(w, name.buffered());
+}
+
 /// Writes `s` with HTML special characters escaped.
 pub fn escape(w: *std.Io.Writer, s: []const u8) !void {
     var start: usize = 0;
@@ -130,10 +139,12 @@ const style = ".page{" ++ light_theme ++ "}\n" ++
     "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}}\n" ++
     @embedFile("templates/report.css");
 
-/// The page for one launch.
-pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8) !void {
+/// The page for one launch. Records that do not parse are left out and
+/// added to `unread`.
+pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
     var l = try model.load(gpa, a, launch_dir);
     defer l.deinit();
+    if (unread) |u| try u.appendSlice(a, l.unreadable.items);
     const p: Page = .{ .a = a, .w = w, .l = &l, .groups = try groups(a, &l) };
 
     try w.writeAll("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
@@ -297,7 +308,7 @@ const Page = struct {
         if (l.binding) |bi| {
             if (l.overBound()) |over| {
                 try w.writeAll("limited by ");
-                try report.boundName(w, l.bounds[bi]);
+                try boundName(w, l.bounds[bi]);
                 try w.print(", {d:.0}% over that bound", .{over});
             } else try w.writeAll("too short to say what limited it");
         } else try w.writeAll(if (l.finished) "nothing ran in this launch" else "starting");
@@ -1003,7 +1014,9 @@ const Page = struct {
             const class = if (b.open) "st-running" else if (eql(u8, b.status, "completed")) std.fmt.bufPrint(&class_buf, "g{d}", .{b.slot}) catch "g0" else if (eql(u8, b.status, "cancelled")) "st-cancelled" else "st-failed";
             try w.print("<rect class=\"{s}\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\"{s}><title>", .{ class, run_from, y + pad, @max(run_to - run_from, 1), row_h - 2 * pad, if (b.crit) " style=\"stroke:var(--ink);stroke-width:2\"" else "" });
             try escape(w, b.name);
-            try w.print(", attempt {d}: {s}; started at ", .{ b.attempt, b.status });
+            try w.print(", attempt {d}: ", .{b.attempt});
+            try escape(w, b.status);
+            try w.writeAll("; started at ");
             try duration(w, b.start);
             try w.writeAll(", waited ");
             try duration(w, b.waited);
@@ -1146,7 +1159,7 @@ const Page = struct {
         try w.writeAll("<div class=\"wide\"><table><thead><tr><th>bound</th><th class=\"n\">at least</th><th>use</th><th>against the elapsed time</th></tr></thead><tbody>\n");
         for (l.bounds, 0..) |b, i| {
             try w.print("<tr><td class=\"name\"{s}>", .{if (l.binding == i) " style=\"font-weight:700\"" else ""});
-            try report.boundName(w, b);
+            try boundName(w, b);
             try w.writeAll("</td><td class=\"n\">");
             try duration(w, b.seconds);
             try w.writeAll("</td><td>");

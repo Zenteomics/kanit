@@ -1234,6 +1234,11 @@ src=$?
 echo '{"rule":' > "$l/attempts/a/001/record.json"
 "$workz" report -d . > r.out 2> r.err
 rrc=$?
+for kind in --bottlenecks --format=html "--compare $(basename "$(ls -d .workz/launches/* | head -1)")"; do
+  "$workz" report -d . $kind > /dev/null 2> kind.err
+  echo "$? $(grep -c "record.json is not valid JSON; the report leaves it out" kind.err)" >> kinds.txt
+done
+check "the bottleneck report, the page and a comparison name a corrupt record and exit 1" '[ "$(sort -u kinds.txt)" = "1 1" ]'
 echo 'garbage' > "$l/events.jsonl"
 rm "$l/summary.json"
 "$workz" watch -d . --once > w.out 2> /dev/null

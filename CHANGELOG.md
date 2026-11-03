@@ -6,6 +6,10 @@ All notable changes to workz will be documented in this file. The format follows
 
 ## [Unreleased]
 
+One change needs action:
+
+- **Rename a resource group whose name holds anything but letters, digits, `_`, `.` and `-`.** Group names follow the rules for names that rule and shared names follow, since they appear in records, reports and the HTML page.
+
 ### Added
 
 - **Run files.** `workz prepare TEMPLATE --params FILE` reads a run file beside the template: its `[workflow]` keys and `[params]` override the template's one by one, its `[samples]` replaces the template's with a sheet read beside the run file, and the workflow is written beside the run file. One template then serves every run; without `--params`, nothing changes.
@@ -27,6 +31,10 @@ All notable changes to workz will be documented in this file. The format follows
 - **`workz clean --keep`.** A launch that cannot be removed is named and counted, and the older launches after it are still removed; one such launch ended the clean before.
 - **`workz clean --previous`.** A launch, rule or attempt directory among the records that is a symlink is not followed, so only `previous/` directories inside the records are removed.
 - **Isolation keepers.** When the process holding a run's private network, or guarding the tasks of a run without isolation, ends before the engine, the launch says so on standard error and in a `network_holder_ended` or `guard_ended` event, and the engine no longer signals its process number at the end.
+- **Reports of earlier launches.** `report`, the HTML page and `watch` read a launch's copy of its workflow without checking today's files, so a replaced, removed or moved output no longer hides the launch's graph and critical path.
+- **Unreadable records.** `report --bottlenecks`, `--compare` and `--format html` name an attempt record that does not parse and exit 1, as the attempt table and `--suggest` do, instead of leaving it out unsaid.
+- **Large launches.** `status`, `status --history`, `report` and the page read a `summary.json` of any size up to 256 MiB; one over 1 MiB, as an interrupted launch of some ten thousand rules writes, made `status` fail and read as unfinished.
+- **HTML page.** An attempt's status and a resource group's name are escaped like every other text on the page.
 
 ## [0.6.0] - 2026-10-31
 

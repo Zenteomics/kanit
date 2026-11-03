@@ -1494,7 +1494,7 @@ pub fn loadLinks(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Links {
     const workdir = if (v == .object) (if (v.object.get("workdir")) |w| (if (w == .string) w.string else return links) else return links) else return links;
     var problem: workflow.Problem = .{};
     defer if (problem.message.len > 0) gpa.free(problem.message);
-    var wf = workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), workdir, &problem) catch return links;
+    var wf = workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), workdir, &problem) catch return links;
     defer wf.deinit();
     var g = graph.build(gpa, &wf, &problem) catch return links;
     defer g.deinit();

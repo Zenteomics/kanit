@@ -1050,3 +1050,25 @@ test "[failure] - [prepare]: a template refuses what would be read two ways or n
         }
     }
 }
+
+test "[unit] - [workflow]: a launch's copy of its workflow loads whatever has become of its files" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("out");
+    _ = try s.dir("out/x.txt");
+    const path = try s.file("copy.toml", head ++ "[[rules]]\nname = \"a\"\noutput = [\"out/x.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n");
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    try testing.expectError(error.Invalid, workflow.load(testing.allocator, path, s.path, &problem));
+
+    var recorded: workflow.Problem = .{};
+    var wf = try workflow.loadRecorded(testing.allocator, path, s.path, &recorded);
+    defer wf.deinit();
+
+    try testing.expectEqual(@as(usize, 1), wf.rules.len);
+    try testing.expectEqualStrings("a", wf.rules[0].name);
+}
+
+test "[failure] - [workflow]: a resource group is named as rules and shared inputs are" {
+    try expectInvalid(head ++ "[resource_groups.\"disk <io>\"]\nmax = 1\n\n[[rules]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", "invalid resource group name 'disk <io>'");
+}

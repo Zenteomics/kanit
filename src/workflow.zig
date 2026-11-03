@@ -539,6 +539,17 @@ fn localPath(p: []const u8) bool {
 /// Parses and checks a workflow file. `root` is the working directory that
 /// relative paths resolve against. On error.Invalid, `problem` holds the reason.
 pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
+    return loadChecked(gpa, path, root, problem, true);
+}
+
+/// Loads the copy of a workflow that a launch recorded, for reading its
+/// records: every check that reads the workflow alone, none that looks at
+/// the files of the working directory, which may have changed since.
+pub fn loadRecorded(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
+    return loadChecked(gpa, path, root, problem, false);
+}
+
+fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem, files: bool) !Workflow {
     // Problems found before this load, by a caller that reuses `problem`.
     const prior = problem.count;
     problem.current_line = 0;
@@ -663,7 +674,7 @@ pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Proble
     // Rules that did not parse leave the rest to check against nothing.
     if (problem.count > prior) return error.Invalid;
     wf.rules = rules.items;
-    try checkRules(gpa, &wf, problem);
+    try checkRules(gpa, &wf, problem, files);
     // Every shared name now exists: resolve each rule's to indices once.
     for (rules.items) |*r| {
         const idx = try arena.alloc(usize, r.shared.len);
@@ -680,6 +691,7 @@ fn parseGroup(p: *Parser, name: []const u8, v: toml.Value) !Group {
         .table => |t| t,
         else => return p.fail(&at, "resource_groups.{s} must be a table", .{name}),
     };
+    if (!validName(name)) return p.fail(&at, "invalid resource group name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
     try p.keysNoted(g, &group_keys, &at, "a resource group");
     const max = (try p.int(g, "max", &at, "resource group")) orelse return p.fail(&at, "resource_groups.{s}.max is required", .{name});
     if (max < 1 or max > 1_000_000) return p.failKey(&at, "max", "resource_groups.{s}.max must be between 1 and 1000000", .{name});
@@ -945,6 +957,7 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: [
     if (!within(wf.root, abs)) return problem.set(gpa, "rule {s}: '{s}' leaves the working directory", .{ rule, written });
     if (inRecords(wf.root, abs))
         return problem.set(gpa, "rule {s}: '{s}' is inside the engine record directory", .{ rule, written });
+    if (!cache.files) return;
     if (try sys.lstat(gpa, abs)) |id| {
         if (!id.isReg()) return problem.set(gpa, "rule {s}: existing '{s}' must be a regular file", .{ rule, written });
     }
@@ -985,8 +998,11 @@ fn hasParentComponent(path: []const u8) bool {
 const Inode = struct { dev: u64, ino: u64 };
 
 /// One stat and one symlink resolution per distinct path while checking.
+/// With `files` false every path reads as absent, so only the checks that
+/// need the workflow alone apply.
 const PathCache = struct {
     gpa: Allocator,
+    files: bool = true,
     ids: std.StringHashMapUnmanaged(?sys.Identity) = .empty,
     reals: std.StringHashMapUnmanaged(?[]u8) = .empty,
 
@@ -998,6 +1014,7 @@ const PathCache = struct {
     }
 
     fn stat(self: *PathCache, path: []const u8) !?sys.Identity {
+        if (!self.files) return null;
         if (self.ids.get(path)) |v| return v;
         const id = try sys.stat(self.gpa, path);
         try self.ids.put(self.gpa, path, id);
@@ -1009,6 +1026,7 @@ const PathCache = struct {
     /// through its directory, so each directory is resolved once and each
     /// file costs one `statx`.
     fn real(self: *PathCache, path: []const u8) !?[]const u8 {
+        if (!self.files) return null;
         if (self.reals.get(path)) |v| return v;
         const r: ?[]u8 = blk: {
             const dir = std.fs.path.dirname(path) orelse break :blk try sys.realpath(self.gpa, path);
@@ -1056,6 +1074,7 @@ fn fileAncestor(gpa: Allocator, problem: *Problem, root: []const u8, files: *con
 /// False when that part does not exist, since the kernel cannot follow it
 /// either.
 fn dotDotDiffers(gpa: Allocator, cache: *PathCache, root: []const u8, written: []const u8, abs: []const u8) !bool {
+    if (!cache.files) return false;
     var it = std.mem.splitScalar(u8, written, '/');
     var end: ?usize = null;
     var pos: usize = 0;
@@ -1082,7 +1101,7 @@ fn insideInput(gpa: Allocator, problem: *Problem, rule: []const u8, what: []cons
         try problem.add(gpa, "rule {s}: {s}'{s}' is inside its directory input '{s}'; write it outside that directory", .{ rule, what, written, in_written });
 }
 
-fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
+fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: bool) !void {
     const prior = problem.count;
     var names: std.StringHashMapUnmanaged(void) = .empty;
     defer names.deinit(gpa);
@@ -1092,7 +1111,7 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem) !void {
     defer side.deinit(gpa);
     var out_inodes: std.AutoHashMapUnmanaged(Inode, void) = .empty;
     defer out_inodes.deinit(gpa);
-    var cache: PathCache = .{ .gpa = gpa };
+    var cache: PathCache = .{ .gpa = gpa, .files = files };
     defer cache.deinit();
 
     // Each problem is recorded and checking goes on: a bad item skips only

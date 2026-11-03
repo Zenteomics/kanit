@@ -72,7 +72,7 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     defer arena.deinit();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch, null);
     const page = out.written();
     const has = struct {
         fn f(text: []const u8, part: []const u8) bool {
@@ -149,7 +149,7 @@ test "[regression] - [report]: a launch that reused rules shows them with the ru
 
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch);
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, launch, null);
     const page = out.written();
     const has = struct {
         fn f(text: []const u8, part: []const u8) bool {
@@ -392,12 +392,12 @@ test "[edge] - [report]: values that cannot be true read as missing, never as a 
     try testing.expect(std.mem.indexOf(u8, l.snapshot_problem.?, "memory") != null);
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, dir);
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, dir, null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "the workflow snapshot cannot be read: line") != null);
     try workz.report.writeTsv(&out.writer, l.rows);
     try workz.report.writeSuggestions(&out.writer, &l, .tsv);
     try workz.report.writeSuggestions(&out.writer, &l, .table);
-    try workz.html.write(testing.allocator, a, &out.writer, dir);
+    try workz.html.write(testing.allocator, a, &out.writer, dir, null);
 }
 
 test "[edge] - [report]: durations and sizes print for any number" {
@@ -524,7 +524,7 @@ test "[unit] - [report]: the bottleneck report leads with its verdict, and a com
     const two = try std.fs.path.join(a, &.{ s.path, "two" });
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, one);
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, one, null);
     var lines = std.mem.splitScalar(u8, out.written(), '\n');
     _ = lines.next();
     try testing.expect(std.mem.startsWith(u8, lines.next().?, "the thread budget limited this launch: it took 5.0 s"));
@@ -532,7 +532,7 @@ test "[unit] - [report]: the bottleneck report leads with its verdict, and a com
         try testing.expect(std.mem.indexOf(u8, out.written(), section) != null);
 
     out.clearRetainingCapacity();
-    try workz.report.writeCompare(testing.allocator, a, &out.writer, one, two);
+    try workz.report.writeCompare(testing.allocator, a, &out.writer, one, two, null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\nbudget   1 threads, 1.0 GiB, 1 jobs against 2 threads, 1.0 GiB, 2 jobs\n") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "note: the budgets differ") != null);
 }
@@ -578,4 +578,76 @@ test "[failure] - [report]: a record or event of a newer format is left out and 
     try testing.expect(std.mem.endsWith(u8, l.unreadable.items[0], "/attempts/a/001/record.json"));
     try testing.expectEqual(@as(usize, 1), l.rows.len);
     try testing.expectEqualStrings("b", l.rows[0].rule);
+}
+
+test "[failure] - [report]: the bottleneck report, a comparison and the page name the records they leave out" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try chainLaunch(&s, a, "good", 1);
+    for ([_][]const u8{ "bad", "bad/attempts", "bad/attempts/r", "bad/attempts/r/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("bad/events.jsonl", "{\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"max_threads\":1,\"max_memory_mib\":64}\n");
+    _ = try s.file("bad/attempts/r/001/record.json", "{\"rule\":");
+    const good = try std.fs.path.join(a, &.{ s.path, "good" });
+    const bad = try std.fs.path.join(a, &.{ s.path, "bad" });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    var unread: std.ArrayList([]const u8) = .empty;
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, bad, &unread);
+    try testing.expectEqual(@as(usize, 1), unread.items.len);
+    try testing.expect(std.mem.endsWith(u8, unread.items[0], "/bad/attempts/r/001/record.json"));
+
+    unread = .empty;
+    try workz.report.writeCompare(testing.allocator, a, &out.writer, good, bad, &unread);
+    try testing.expectEqual(@as(usize, 1), unread.items.len);
+
+    unread = .empty;
+    try workz.html.write(testing.allocator, a, &out.writer, bad, &unread);
+    try testing.expectEqual(@as(usize, 1), unread.items.len);
+}
+
+test "[edge] - [report]: a summary over a mebibyte, as of a large interrupted launch, is read" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    _ = try s.dir("big");
+    _ = try s.file("big/events.jsonl", "{\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"max_threads\":1,\"max_memory_mib\":64}\n");
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    try text.writer.writeAll("{\"v\":1,\"status\":\"interrupted\",\"elapsed_s\":9.5,\"selected\":12000,\"failures\":[");
+    for (0..12000) |k| try text.writer.print("{s}{{\"rule\":\"S{d:0>5}__align\",\"status\":\"cancelled\",\"reason\":\"cancelled: the launch was interrupted\",\"stderr\":null,\"diagnostics\":[]}}", .{ if (k == 0) "" else ",", k });
+    try text.writer.writeAll("]}\n");
+    try testing.expect(text.written().len > 1 << 20);
+    _ = try s.file("big/summary.json", text.written());
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "big" }));
+    defer l.deinit();
+
+    try testing.expect(l.finished);
+    try testing.expectEqualStrings("interrupted", l.status);
+    try testing.expectEqual(@as(usize, 0), l.unreadable.items.len);
+}
+
+test "[failure] - [report]: an attempt's status from its record is escaped on the page" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/r", "launch/attempts/r/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl", "{\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"max_threads\":1,\"max_memory_mib\":64}\n");
+    _ = try s.file("launch/attempts/r/001/record.json",
+        \\{"rule":"r","attempt":1,"status":"<x-odd>","reason":"","wall_s":1.0,"cpu_s":0.0,"started":"2026-01-01T00:00:01.000Z","request":{"threads":1,"memory_mib":64}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    try workz.html.write(testing.allocator, arena.allocator(), &out.writer, try std.fs.path.join(arena.allocator(), &.{ s.path, "launch" }), null);
+
+    try testing.expect(std.mem.indexOf(u8, out.written(), "<x-odd") == null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "&lt;x-odd&gt;") != null);
 }

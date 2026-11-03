@@ -220,7 +220,7 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     while (i > 0 and shown < n) : (shown += 1) {
         i -= 1;
         const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
-        const text = sys.readFile(gpa, path, 1 << 20) catch {
+        const text = sys.readFile(gpa, path, records.launch_record_max) catch {
             // No summary: the newest launch while a run holds the lock runs;
             // any other ended without recording its end, as a killed engine.
             try w.print("{s:<31} {s}\n", .{ names[i], if (live and i == names.len - 1) "running" else "unfinished" });
@@ -259,7 +259,7 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
 /// failures, where its records are, and what to run next.
 pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, color: bool) !void {
     const s: term.Style = .{ .on = color };
-    const text = try sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), 1 << 20);
+    const text = try sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), records.launch_record_max);
     defer gpa.free(text);
     const v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always });
     const outcome = str(v, "status") orelse "?";
@@ -435,7 +435,7 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), 1 << 20) catch |err| switch (err) {
+    const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), records.launch_record_max) catch |err| switch (err) {
         error.FileNotFound => {
             // The view says itself when the launch did not finish.
             if (human) return try watch(gpa, io, dir, true, 1000, color);

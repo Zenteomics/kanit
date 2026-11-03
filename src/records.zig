@@ -27,6 +27,11 @@ pub const event_version = 1;
 /// newer one; one without `v` is from before the field and reads as 1.
 pub const record_version = 1;
 
+/// The largest launch record a reader takes. `summary.json` lists every
+/// rule that failed, was blocked or was cancelled, about 150 bytes each, so
+/// an interrupted launch of a million rules still fits.
+pub const launch_record_max: usize = 256 << 20;
+
 pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ root, ".workz" });
 }

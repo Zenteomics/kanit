@@ -73,7 +73,7 @@ shared = ["genome"]
 ## Conventions
 
 - **Unknown keys are errors**, in every table. The message names the line and, when one is close, the key you probably meant.
-- **Names** of rules and shared inputs have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
+- **Names** of rules, shared inputs and resource groups have 1 to 161 characters: letters, digits, `_`, `.` and `-`, starting with a letter or digit.
 - **Paths** name files or directories explicitly. They cannot be empty, contain control characters, `*`, `?`, `[`, `]`, `{` or `}`, contain `://`, or start with `gh:`. Relative paths resolve against the working directory.
 - **Sizes** are strings: digits with an optional suffix `K`, `M`, `G` or `T`, in either case, in powers of 1024, without a sign or `_`. A plain number is MiB, so `"512"` and `"512M"` are equal. A `K` size rounds up to whole MiB, so `"1536K"` is 2 MiB. A size below 1 MiB, such as `"512K"`, or above `"1024T"` is refused.
 - **Durations** are strings: digits for seconds, or digits with the units `s`, `m`, `h` and `d`, such as `"90s"`, `"30m"`, `"2h"` or `"1h30m"`. They must be above 0.

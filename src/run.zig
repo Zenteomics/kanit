@@ -2583,7 +2583,7 @@ fn writePage(gpa: Allocator, path: []const u8, launch_dir: []const u8) !void {
     defer arena.deinit();
     var out: std.Io.Writer.Allocating = .init(gpa);
     defer out.deinit();
-    try html.write(gpa, arena.allocator(), &out.writer, launch_dir);
+    try html.write(gpa, arena.allocator(), &out.writer, launch_dir, null);
     try sys.writeFileReplace(gpa, path, out.written());
 }
 

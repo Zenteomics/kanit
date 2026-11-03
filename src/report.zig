@@ -215,12 +215,14 @@ fn budget(w: *std.Io.Writer, l: *const model.Launch) !void {
 /// engines and workflows, the launches' elapsed time, attempts and reserved
 /// thread-seconds, then each step's latest runs, this launch's or reused:
 /// median wall time, largest peak and total CPU time. One run of each is
-/// all there is, so a change inside the runs' own spread is marked.
-pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8) !void {
+/// all there is, so a change inside the runs' own spread is marked. Records
+/// of either launch that do not parse are left out and added to `unread`.
+pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
     var was = try model.load(gpa, a, was_dir);
     defer was.deinit();
     var now = try model.load(gpa, a, now_dir);
     defer now.deinit();
+    if (unread) |u| for ([_]*const model.Launch{ &was, &now }) |l| try u.appendSlice(a, l.unreadable.items);
     try w.print("baseline {s}\nlaunch   {s}\n", .{ was_dir, now_dir });
     try w.writeAll("budget   ");
     try budget(w, &was);
@@ -285,9 +287,11 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
 /// Prints what limited the launch (its critical path, waiting by reason,
 /// resource groups, budget use), then each step's requests against its
 /// runs, the time per category, tool and sample, and the shared inputs.
-pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8) !void {
+/// Records that do not parse are left out and added to `unread`.
+pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
     var l = try model.load(gpa, a, launch_dir);
     defer l.deinit();
+    if (unread) |u| try u.appendSlice(a, l.unreadable.items);
 
     try w.print("launch {s}: ", .{l.id});
     try units.duration(w, l.elapsed_s);

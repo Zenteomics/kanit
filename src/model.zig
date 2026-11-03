@@ -750,7 +750,7 @@ fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]c
 /// A JSON record file, or null when there is none. One that exists but does
 /// not parse reads as absent, and its path is added to `unreadable`, in `a`.
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
-    const bytes = sys.readFile(gpa, path, 1 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
+    const bytes = sys.readFile(gpa, path, records.launch_record_max) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
     const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
@@ -839,7 +839,7 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     // The workflow snapshot gives every rule its labels and the graph.
     var problem: workflow.Problem = .{};
     if (l.workdir.len > 0) {
-        if (workflow.load(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
+        if (workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
             l.wf = wf;
             // The launch ran with its `--threads` overrides.
             for (l.thread_overrides) |o| if (std.mem.indexOfScalar(u8, o, '=')) |eq| {

@@ -1703,11 +1703,11 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         try report.writeSuggestions(w, &l, if (kind == .json) .json else if (table) .table else .tsv);
     } else if (compare) |other| {
         const base = (try resolveLaunch(c, rec, other)) orelse return failed("no launch found for {s}", .{other});
-        try report.writeCompare(c.gpa, c.a, w, base, dir);
+        try report.writeCompare(c.gpa, c.a, w, base, dir, &unread);
     } else if (bottlenecks) {
-        try report.writeBottlenecks(c.gpa, c.a, w, dir);
+        try report.writeBottlenecks(c.gpa, c.a, w, dir, &unread);
     } else switch (kind) {
-        .html => try workz.html.write(c.gpa, c.a, w, dir),
+        .html => try workz.html.write(c.gpa, c.a, w, dir, &unread),
         .json, .tsv => {
             const rows = try workz.model.attempts(c.gpa, c.a, dir, &unread);
             if (kind == .json) try report.writeJson(c.a, w, rows) else try report.writeTsv(w, rows);
@@ -2055,7 +2055,7 @@ fn hold(paths: []const [:0]const u8) Exit {
 fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
     const id = std.fs.path.basename(dir);
     var why: []const u8 = if (workz.records.launchActive(c.gpa, dir)) "none has ended yet" else "it ran no rule";
-    if (sys.readFile(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }), 1 << 20)) |text| {
+    if (sys.readFile(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }), workz.records.launch_record_max)) |text| {
         defer c.gpa.free(text);
         if (std.json.parseFromSliceLeaky(std.json.Value, c.a, text, .{ .allocate = .alloc_always })) |v| {
             if (workz.fields.str(v, "error")) |e| why = try std.fmt.allocPrint(c.a, "it was {s}: {s}", .{ workz.fields.str(v, "status") orelse "stopped", e });
