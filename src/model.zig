@@ -197,11 +197,47 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable
 
 /// The attempt in record file `path`, or null when there is none yet or it
 /// cannot be read. The path of a record that exists but does not parse is
-/// added to `unreadable`, in `a`.
+/// added to `unreadable`, in `a`. The parsed record lives only while its
+/// fields are taken; the attempt's strings are copied into `a`.
 fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.ArrayList([]const u8)) !?Attempt {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const attempt = (try parseRecord(scratch.allocator(), a, bytes, path, unreadable)) orelse return null;
+    return try own(a, attempt);
+}
+
+/// A copy of `x` whose strings and lists are in `a`.
+fn own(a: Allocator, x: Attempt) !Attempt {
+    var y = x;
+    y.rule = try a.dupe(u8, x.rule);
+    y.status = try a.dupe(u8, x.status);
+    y.reason = try a.dupe(u8, x.reason);
+    y.wait_reason = try a.dupe(u8, x.wait_reason);
+    const waits = try a.alloc(Wait, x.waits.len);
+    for (waits, x.waits) |*to, w| to.* = .{ .reason = try a.dupe(u8, w.reason), .seconds = w.seconds };
+    y.waits = waits;
+    const groups = try a.alloc(GroupUse, x.groups.len);
+    for (groups, x.groups) |*to, g| to.* = .{ .name = try a.dupe(u8, g.name), .count = g.count };
+    y.groups = groups;
+    const diagnostics = try a.alloc([]const u8, x.diagnostics.len);
+    for (diagnostics, x.diagnostics) |*to, d| to.* = try a.dupe(u8, d);
+    y.diagnostics = diagnostics;
+    y.step = try a.dupe(u8, x.step);
+    y.category = if (x.category) |s| try a.dupe(u8, s) else null;
+    y.tool = if (x.tool) |s| try a.dupe(u8, s) else null;
+    y.sample = if (x.sample) |s| try a.dupe(u8, s) else null;
+    y.dir = try a.dupe(u8, x.dir);
+    y.reused_from = if (x.reused_from) |s| try a.dupe(u8, s) else null;
+    return y;
+}
+
+/// The attempt in record text `bytes`, with its strings and lists in `t`;
+/// null when the text does not parse or is of a newer format, and then
+/// `path` is added to `unreadable`, in `a`.
+fn parseRecord(t: Allocator, a: Allocator, bytes: []const u8, path: []const u8, unreadable: ?*std.ArrayList([]const u8)) !?Attempt {
+    const v = std.json.parseFromSliceLeaky(Value, t, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return err;
         if (unreadable) |list| try list.append(a, path);
         return null;
@@ -220,7 +256,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
     var top_s: f64 = 0;
     if (queue) |q| if (get(q, "reasons")) |rs| if (rs == .array) for (rs.array.items) |item| {
         const s = num(get(item, "seconds")) orelse 0;
-        try waits.append(a, .{ .reason = str(item, "reason"), .seconds = s });
+        try waits.append(t, .{ .reason = str(item, "reason"), .seconds = s });
         if (s > top_s) {
             top_s = s;
             top_reason = str(item, "reason");
@@ -228,7 +264,7 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
     };
     var groups: std.ArrayList(GroupUse) = .empty;
     if (req) |q| if (get(q, "groups")) |gs| if (gs == .array) for (gs.array.items) |item| {
-        try groups.append(a, .{ .name = str(item, "name"), .count = num(get(item, "count")) orelse 1 });
+        try groups.append(t, .{ .name = str(item, "name"), .count = num(get(item, "count")) orelse 1 });
     };
     const labels = labelsOf(v);
     return .{
@@ -257,13 +293,13 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
         .io_stall = stall(cg, "io_some_us", wall),
         .uses_shared = if (req) |q| if (get(q, "shared")) |sh| sh == .array and sh.array.items.len > 0 else false else false,
         .in_container = if (req) |q| if (get(q, "container")) |c| c == .string else false else false,
-        .diagnostics = try stringsOf(a, get(v, "diagnostics")),
+        .diagnostics = try stringsOf(t, get(v, "diagnostics")),
         .started_ns = tracker.parseTime(str(v, "started")) orelse 0,
         .step = labels.step,
         .category = labels.category,
         .tool = labels.tool,
         .sample = labels.sample,
-        .dir = try a.dupe(u8, std.fs.path.dirname(path).?),
+        .dir = std.fs.path.dirname(path).?,
     };
 }
 
@@ -347,9 +383,10 @@ pub const Rule = struct {
     attempts: u32 = 0,
     /// Its latest completed run: this launch's, or, for a rule reused here,
     /// the earlier run whose outputs it reused.
-    run: ?Attempt = null,
-    /// This launch's last attempt, whatever its result.
-    final: ?Attempt = null,
+    run: ?*const Attempt = null,
+    /// This launch's last attempt, whatever its result. Both point into the
+    /// launch's rows or the runs it reused.
+    final: ?*const Attempt = null,
     /// Index of its step in `Launch.steps`.
     step: usize = 0,
     /// The current attempt's times while it runs, for the live page.
@@ -761,12 +798,13 @@ fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]c
     return std.mem.replaceOwned(u8, a, p.message, "\n", "; ");
 }
 
-/// A JSON record file, or null when there is none. One that exists but does
-/// not parse reads as absent, and its path is added to `unreadable`, in `a`.
-fn readJson(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
+/// A JSON record file parsed into `t`, or null when there is none. One that
+/// exists but does not parse reads as absent, and `path` is added to
+/// `unreadable`, in `a`.
+fn readJson(gpa: Allocator, t: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
     const bytes = sys.readFile(gpa, path, records.launch_record_max) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
-    const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
+    const v = std.json.parseFromSliceLeaky(Value, t, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
         try unreadable.append(a, path);
         return null;
@@ -798,83 +836,145 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     var l: Launch = .{ .gpa = gpa, .dir = launch_dir, .id = std.fs.path.basename(launch_dir), .tracker = try tracker.Tracker.init(gpa, launch_dir) };
     errdefer l.deinit();
     _ = try l.tracker.update();
-    const tr = &l.tracker;
+    _ = try readSettings(gpa, a, &l);
+    follow(&l);
+    const end = try readEnd(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), &l.unreadable);
+    // Without a summary, a launch whose engine is gone reads as unfinished.
+    if (end == null) _ = try l.tracker.settleEnd();
+    settle(&l, end);
 
-    if (try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), &l.unreadable)) |v| {
-        l.workdir = str(v, "workdir");
-        if (l.workdir.len > 0) l.name = std.fs.path.basename(l.workdir);
-        l.engine_id = str(v, "engine");
-        l.engine = engineName(l.engine_id);
-        l.workflow_sha256 = str(v, "workflow_sha256");
-        if (get(v, "thread_overrides")) |list| if (list == .array) {
-            var given: std.ArrayList([]const u8) = .empty;
-            for (list.array.items) |item| if (item == .string) try given.append(a, item.string);
-            l.thread_overrides = given.items;
-        };
-        l.started_text = str(v, "started");
-        l.max_threads = num(get(v, "max_threads")) orelse 0;
-        l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
-        l.max_jobs = num(get(v, "jobs")) orelse 0;
-    }
+    l.rows = try attempts(gpa, a, launch_dir, &l.unreadable);
+    var reused_names: std.ArrayList([]const u8) = .empty;
+    for (l.tracker.rules.items) |r| if (r.status == .reused) try reused_names.append(a, r.name);
+    const reused = try reusedAttempts(gpa, a, launch_dir, reused_names.items, &l.unreadable);
+    l.reused_unrecorded = reused_names.items.len - reused.len;
+
+    try readSnapshot(gpa, a, &l);
+    try collect(a, &l, reused);
+    return l;
+}
+
+/// The launch's settings from `launch.json`, copied into `a`. True when the
+/// file is there, read or found unreadable.
+fn readSettings(gpa: Allocator, a: Allocator, l: *Launch) !bool {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const before = l.unreadable.items.len;
+    const v = (try readJson(gpa, scratch.allocator(), a, try std.fs.path.join(a, &.{ l.dir, "launch.json" }), &l.unreadable)) orelse
+        return l.unreadable.items.len > before;
+    l.workdir = try a.dupe(u8, str(v, "workdir"));
+    if (l.workdir.len > 0) l.name = std.fs.path.basename(l.workdir);
+    l.engine_id = try a.dupe(u8, str(v, "engine"));
+    l.engine = engineName(l.engine_id);
+    l.workflow_sha256 = try a.dupe(u8, str(v, "workflow_sha256"));
+    if (get(v, "thread_overrides")) |list| if (list == .array) {
+        var given: std.ArrayList([]const u8) = .empty;
+        for (list.array.items) |item| if (item == .string) try given.append(a, try a.dupe(u8, item.string));
+        l.thread_overrides = given.items;
+    };
+    l.started_text = try a.dupe(u8, str(v, "started"));
+    l.max_threads = num(get(v, "max_threads")) orelse 0;
+    l.max_memory_mib = num(get(v, "max_memory_mib")) orelse 0;
+    l.max_jobs = num(get(v, "jobs")) orelse 0;
+    return true;
+}
+
+/// The budget and the start as the events give them, over `launch.json`.
+fn follow(l: *Launch) void {
+    const tr = &l.tracker;
     if (tr.max_threads > 0) l.max_threads = @floatFromInt(tr.max_threads);
     if (tr.max_memory_mib > 0) l.max_memory_mib = @floatFromInt(tr.max_memory_mib);
     if (tr.max_jobs > 0) l.max_jobs = @floatFromInt(tr.max_jobs);
     l.t0_ns = if (tr.launch_ns != 0) tr.launch_ns else tr.started_ns;
-    l.selected = tr.selected;
+}
 
-    const summary = try readJson(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), &l.unreadable);
-    // Without a summary, a launch whose engine is gone reads as unfinished.
-    if (summary == null) _ = try tr.settleEnd();
-    if (summary) |s| {
+/// How a launch ended, as its `summary.json` says.
+const End = struct {
+    status: []const u8,
+    @"error": ?[]const u8,
+    elapsed_s: f64,
+    selected: ?usize,
+    engine: []const u8,
+    engine_cpu_s: ?f64 = null,
+    engine_rss_mib: ?f64 = null,
+};
+
+/// The summary at `path`, its strings copied into `a`; null when there is
+/// none or it cannot be read. The summary's list of failures is not kept.
+fn readEnd(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?End {
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    const s = (try readJson(gpa, scratch.allocator(), a, path, unreadable)) orelse return null;
+    var end: End = .{
+        .status = try a.dupe(u8, str(s, "status")),
+        .@"error" = if (optStr(get(s, "error"))) |e| try a.dupe(u8, e) else null,
+        .elapsed_s = @max(num(get(s, "elapsed_s")) orelse 0, 0),
+        .selected = if (num(get(s, "selected"))) |n| std.math.lossyCast(usize, n) else null,
+        .engine = try a.dupe(u8, engineName(str(s, "engine"))),
+    };
+    if (get(s, "engine_cost")) |c| {
+        end.engine_cpu_s = num(get(c, "cpu_s"));
+        end.engine_rss_mib = num(get(c, "max_rss_mib"));
+    }
+    return end;
+}
+
+/// Whether the launch ended, how, and how long it has run: from its
+/// summary, else from its events, else up to now.
+fn settle(l: *Launch, end: ?End) void {
+    const tr = &l.tracker;
+    l.finished = false;
+    l.status = "running";
+    l.@"error" = null;
+    l.elapsed_s = 0;
+    l.selected = tr.selected;
+    if (end) |s| {
         l.finished = true;
-        l.status = str(s, "status");
-        l.@"error" = optStr(get(s, "error"));
-        l.elapsed_s = @max(num(get(s, "elapsed_s")) orelse 0, 0);
-        if (num(get(s, "selected"))) |n| l.selected = std.math.lossyCast(usize, n);
-        if (get(s, "engine_cost")) |c| {
-            l.engine_cpu_s = num(get(c, "cpu_s"));
-            l.engine_rss_mib = num(get(c, "max_rss_mib"));
-        }
-        if (l.engine.len == 0) l.engine = engineName(str(s, "engine"));
+        l.status = s.status;
+        l.@"error" = s.@"error";
+        l.elapsed_s = s.elapsed_s;
+        if (s.selected) |n| l.selected = n;
+        l.engine_cpu_s = s.engine_cpu_s;
+        l.engine_rss_mib = s.engine_rss_mib;
+        if (l.engine.len == 0) l.engine = s.engine;
     } else if (tr.finished) {
         l.finished = true;
         l.status = tr.final_status;
         if (tr.final_error.len > 0) l.@"error" = tr.final_error;
     }
     if (l.elapsed_s == 0 and l.t0_ns != 0) {
-        const end = if (tr.finished) tr.finished_ns else if (summary == null) sys.realNs() else l.t0_ns;
-        l.elapsed_s = @max(@as(f64, @floatFromInt(end - l.t0_ns)) / 1e9, 0);
+        const to = if (tr.finished) tr.finished_ns else if (end == null) sys.realNs() else l.t0_ns;
+        l.elapsed_s = @max(@as(f64, @floatFromInt(to - l.t0_ns)) / 1e9, 0);
     }
+}
 
-    l.rows = try attempts(gpa, a, launch_dir, &l.unreadable);
-    var reused_names: std.ArrayList([]const u8) = .empty;
-    for (tr.rules.items) |r| if (r.status == .reused) try reused_names.append(a, r.name);
-    const reused = try reusedAttempts(gpa, a, launch_dir, reused_names.items, &l.unreadable);
-    l.reused_unrecorded = reused_names.items.len - reused.len;
-
-    // The workflow snapshot gives every rule its labels and the graph.
+/// The workflow snapshot, which gives every rule its labels and the graph,
+/// with the launch's `--threads` overrides.
+fn readSnapshot(gpa: Allocator, a: Allocator, l: *Launch) !void {
+    if (l.workdir.len == 0) return;
     var problem: workflow.Problem = .{};
-    if (l.workdir.len > 0) {
-        if (workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), l.workdir, &problem)) |wf| {
-            l.wf = wf;
-            // The launch ran with its `--threads` overrides.
-            for (l.thread_overrides) |o| if (std.mem.lastIndexOfScalar(u8, o, '=')) |eq| {
-                const n = std.fmt.parseInt(u32, o[eq + 1 ..], 10) catch continue;
-                _ = l.wf.?.overrideThreads(o[0..eq], n);
-            };
-            if (graph.build(gpa, &l.wf.?, &problem)) |g| {
-                l.g = g;
-            } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
+    defer if (problem.message.len > 0) gpa.free(problem.message);
+    if (workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ l.dir, "workflow" }), l.workdir, &problem)) |wf| {
+        l.wf = wf;
+        for (l.thread_overrides) |o| if (std.mem.lastIndexOfScalar(u8, o, '=')) |eq| {
+            const n = std.fmt.parseInt(u32, o[eq + 1 ..], 10) catch continue;
+            _ = l.wf.?.overrideThreads(o[0..eq], n);
+        };
+        if (graph.build(gpa, &l.wf.?, &problem)) |g| {
+            l.g = g;
         } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
-    }
-    if (problem.message.len > 0) gpa.free(problem.message);
+    } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
+}
 
-    try collectRules(a, &l, reused);
-    try collectSteps(a, &l);
-    try collectPath(a, &l);
-    try collectBounds(a, &l);
-    try collectWaits(a, &l);
-    return l;
+/// The figures computed from the records read, in `a`: the rules with
+/// their states and runs, the steps, the critical path, the bounds and the
+/// waits.
+fn collect(a: Allocator, l: *Launch, reused: []const Attempt) !void {
+    try collectRules(a, l, reused);
+    try collectSteps(a, l);
+    try collectPath(a, l);
+    try collectBounds(a, l);
+    try collectWaits(a, l);
 }
 
 /// Every rule with its state, its run and its final attempt.
@@ -882,7 +982,8 @@ fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     const tr = &l.tracker;
     var rules: std.ArrayList(Rule) = .empty;
     if (l.wf) |wf| {
-        for (wf.rules) |r| try rules.append(a, .{ .name = r.name, .labels = r.labels, .selected = tr.index.contains(r.name) });
+        try rules.ensureTotalCapacityPrecise(a, wf.rules.len);
+        for (wf.rules) |r| rules.appendAssumeCapacity(.{ .name = r.name, .labels = r.labels, .selected = tr.index.contains(r.name) });
     } else {
         // Without the snapshot, the rules are those the events and the
         // attempt records name, with the labels the records carry.
@@ -908,13 +1009,13 @@ fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
         r.started_ns = v.started_ns;
         r.reason = v.reason;
     }
-    for (l.rows) |row| {
+    for (l.rows) |*row| {
         const i = index.get(row.rule) orelse continue;
         const r = &rules.items[i];
         if (r.final == null or row.attempt > r.final.?.attempt) r.final = row;
         if (row.completed()) r.run = row;
     }
-    for (reused) |row| if (index.get(row.rule)) |i| {
+    for (reused) |*row| if (index.get(row.rule)) |i| {
         rules.items[i].run = row;
     };
     l.rules = rules.items;

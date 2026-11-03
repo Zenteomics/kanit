@@ -16,6 +16,10 @@ One change needs action:
 - **Sample-sheet defaults.** `[samples] defaults = { column = "value" }` in a pipeline template gives an empty cell of that column its default, and a column the sheet lacks the default on every row; a default may be empty. An empty cell of a column without a default is still refused. The prepared workflow holds the values, as before.
 - **Quoted placeholders.** `{name:q}` in a template's `shell` puts the value in as one shell word, quoted when it holds a space, a quote or another character the shell would read, and `{input:q}` and `{output:q}` quote each path.
 
+### Changed
+
+- **Memory.** `report`, the HTML page and the live launch page keep only the fields they use from each attempt record and from `summary.json`, and a rule refers to its attempts instead of holding copies: a launch of 3,000 attempts reads into about half the memory, and its report takes less time.
+
 ### Fixed
 
 - **`workz prepare`.**
