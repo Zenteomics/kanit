@@ -657,6 +657,7 @@ test "[unit] - [prepare]: mistakes in a template are named" {
         .{ .text = "[workflow]\nname = \"p\"\n[[rules]]\nname = \"a\"\n", .want = "write rules as [[steps]]" },
         .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\ninput = \"in.txt\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "step a: input must be a list of paths" },
         .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [1]\nshell = \"cat {output}\"\n", .want = "step a: output must be a list of paths" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nnames = []\n[[steps]]\nname = \"a\"\nfor_each = \"sample\"\noutput = [\"{sample}.txt\"]\nshell = \"true\"\n", .want = "samples.names lists no sample" },
     }, 0..) |c, k| {
         var name_buf: [16]u8 = undefined;
         const path = try s.file(try std.fmt.bufPrint(&name_buf, "t{d}.toml", .{k}), c.text);
@@ -697,6 +698,101 @@ test "[regression] - [prepare]: dotted names stay one table, and {threads} follo
     try testing.expectEqualStrings("ref.index", wf.shared[0].name);
 }
 
+test "[regression] - [prepare]: a shell variable written ${name} stays as written" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[params]
+        \\ref = "idx"
+        \\[samples]
+        \\names = ["S1"]
+        \\[[steps]]
+        \\name = "a"
+        \\for_each = "sample"
+        \\output = ["{sample}.txt"]
+        \\shell = "echo ${threads} ${sample} ${ref} $${x} {threads} {ref} > {sample}.txt"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+
+    const want = "shell = \"echo ${threads} ${sample} ${ref} $${x} ${WORKZ_THREADS} idx > S1.txt\"";
+    if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "[unit] - [prepare]: {name:q} quotes a value for the shell, path by path for input and output" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("samples.tsv", "sample\tr1\tnote\nS1\tmy reads.fq\tit's\nS2\treads/b.fq\t$(id)\n");
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[samples]
+        \\sheet = "samples.tsv"
+        \\[[steps]]
+        \\name = "a"
+        \\for_each = "sample"
+        \\input = ["{r1}", "ref.fa"]
+        \\output = ["{sample}.txt"]
+        \\shell = "tool {input:q} --note {note:q} -t {threads:q} > {output:q}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+
+    for ([_][]const u8{
+        "shell = \"tool 'my reads.fq' ref.fa --note 'it'\\\\''s' -t ${WORKZ_THREADS} > S1.txt\"",
+        "shell = \"tool reads/b.fq ref.fa --note '$(id)' -t ${WORKZ_THREADS} > S2.txt\"",
+    }) |want| if (std.mem.indexOf(u8, text, want) == null) {
+        std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+        return error.TestUnexpectedResult;
+    };
+
+    const outside = try s.file("outside.toml", "[workflow]\nname = \"p\"\n[samples]\nnames = [\"S1\"]\n[[steps]]\nname = \"a\"\nfor_each = \"sample\"\noutput = [\"{sample:q}.txt\"]\nshell = \"true\"\n");
+    try testing.expectError(error.Invalid, workz.prepare.compile(testing.allocator, arena.allocator(), outside, "outside.toml", &problem));
+    try testing.expect(std.mem.indexOf(u8, problem.message, "output names {sample:q}") != null);
+}
+
+test "[unit] - [prepare]: a shell placeholder one typo away from a known name is noted once" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[samples]
+        \\names = ["S1", "S2"]
+        \\[[steps]]
+        \\name = "a"
+        \\for_each = "sample"
+        \\output = ["{sample}.txt"]
+        \\shell = "awk '{print}' in.txt | tool --name {sampel} > {output}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+
+    try testing.expect(std.mem.indexOf(u8, text, "awk '{print}' in.txt | tool --name {sampel} > S1.txt") != null);
+    try testing.expectEqual(@as(usize, 1), problem.notes.items.len);
+    try testing.expectEqualStrings("step a: shell keeps {sampel} as written; did you mean {sample}?", problem.notes.items[0]);
+}
+
 test "[unit] - [prepare]: --check reads rule names that a comment follows" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -706,6 +802,17 @@ test "[unit] - [prepare]: --check reads rule names that a comment follows" {
     const new = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"S1__count\"\nshell = \"true\"\n";
     try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
     try testing.expectEqualStrings("change 1: S1__count\n", text.written());
+}
+
+test "[edge] - [prepare]: --check names a change of rule order alone" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var text: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer text.deinit();
+    const old = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"a\"\nshell = \"true\"\n\n[[rules]]\nname = \"b\"\nshell = \"true\"\n";
+    const new = "[workflow]\nname = \"p\"\n\n[[rules]]\nname = \"b\"\nshell = \"true\"\n\n[[rules]]\nname = \"a\"\nshell = \"true\"\n";
+    try testing.expect(try workz.prepare.writeDiff(arena.allocator(), &text.writer, old, new));
+    try testing.expectEqualStrings("change: the order of the rules\n", text.written());
 }
 
 test "[failure] - [workflow]: an input whose '..' follows a symlink is refused, and plain '..' is not" {

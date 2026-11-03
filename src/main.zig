@@ -78,13 +78,13 @@ const commands = [_]Command{
         \\entry is one rule, or with for_each = "sample" one rule per row of the
         \\sample sheet, named SAMPLE__STEP and labelled with its step and sample.
         \\{name} takes a sample-sheet column, a [params] value or the step name; in
-        \\shell, {input}, {output} and {threads} name the rule's own. Other braces stay
-        \\as written. --params FILE is a run file: its [workflow] keys and [params]
-        \\take the place of the template's, its [samples] replaces the template's
-        \\with a sheet read beside it, and the workflow goes beside it. The result is
-        \\checked as validate would before it replaces the workflow; --check prints
-        \\the rules it would add, remove and change, and exits 1 if any, without
-        \\writing.
+        \\shell, {input}, {output} and {threads} name the rule's own, and {name:q}
+        \\quotes the value for the shell. Other braces, and ${name}, stay as written.
+        \\--params FILE is a run file: its [workflow] keys and [params] take the place
+        \\of the template's, its [samples] replaces the template's with a sheet read
+        \\beside it, and the workflow goes beside it. The result is checked as validate
+        \\would before it replaces the workflow; --check prints the rules it would add,
+        \\remove and change, and exits 1 if any, without writing.
         ,
         .options = &.{
             .{ .flag = "--params FILE", .desc = "a run file: the run's workflow keys, samples and params" },
@@ -1288,6 +1288,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         error.Invalid => return fail("{s}", .{problem.message}),
         else => return err,
     };
+    for (problem.notes.items) |note| std.debug.print("workz: note: {s}\n", .{note});
     // The prepared workflow passes the same checks as any other before it
     // replaces the current one.
     // A check leaves the directory alone: its copy goes to the temporary

@@ -13,8 +13,9 @@
 #
 # {name} takes a column of the sample sheet, a [params] value or {step}; in
 # `shell`, {input} and {output} are the rule's own, and {threads} becomes
-# ${WORKZ_THREADS}, its threads when it runs. Other braces,
-# such as awk's {print $1} or ${HOME}, stay as written.
+# ${WORKZ_THREADS}, its threads when it runs. {name:q} quotes the value for
+# the shell, as for a path with a space. Other braces, such as awk's
+# {print $1}, stay as written, and ${name} is always the shell's variable.
 
 [workflow]
 name = "example"

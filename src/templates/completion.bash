@@ -17,9 +17,10 @@ _workz() {
         case ${COMP_WORDS[i]} in
             -d | --workdir) wd=${COMP_WORDS[i+1]}; ((i++)) ;;
             -t | --target | --rerun-rule | --pass-env | -j | --jobs | --max-threads | --max-memory | -r | --retry | \
-                --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | \
+                --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | --params | \
                 --compare | --keep | --interval | --threads | --layer | --by | --focus | --why | --users) ((i++)) ;;
-            *.toml) wf=${COMP_WORDS[i]} ;;
+            # As typed: a backslash or quotes may hold a space in the name.
+            *.toml | *.toml\" | *.toml\') wf=${COMP_WORDS[i]//\\/}; wf=${wf#[\"\']}; wf=${wf%[\"\']} ;;
             -*) ;;
             *) words+=("${COMP_WORDS[i]}") ;;
         esac
@@ -29,15 +30,15 @@ _workz() {
     fi
     case $prev in
         -t | --target | --rerun-rule | --focus)
-            COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
+            COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
             return ;;
         --pass-env) COMPREPLY=($(compgen -e -- "$cur")); return ;;
         # Numbers, sizes, durations and names: nothing to offer, and never files.
         -j | --jobs | --max-threads | --max-memory | -r | --retry | --timeout | --grace | --slice | --attempt | \
             --keep | --interval | --threads | --why | --users)
             COMPREPLY=(); return ;;
-        -d | --workdir) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -d -- "$cur")); return ;;
-        --input-manifest | -o | --output) compopt -o filenames 2> /dev/null; COMPREPLY=($(compgen -f -- "$cur")); return ;;
+        -d | --workdir) compopt -o filenames 2> /dev/null; mapfile -t COMPREPLY < <(compgen -d -- "$cur"); return ;;
+        --input-manifest | -o | --output | --params) compopt -o filenames 2> /dev/null; mapfile -t COMPREPLY < <(compgen -f -- "$cur"); return ;;
         --format)
             if [ "$cmd" = graph ]; then COMPREPLY=($(compgen -W "text dot json" -- "$cur"))
             else COMPREPLY=($(compgen -W "tsv json html" -- "$cur")); fi
@@ -47,7 +48,7 @@ _workz() {
         --launch) COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur")); return ;;
         --compare)
             compopt -o filenames 2> /dev/null
-            COMPREPLY=($(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur") $(compgen -d -- "$cur"))
+            mapfile -t COMPREPLY < <(compgen -W "$(ls "$wd/.workz/launches" 2> /dev/null)" -- "$cur"; compgen -d -- "$cur")
             return ;;
     esac
     local opts="-h --help -d --workdir"
@@ -57,7 +58,7 @@ _workz() {
         explain) opts="$opts -t --target --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
         validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
-        prepare) opts="-h --help -o --output --check" ;;
+        prepare) opts="-h --help -o --output --params --check" ;;
         schema | version) opts="-h --help" ;;
         verify) opts="$opts -t --target --content" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
@@ -75,22 +76,22 @@ _workz() {
     elif [ "$cmd" = control ] && [ ${#words[@]} = 0 ]; then
         COMPREPLY=($(compgen -W "stop retry cancel" -- "$cur"))
     elif [ "$cmd" = control ] && [ ${#words[@]} = 1 ] && [ "${words[0]}" != cancel ]; then
-        COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
     elif [ "$cmd" = control ]; then
         COMPREPLY=()
     elif { [ "$cmd" = explain ] || [ "$cmd" = logs ]; } && [ ${#words[@]} = 0 ]; then
         # The rule, of the workflow named or of workflow.toml; a workflow
         # file may come first.
-        COMPREPLY=($(compgen -W "$(workz __rules $wf 2> /dev/null)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
         if [ -z "$wf" ]; then
             compopt -o filenames 2> /dev/null
-            COMPREPLY+=($(compgen -f -X '!*.toml' -- "$cur"))
+            mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -f -X "!*.toml" -- "$cur")
         fi
     elif [ "$cmd" = explain ] || [ "$cmd" = logs ]; then
         COMPREPLY=()
     else
         compopt -o filenames 2> /dev/null
-        COMPREPLY=($(compgen -f -- "$cur"))
+        mapfile -t COMPREPLY < <(compgen -f -- "$cur")
     fi
 }
 complete -F _workz workz

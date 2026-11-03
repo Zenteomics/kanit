@@ -1346,6 +1346,11 @@ sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash);
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
 ids=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --launch ""); COMP_CWORD=3; _workz; echo "${COMPREPLY[*]}"')
 check "bash completion offers launch IDs" '[ "$ids" = "$(basename "$(last_launch)")" ]'
+"$workz" init "my flow.toml" > /dev/null && touch "zz b.txt"
+spaced=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run "my\ flow.toml" -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
+files=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run zz); COMP_CWORD=2; _workz; echo "${#COMPREPLY[@]}:${COMPREPLY[0]}"')
+params=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz prepare --pa); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+check "bash completion keeps names with a space whole and offers prepare --params" '[ "$spaced" = "S1__count report" ] && [ "$files" = "1:zz b.txt" ] && [ "$params" = "--params" ]'
 "$workz" validate > default.txt
 rc1=$?
 "$workz" validate workflow.toml extra 2> extra.txt

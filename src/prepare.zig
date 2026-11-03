@@ -3,9 +3,10 @@
 //! `for_each = "sample"` becomes one rule per row of the sample sheet, and
 //! `{name}` placeholders take the row's columns, the template's `[params]`
 //! and the step's name. Only known names are replaced, so the braces of
-//! awk programs and shell variables stay as written. The result is a plain
-//! workflow file with `step` and `sample` labels on every rule, checked by
-//! the same parser as any other; the engine itself expands nothing.
+//! awk programs stay as written, and `${name}` is always the shell's
+//! variable. The result is a plain workflow file with `step` and `sample`
+//! labels on every rule, checked by the same parser as any other; the engine
+//! itself expands nothing.
 const std = @import("std");
 const toml = @import("toml");
 const sys = @import("sys.zig");
@@ -32,6 +33,9 @@ pub const Sheet = struct {
 /// Why a template cannot be compiled, as one line; set with the error.
 pub const Problem = struct {
     message: []const u8 = "",
+    /// What compiled but is likely a mistake, one line each; held in the
+    /// compile's arena.
+    notes: std.ArrayList([]const u8) = .empty,
 };
 
 pub const Error = error{ Invalid, OutOfMemory, WriteFailed };
@@ -166,20 +170,53 @@ const Scope = struct {
     /// The value of `{step}`, in a step only.
     step: ?[]const u8 = null,
     /// Set for `shell`: its rule's inputs, outputs and threads.
-    input: ?[]const u8 = null,
-    output: ?[]const u8 = null,
+    input: ?[]const []const u8 = null,
+    output: ?[]const []const u8 = null,
     threads: ?[]const u8 = null,
 
-    fn get(self: Scope, name: []const u8) ?[]const u8 {
+    /// The value of `{name}`; `{input}` and `{output}` join the paths with spaces.
+    fn get(self: Scope, a: Allocator, name: []const u8) Error!?[]const u8 {
         if (self.row) |row| if (self.sheet.?.column(name)) |c| return row[c];
         if (self.params.get(name)) |v| return v;
         if (eql(u8, name, "step")) return self.step;
-        if (eql(u8, name, "input")) return self.input;
-        if (eql(u8, name, "output")) return self.output;
+        if (eql(u8, name, "input")) return if (self.input) |p| try std.mem.join(a, " ", p) else null;
+        if (eql(u8, name, "output")) return if (self.output) |p| try std.mem.join(a, " ", p) else null;
         if (eql(u8, name, "threads")) return self.threads;
         return null;
     }
+
+    /// The value of `{name:q}`: quoted as one shell word, or for `{input:q}`
+    /// and `{output:q}` each path as one. `{threads:q}` is the variable
+    /// unquoted, since it must expand and is always a number.
+    fn quoted(self: Scope, a: Allocator, name: []const u8) Error!?[]const u8 {
+        if (eql(u8, name, "threads")) return self.threads;
+        const listed: ?[]const []const u8 = if (eql(u8, name, "input")) self.input else if (eql(u8, name, "output")) self.output else null;
+        if (listed) |list| {
+            var out: std.ArrayList(u8) = .empty;
+            for (list, 0..) |p, k| {
+                if (k > 0) try out.append(a, ' ');
+                try shellWord(a, &out, p);
+            }
+            return out.items;
+        }
+        const v = (try self.get(a, name)) orelse return null;
+        var out: std.ArrayList(u8) = .empty;
+        try shellWord(a, &out, v);
+        return out.items;
+    }
 };
+
+/// Appends `v` as one shell word: as written when every byte is one the
+/// shell takes literally, else in single quotes, each `'` written `'\''`.
+fn shellWord(a: Allocator, out: *std.ArrayList(u8), v: []const u8) Error!void {
+    const plain = v.len > 0 and for (v) |c| {
+        if (!(std.ascii.isAlphanumeric(c) or std.mem.indexOfScalar(u8, "_-./:=@%+,", c) != null)) break false;
+    } else true;
+    if (plain) return out.appendSlice(a, v);
+    try out.append(a, '\'');
+    for (v) |c| if (c == '\'') try out.appendSlice(a, "'\\''") else try out.append(a, c);
+    try out.append(a, '\'');
+}
 
 fn isIdent(s: []const u8) bool {
     if (s.len == 0 or !(std.ascii.isAlphabetic(s[0]) or s[0] == '_')) return false;
@@ -200,17 +237,24 @@ fn namesColumn(sheet: ?Sheet, s: []const u8) ?[]const u8 {
     return null;
 }
 
-/// Replaces each `{name}` that `scope` knows. In `shell` an unknown one
-/// or a service's `command` stays as written; anywhere else it is an
-/// error, since paths and labels never need braces.
+/// Replaces each `{name}` that `scope` knows, and in `shell` and a service's
+/// `command` each `{name:q}` with the value quoted for the shell. There an
+/// unknown name stays as written; anywhere else it is an error, since paths
+/// and labels never need braces. `${name}` is the shell's own variable and
+/// always stays as written.
 fn subst(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, s: []const u8) Error![]const u8 {
+    const command = eql(u8, key, "shell") or eql(u8, key, "command");
     var out: std.ArrayList(u8) = .empty;
     var i: usize = 0;
     while (i < s.len) {
-        if (s[i] == '{') if (std.mem.indexOfScalarPos(u8, s, i + 1, '}')) |close| {
-            const name = s[i + 1 .. close];
+        if (s[i] == '{' and (i == 0 or s[i - 1] != '$')) if (std.mem.indexOfScalarPos(u8, s, i + 1, '}')) |close| {
+            const written = s[i + 1 .. close];
+            const quote = std.mem.endsWith(u8, written, ":q");
+            const name = if (quote) written[0 .. written.len - 2] else written;
             if (isIdent(name)) {
-                if (scope.get(name)) |v| {
+                if (quote and !command)
+                    return fail(a, problem, "{s}: {s} names {{{s}}}; :q quotes a value for the shell, in shell and a service's command only", .{ scope.place, key, written });
+                if (try (if (quote) scope.quoted(a, name) else scope.get(a, name))) |v| {
                     try out.appendSlice(a, v);
                     i = close + 1;
                     continue;
@@ -218,16 +262,38 @@ fn subst(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, s: []co
                 // A sheet column outside a per-sample rule is a mistake even in
                 // a command.
                 if (scope.sheet) |sh| if (sh.column(name) != null)
-                    return fail(a, problem, "{s}: {s} names {{{s}}}, a column of the sample sheet, but the step has no for_each = \"sample\"", .{ scope.place, key, name });
-                if (!eql(u8, key, "shell") and !eql(u8, key, "command")) {
+                    return fail(a, problem, "{s}: {s} names {{{s}}}, a column of the sample sheet, but the step has no for_each = \"sample\"", .{ scope.place, key, written });
+                if (!command) {
                     return fail(a, problem, "{s}: {s} names {{{s}}}, which is no sample-sheet column, param or placeholder", .{ scope.place, key, name });
                 }
+                try noteTypo(a, problem, scope, key, written, name);
             }
         };
         try out.append(a, s[i]);
         i += 1;
     }
     return out.items;
+}
+
+/// Notes an unknown `{name}` kept in a command when a known name is a typo
+/// away: at most a third of its letters differ, so awk's `{print}` passes.
+/// A step's rules repeat the note; it is kept once.
+fn noteTypo(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, written: []const u8, name: []const u8) Error!void {
+    var best: ?[]const u8 = null;
+    var best_d: usize = @max(name.len / 3, 1) + 1;
+    const fixed = [_][]const u8{ "step", "input", "output", "threads" };
+    const columns: []const []const u8 = if (scope.sheet) |sh| sh.columns else &.{};
+    for ([_][]const []const u8{ columns, scope.params.keys(), &fixed }) |list| for (list) |cand| {
+        const d = workflow.editDistance(cand, name);
+        if (d < best_d) {
+            best_d = d;
+            best = cand;
+        }
+    };
+    const hint = best orelse return;
+    const note = try std.fmt.allocPrint(a, "{s}: {s} keeps {{{s}}} as written; did you mean {{{s}}}?", .{ scope.place, key, written, hint });
+    for (problem.notes.items) |n| if (eql(u8, n, note)) return;
+    try problem.notes.append(a, note);
 }
 
 // ---- TOML output ----
@@ -336,18 +402,17 @@ fn ruleValue(a: Allocator, problem: *Problem, scope: Scope, key: []const u8, v: 
     }
 }
 
-/// A step's `input` or `output` list as the shell's `{input}` or
-/// `{output}`: its paths joined by spaces.
-fn joined(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v: ?toml.Value) Error![]const u8 {
-    const list = v orelse return "";
+/// A step's `input` or `output` list, the paths of the shell's `{input}` or
+/// `{output}`.
+fn paths(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v: ?toml.Value) Error![]const []const u8 {
+    const list = v orelse return &.{};
     if (list != .array) return fail(a, problem, "step {s}: {s} must be a list of paths", .{ step, key });
-    var out: std.ArrayList(u8) = .empty;
-    for (list.array.items, 0..) |item, k| {
+    const out = try a.alloc([]const u8, list.array.items.len);
+    for (list.array.items, out) |item, *p| {
         if (item != .string) return fail(a, problem, "step {s}: {s} must be a list of paths", .{ step, key });
-        if (k > 0) try out.append(a, ' ');
-        try out.appendSlice(a, item.string);
+        p.* = item.string;
     }
-    return out.items;
+    return out;
 }
 
 /// Writes the rule of step `name` for one sample (`row`), or the step's
@@ -363,8 +428,8 @@ fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const to
     // `shell` last: {input}, {output} and {threads} name the rule's own.
     if (step.get("shell")) |sh| {
         var s = scope;
-        s.input = try joined(a, problem, name, "input", values.get("input"));
-        s.output = try joined(a, problem, name, "output", values.get("output"));
+        s.input = try paths(a, problem, name, "input", values.get("input"));
+        s.output = try paths(a, problem, name, "output", values.get("output"));
         // The variable, not a number: a `--threads` override reaches the
         // command as it reaches the rule's request.
         s.threads = "${WORKZ_THREADS}";
@@ -425,6 +490,7 @@ fn readSamples(gpa: Allocator, a: Allocator, value: ?toml.Value, path: []const u
             row[0] = item.string;
             try rows.append(a, row);
         }
+        if (rows.items.len == 0) return fail(a, problem, "{s}: samples.names lists no sample", .{shown});
         const cols = try a.alloc([]const u8, 1);
         cols[0] = "sample";
         sheet = try withDefaults(a, .{ .columns = cols, .rows = rows.items, .source = "samples.names" }, defaults);
@@ -623,6 +689,14 @@ pub fn writeDiff(a: Allocator, w: *std.Io.Writer, old: []const u8, new: []const 
     }
     const head_old = old[0 .. std.mem.indexOf(u8, old, "\n[[rules]]\n") orelse old.len];
     const head_new = new[0 .. std.mem.indexOf(u8, new, "\n[[rules]]\n") orelse new.len];
-    if (!eql(u8, head_old, head_new)) try w.writeAll("change: the workflow, defaults, groups or shared inputs\n");
+    if (!eql(u8, head_old, head_new)) {
+        try w.writeAll("change: the workflow, defaults, groups or shared inputs\n");
+    } else if (added.items.len + removed.items.len + changed.items.len == 0) {
+        // The same rules, the same text: what differs lies between them.
+        const reordered = for (was.keys(), now.keys()) |x, y| {
+            if (!eql(u8, x, y)) break true;
+        } else false;
+        try w.writeAll(if (reordered) "change: the order of the rules\n" else "change: blank lines or comments between the rules\n");
+    }
     return true;
 }
