@@ -1,4 +1,5 @@
-//! A launch as its records describe it, read once for every report.
+//! A launch as its records describe it, read once for every report
+//! (`load`), or kept current while the launch runs (`Live`).
 //!
 //! The event stream gives the state of every selected rule, the run samples
 //! and the shared inputs (`tracker.Tracker`); the attempt records give what
@@ -975,6 +976,200 @@ fn collect(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     try collectPath(a, l);
     try collectBounds(a, l);
     try collectWaits(a, l);
+}
+
+/// Clears the figures `collect` fills, before it fills them again.
+fn clearFigures(l: *Launch) void {
+    l.counts = .{};
+    l.rules = &.{};
+    l.rule_index = .empty;
+    l.steps = &.{};
+    l.samples = &.{};
+    l.by_category = false;
+    l.path = &.{};
+    l.path_ran_s = 0;
+    l.path_waited_s = 0;
+    l.path_held_s = 0;
+    l.path_between_s = 0;
+    l.path_checks_s = 0;
+    l.path_after_s = 0;
+    l.bounds = &.{};
+    l.binding = null;
+    l.waits = .empty;
+    l.waits_recorded = false;
+    l.groups = &.{};
+}
+
+/// A launch's model kept current while the launch runs, for a view that
+/// draws it again and again. `open` reads what `load` reads. Each `refresh`
+/// applies the events appended since the last one, reads the record of each
+/// attempt that ended since, and computes the figures again from what it
+/// holds: it costs what changed, not the whole launch. Records the events do
+/// not name, as an older engine left them, are found by listing the attempt
+/// directories once at the start and once after the launch ends.
+pub const Live = struct {
+    gpa: Allocator,
+    /// What is read once: the settings, the attempt records and the earlier
+    /// runs the launch reused.
+    keep: std.heap.ArenaAllocator,
+    /// The figures of `launch`, computed again by every refresh.
+    view: std.heap.ArenaAllocator,
+    /// The model as of the last refresh. Its figures stay valid until the
+    /// next refresh, its records until `deinit`.
+    launch: Launch,
+    summary_path: []const u8,
+    rows: std.ArrayList(Attempt) = .empty,
+    /// Attempt directories whose record was read or found unreadable.
+    seen: std.StringHashMapUnmanaged(void) = .empty,
+    /// For each rule the events name, the first attempt whose record may
+    /// not have been read.
+    next: std.ArrayList(u32) = .empty,
+    /// Reused rules whose earlier run was looked for, and the runs found.
+    asked: std.StringHashMapUnmanaged(void) = .empty,
+    reused: std.ArrayList(Attempt) = .empty,
+    settings_read: bool = false,
+    end: ?End = null,
+    /// `summary.json` is there but cannot be read.
+    end_unreadable: bool = false,
+    refreshes: usize = 0,
+    /// The attempt directories were listed after the launch ended.
+    swept: bool = false,
+
+    pub fn open(gpa: Allocator, launch_dir: []const u8) !Live {
+        var self: Live = .{ .gpa = gpa, .keep = .init(gpa), .view = .init(gpa), .launch = undefined, .summary_path = "" };
+        errdefer self.keep.deinit();
+        errdefer self.view.deinit();
+        const keep = self.keep.allocator();
+        const dir = try keep.dupe(u8, launch_dir);
+        self.summary_path = try std.fs.path.join(keep, &.{ dir, "summary.json" });
+        self.launch = .{ .gpa = gpa, .dir = dir, .id = std.fs.path.basename(dir), .tracker = try tracker.Tracker.init(gpa, dir) };
+        errdefer self.launch.deinit();
+        _ = try self.refresh();
+        return self;
+    }
+
+    pub fn deinit(self: *Live) void {
+        self.launch.deinit();
+        self.view.deinit();
+        self.keep.deinit();
+    }
+
+    /// Brings the model up to date with what was recorded since the last
+    /// refresh; true when anything new was read.
+    pub fn refresh(self: *Live) !bool {
+        const gpa = self.gpa;
+        const keep = self.keep.allocator();
+        const l = &self.launch;
+        const tr = &l.tracker;
+        var changed = try tr.update();
+        // The settings are written as the launch opens; a launch followed
+        // from its first moment may not have them yet.
+        if (!self.settings_read) {
+            self.settings_read = try readSettings(gpa, keep, l);
+            if (self.settings_read) {
+                try readSnapshot(gpa, keep, l);
+                changed = true;
+            }
+        }
+        follow(l);
+        if (self.end == null and !self.end_unreadable) {
+            const before = l.unreadable.items.len;
+            self.end = try readEnd(gpa, keep, self.summary_path, &l.unreadable);
+            self.end_unreadable = l.unreadable.items.len > before;
+            if (self.end != null or self.end_unreadable) changed = true;
+        }
+        if (self.end == null and !tr.finished and try tr.settleEnd()) changed = true;
+        settle(l, self.end);
+
+        if (self.refreshes == 0 or (l.finished and !self.swept)) {
+            if (try self.sweep()) changed = true;
+            self.swept = l.finished;
+        }
+        // The record of each attempt that ended, read once: a record is
+        // written before the event that ends its attempt.
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        for (tr.rules.items, 0..) |r, i| {
+            if (i == self.next.items.len) try self.next.append(keep, 1);
+            const last = if (r.status.active()) r.attempt -| 1 else r.attempt;
+            var n = self.next.items[i];
+            var gap = false;
+            while (n <= last) : (n += 1) {
+                const dir = std.fmt.bufPrint(&buf, "{s}/attempts/{s}/{d:0>3}", .{ l.dir, r.name, n }) catch break;
+                switch (try self.readOnce(dir)) {
+                    .read => changed = true,
+                    .known => {},
+                    // Not written yet, or never: looked for again next time.
+                    .missing => gap = true,
+                }
+                if (!gap) self.next.items[i] = n + 1;
+            }
+        }
+        // The earlier run of each rule found reused since.
+        var names: std.ArrayList([]const u8) = .empty;
+        for (tr.rules.items) |r| if (r.status == .reused and !self.asked.contains(r.name)) {
+            try self.asked.put(keep, r.name, {});
+            try names.append(keep, r.name);
+        };
+        if (names.items.len > 0) {
+            try self.reused.appendSlice(keep, try reusedAttempts(gpa, keep, l.dir, names.items, &l.unreadable));
+            changed = true;
+        }
+        l.reused_unrecorded = self.asked.count() - self.reused.items.len;
+
+        if (changed) std.mem.sort(Attempt, self.rows.items, {}, rowOrder);
+        l.rows = self.rows.items;
+        // A running launch's figures move with the clock.
+        if (changed or !l.finished or self.refreshes == 0) {
+            _ = self.view.reset(.retain_capacity);
+            clearFigures(l);
+            try collect(self.view.allocator(), l, self.reused.items);
+        }
+        self.refreshes += 1;
+        return changed;
+    }
+
+    /// Reads every record in the attempt directories that was not read yet;
+    /// true when one was.
+    fn sweep(self: *Live) !bool {
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const t = scratch.allocator();
+        const dir = try std.fs.path.join(t, &.{ self.launch.dir, "attempts" });
+        var found = false;
+        for ((try sys.dirNames(self.gpa, t, dir)) orelse &.{}) |rule| {
+            const rule_dir = try std.fs.path.join(t, &.{ dir, rule });
+            for ((try records.attemptNames(self.gpa, t, rule_dir)) orelse &.{}) |n| {
+                if (try self.readOnce(try std.fs.path.join(t, &.{ rule_dir, n })) == .read) found = true;
+            }
+        }
+        return found;
+    }
+
+    /// Reads the record in attempt directory `dir` unless it was read.
+    fn readOnce(self: *Live, dir: []const u8) !enum { read, known, missing } {
+        if (self.seen.contains(dir)) return .known;
+        const keep = self.keep.allocator();
+        const l = &self.launch;
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const path = std.fmt.bufPrint(&buf, "{s}/record.json", .{dir}) catch return .missing;
+        const before = l.unreadable.items.len;
+        const row = try readRecord(self.gpa, keep, path, &l.unreadable);
+        const unreadable = l.unreadable.items.len > before;
+        if (unreadable) l.unreadable.items[before] = try keep.dupe(u8, path);
+        if (row == null and !unreadable) return .missing;
+        try self.seen.put(keep, try keep.dupe(u8, dir), {});
+        if (row) |r| try self.rows.append(keep, r);
+        return .read;
+    }
+};
+
+/// The order `attempts` gives: by rule name, then by attempt.
+fn rowOrder(_: void, x: Attempt, y: Attempt) bool {
+    return switch (std.mem.order(u8, x.rule, y.rule)) {
+        .lt => true,
+        .gt => false,
+        .eq => x.attempt < y.attempt,
+    };
 }
 
 /// Every rule with its state, its run and its final attempt.

@@ -772,3 +772,108 @@ test "[unit] - [report]: a process figure no larger than the engine's memory is 
     try workz.report.writeSuggestions(&out.writer, &l, .tsv);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\tengine_bound\t") != null);
 }
+
+test "[unit] - [report]: a live model reads each record once and ends as a fresh load of the launch" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try chainLaunch(&s, a, "done", 1);
+    // The same launch as it runs: no summary, records as attempts end.
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/L1", ".workz/launches/L1/attempts", ".workz/launches/L1/attempts/p1", ".workz/launches/L1/attempts/p1/001", ".workz/launches/L1/attempts/p2", ".workz/launches/L1/attempts/p2/001", ".workz/launches/L1/attempts/join", ".workz/launches/L1/attempts/join/001" }) |d| _ = try s.dir(d);
+    for ([_][]const u8{ "workflow", "launch.json" }) |name| {
+        const bytes = try workz.sys.readFile(a, try std.fs.path.join(a, &.{ s.path, "done", name }), 1 << 20);
+        _ = try s.file(try std.fs.path.join(a, &.{ ".workz/launches/L1", name }), bytes);
+    }
+    const started =
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","selected":3,"max_threads":1,"max_memory_mib":1024,"jobs":1,"rules":["p1","p2","join"]}
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"task_started","rule":"p2","attempt":1,"directory":""}
+        \\
+    ;
+    _ = try s.file(".workz/launches/L1/events.jsonl", started);
+    const dir = try std.fs.path.join(a, &.{ s.path, ".workz/launches/L1" });
+    // Its engine holds the run lock.
+    const lock = try workz.records.lock(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".workz" }));
+    defer workz.sys.close(lock);
+
+    var live = try workz.model.Live.open(testing.allocator, dir);
+    defer live.deinit();
+    try testing.expect(!live.launch.finished);
+    try testing.expectEqual(@as(usize, 0), live.launch.rows.len);
+    try testing.expectEqual(@as(usize, 1), live.launch.counts.running);
+
+    const record = struct {
+        fn copy(sc: *Scratch, al: std.mem.Allocator, rule: []const u8) !void {
+            const rel = try std.fmt.allocPrint(al, "attempts/{s}/001/record.json", .{rule});
+            const bytes = try workz.sys.readFile(al, try std.fs.path.join(al, &.{ sc.path, "done", rel }), 1 << 20);
+            _ = try sc.file(try std.fs.path.join(al, &.{ ".workz/launches/L1", rel }), bytes);
+        }
+    }.copy;
+    // A record is written before the event that ends its attempt.
+    try record(&s, a, "p2");
+    const p2_done = started ++
+        \\{"time":"2026-01-01T00:00:03.000Z","event":"task_finished","rule":"p2","attempt":1,"status":"completed"}
+        \\{"time":"2026-01-01T00:00:03.000Z","event":"task_started","rule":"p1","attempt":1,"directory":""}
+        \\
+    ;
+    _ = try s.file(".workz/launches/L1/events.jsonl", p2_done);
+    try testing.expect(try live.refresh());
+    try testing.expectEqual(@as(usize, 1), live.launch.rows.len);
+    try testing.expectEqual(workz.model.State.completed, live.launch.ruleOf("p2").?.state);
+    try testing.expect(!try live.refresh());
+
+    try record(&s, a, "p1");
+    try record(&s, a, "join");
+    _ = try s.file(".workz/launches/L1/events.jsonl", p2_done ++
+        \\{"time":"2026-01-01T00:00:04.000Z","event":"task_finished","rule":"p1","attempt":1,"status":"completed"}
+        \\{"time":"2026-01-01T00:00:04.000Z","event":"task_started","rule":"join","attempt":1,"directory":""}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"task_finished","rule":"join","attempt":1,"status":"completed"}
+        \\{"time":"2026-01-01T00:00:05.000Z","event":"launch_finished","status":"completed"}
+        \\
+    );
+    const summary = try workz.sys.readFile(a, try std.fs.path.join(a, &.{ s.path, "done", "summary.json" }), 1 << 20);
+    _ = try s.file(".workz/launches/L1/summary.json", summary);
+    try testing.expect(try live.refresh());
+
+    var fresh = try workz.model.load(testing.allocator, a, dir);
+    defer fresh.deinit();
+    const l = &live.launch;
+    try testing.expect(l.finished);
+    try testing.expectEqualStrings(fresh.status, l.status);
+    try testing.expectEqual(fresh.elapsed_s, l.elapsed_s);
+    try testing.expectEqual(fresh.counts, l.counts);
+    try testing.expectEqual(fresh.rows.len, l.rows.len);
+    for (fresh.rows, l.rows) |x, y| {
+        try testing.expectEqualStrings(x.rule, y.rule);
+        try testing.expectEqual(x.wall_s, y.wall_s);
+    }
+    try testing.expectEqual(fresh.steps.len, l.steps.len);
+    try testing.expectEqual(fresh.path.len, l.path.len);
+    try testing.expectEqual(fresh.path_ran_s, l.path_ran_s);
+    try testing.expectEqual(fresh.path_after_s, l.path_after_s);
+    try testing.expectEqual(fresh.bounds[fresh.binding.?].kind, l.bounds[l.binding.?].kind);
+    try testing.expectEqual(fresh.waits.count(), l.waits.count());
+}
+
+test "[failure] - [report]: a live model finds records the events do not name, and names a damaged one once" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try chainLaunch(&s, a, "launch", 1);
+    for ([_][]const u8{ "launch/attempts/odd", "launch/attempts/odd/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/attempts/odd/001/record.json", "{\"rule\":");
+
+    var live = try workz.model.Live.open(testing.allocator, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer live.deinit();
+    // The events name no attempt; the records are found by listing.
+    try testing.expectEqual(@as(usize, 3), live.launch.rows.len);
+    try testing.expectEqual(@as(usize, 1), live.launch.unreadable.items.len);
+    try testing.expect(std.mem.endsWith(u8, live.launch.unreadable.items[0], "/attempts/odd/001/record.json"));
+    try testing.expect(!try live.refresh());
+    try testing.expect(!try live.refresh());
+    try testing.expectEqual(@as(usize, 1), live.launch.unreadable.items.len);
+    try testing.expectEqual(@as(usize, 2), live.launch.path.len);
+}
