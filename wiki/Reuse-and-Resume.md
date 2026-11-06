@@ -4,7 +4,7 @@ workz runs a rule again only when something that can change its outputs changed.
 
 `workz plan` prints the decision for every selected rule; `workz explain` shows one rule's key part by part; `workz run` acts on the same decisions. A rule is reused only for one reason, `unchanged`. It runs for any of these:
 
-- `no completed record`: the rule never completed in this working directory, or its last attempt failed.
+- `no completed record`: the rule has no retained successful record, for example because it never completed or the dispatch journal marks it unfinished after a crash. A failed rerun can retain an earlier successful record and restore its outputs.
 - `producer NAME runs`: a rule it depends on runs first, so its inputs are about to change. With `; reused if its outputs repeat`, the producer sets `cutoff = true`, and this rule may still be reused once the producer has run ([Cutoff](#cutoff)).
 - `inputs changed`, `command changed`, `resource request changed`, `declared outputs, log or benchmark changed`, `a producing rule changed`, `engine key changed`: the first part of the [rule key](#the-rule-key) that differs from the record.
 - `environment changed: NAME, ...`: the keyed environment variables whose values differ.

@@ -95,7 +95,7 @@ The rule `after` depends on `exits`, so it is blocked: it never starts, and the 
 - **With `--keep-going`**, independent rules go on; only the rules that depend on a failed one are blocked.
 - **Stopping an attempt** sends its process group `SIGTERM`, waits the grace period (`--grace`, default 10 s), then kills everything left in its cgroup. The attempt ends when every process it started has ended, so a tool that tidies up after `SIGTERM` keeps the grace period when the rule's shell exits first. Container rules get 10 s more for Podman.
 
-A failed rule has no completed record, so the next launch runs it again; everything that completed is reused.
+A failed attempt never becomes a completed record. If the rule had an earlier successful result, workz restores its outputs and retains that record. The next launch checks the restored result against the current key and outputs: it can reuse a matching result, while a rule without a matching completed result runs again.
 
 [Troubleshooting](Troubleshooting.md#rules-that-fail) lists every failure reason and what to do about it.
 
