@@ -12,6 +12,7 @@ One change needs action:
 
 ### Added
 
+- **Report tour.** `examples/report-tour/` runs three small rules through completion, reuse and a failed rerun that restores the last good output, with a page for each outcome and an optional short live view.
 - **Run files.** `workz prepare TEMPLATE --params FILE` reads a run file beside the template: its `[workflow]` keys and `[params]` override the template's one by one, its `[samples]` replaces the template's with a sheet read beside the run file, and the workflow is written beside the run file. One template then serves every run; without `--params`, nothing changes.
 - **Sample-sheet defaults.** `[samples] defaults = { column = "value" }` in a pipeline template gives an empty cell of that column its default, and a column the sheet lacks the default on every row; a default may be empty. An empty cell of a column without a default is still refused. The prepared workflow holds the values, as before.
 - **Quoted placeholders.** `{name:q}` in a template's `shell` puts the value in as one shell word, quoted when it holds a space, a quote or another character the shell would read, and `{input:q}` and `{output:q}` quote each path.

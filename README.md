@@ -39,7 +39,7 @@ Then follow [Getting started](wiki/Getting-Started.md), which writes, runs and c
 
 ## Documentation
 
-The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, containers, running, watching and reports, with a [workflow reference](wiki/Workflow-Reference.md), a [command reference](wiki/Command-Reference.md) and [troubleshooting](wiki/Troubleshooting.md). [examples/](examples/) holds a preparer for a real fusion-calling run. [CHANGELOG.md](CHANGELOG.md) lists the changes in every version.
+The [user guide](wiki/Home.md) covers writing workflows, scheduling, reuse, containers, running, watching and reports, with a [workflow reference](wiki/Workflow-Reference.md), a [command reference](wiki/Command-Reference.md) and [troubleshooting](wiki/Troubleshooting.md). The [small report tour](examples/report-tour/README.md) demonstrates preparation, reports, reuse and failure recovery with three rules and no downloads. [examples/](examples/) also holds a preparer for a real fusion-calling run. [CHANGELOG.md](CHANGELOG.md) lists the changes in every version.
 
 ## Status
 
