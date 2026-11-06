@@ -108,6 +108,47 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     // A finished launch's page does not reload itself.
     try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
+
+    const streamed = try s.file("report.html", "previous page");
+    try workz.html.writeFile(testing.allocator, testing.allocator, streamed, launch, null);
+    const saved = try workz.sys.readFile(testing.allocator, streamed, 1 << 20);
+    defer testing.allocator.free(saved);
+    try testing.expectEqualStrings(page, saved);
+    const pending = try std.fmt.allocPrint(arena.allocator(), "{s}.tmp", .{streamed});
+    try testing.expect(!workz.sys.exists(testing.allocator, pending));
+    const failed_page = try s.file("failed.html", "last complete page");
+    try s.link("failed.html.tmp", "/dev/full");
+    try testing.expectError(error.NoSpace, workz.html.writeFile(testing.allocator, testing.allocator, failed_page, launch, null));
+    const prior_page = try workz.sys.readFile(testing.allocator, failed_page, 1024);
+    defer testing.allocator.free(prior_page);
+    try testing.expectEqualStrings("last complete page", prior_page);
+    try testing.expect(!workz.sys.exists(testing.allocator, try std.fmt.allocPrint(arena.allocator(), "{s}.tmp", .{failed_page})));
+
+    out.clearRetainingCapacity();
+    try workz.html.write(testing.allocator, testing.allocator, &out.writer, launch, null);
+    var live = try workz.model.load(testing.allocator, arena.allocator(), launch);
+    defer live.deinit();
+    live.finished = false;
+    live.status = "running";
+    out.clearRetainingCapacity();
+    try workz.html.writeLaunch(arena.allocator(), &out.writer, &live);
+    try testing.expect(has(out.written(), "<meta http-equiv=\"refresh\" content=\"15\">"));
+    try testing.expect(!has(out.written(), "@keyframes") and !has(out.written(), "animation:"));
+    try testing.expect(!has(out.written(), "<script"));
+    for (0..3) |_| {
+        out.clearRetainingCapacity();
+        try workz.html.writeLaunch(testing.allocator, &out.writer, &live);
+    }
+    var tiny: [64]u8 = undefined;
+    var full = std.Io.Writer.fixed(&tiny);
+    try testing.expectError(error.WriteFailed, workz.html.writeLaunch(testing.allocator, &full, &live));
+    try testing.checkAllAllocationFailures(testing.allocator, renderOnce, .{&live});
+}
+
+fn renderOnce(a: std.mem.Allocator, l: *const workz.model.Launch) !void {
+    var buffer: [4096]u8 = undefined;
+    var out = std.Io.Writer.Discarding.init(&buffer);
+    try workz.html.writeLaunch(a, &out.writer, l);
 }
 
 test "[regression] - [report]: a launch that reused rules shows them with the run that made their outputs" {
@@ -876,4 +917,73 @@ test "[failure] - [report]: a live model finds records the events do not name, a
     try testing.expect(!try live.refresh());
     try testing.expectEqual(@as(usize, 1), live.launch.unreadable.items.len);
     try testing.expectEqual(@as(usize, 2), live.launch.path.len);
+}
+
+test "[unit] - [report]: resource drawings retain plateau endpoints and every spike" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var l: workz.model.Launch = .{
+        .gpa = testing.allocator,
+        .dir = s.path,
+        .id = "samples",
+        .tracker = try workz.tracker.Tracker.init(testing.allocator, s.path),
+        .elapsed_s = 8,
+        .max_threads = 2,
+        .max_memory_mib = 128,
+        .finished = true,
+    };
+    defer l.deinit();
+    for (0..9) |i| try l.tracker.samples.append(l.tracker.arena.allocator(), .{
+        .ns = @as(i128, @intCast(i)) * std.time.ns_per_s,
+        .threads_reserved = 1,
+        .memory_reserved_mib = 64,
+        .shared_reserved_mib = 32,
+        .memory_current = 32 * 1024 * 1024,
+        .cpu_cores = if (i == 3) 2 else 1,
+    });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.writeLaunch(testing.allocator, &out.writer, &l);
+    const marker = "<polyline style=\"fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round\" points=\"";
+    const start = std.mem.indexOf(u8, out.written(), marker).? + marker.len;
+    const end = std.mem.indexOfScalarPos(u8, out.written(), start, '"').?;
+    try testing.expectEqualStrings("70.0,103.0 189.5,103.0 249.3,14.0 309.0,103.0 548.0,103.0", out.written()[start..end]);
+    try testing.expectEqual(@as(usize, 9), l.usage().len);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "class=\"drawing\" style=\"aspect-ratio:560/220\"") != null);
+    l.tracker.samples.items[2].ns = 0;
+    out.clearRetainingCapacity();
+    try workz.html.writeLaunch(testing.allocator, &out.writer, &l);
+    const reversed_start = std.mem.indexOf(u8, out.written(), marker).? + marker.len;
+    const reversed_end = std.mem.indexOfScalarPos(u8, out.written(), reversed_start, '"').?;
+    try testing.expectEqualStrings("70.0,103.0 129.8,103.0 70.0,103.0 249.3,14.0 309.0,103.0 548.0,103.0", out.written()[reversed_start..reversed_end]);
+}
+
+test "[edge] - [report]: a sample cell keeps the longest run and the first equal run" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const dir = try s.dir("launch");
+    _ = try s.dir("launch/attempts");
+    _ = try s.file("launch/summary.json", "{\"status\":\"completed\",\"elapsed_s\":10}");
+    var arena: std.heap.ArenaAllocator = .init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ "a", "b", "whole" }, [_]u32{ 3, 7, 5 }) |name, cpu| {
+        _ = try s.dir(try std.fmt.allocPrint(a, "launch/attempts/{s}", .{name}));
+        _ = try s.dir(try std.fmt.allocPrint(a, "launch/attempts/{s}/001", .{name}));
+        _ = try s.file(try std.fmt.allocPrint(a, "launch/attempts/{s}/001/record.json", .{name}), try std.fmt.allocPrint(a, "{{\"rule\":\"{s}\",\"attempt\":1,\"status\":\"completed\",\"wall_s\":10,\"cpu_s\":{d},\"labels\":{{\"step\":\"align\"{s}}}}}", .{ name, cpu, if (std.mem.eql(u8, name, "whole")) "" else ",\"sample\":\"same\"" }));
+    }
+    var l = try workz.model.load(testing.allocator, a, dir);
+    defer l.deinit();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.html.writeLaunch(testing.allocator, &out.writer, &l);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "same &middot; align: completed, 10.0 s wall, 3.0 s CPU") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "whole run &middot; align: completed, 10.0 s wall, 5.0 s CPU") != null);
+    const bi = l.rule_index.get("b").?;
+    var longer = l.rules[bi].run.?.*;
+    longer.wall_s = 20;
+    l.rules[bi].run = &longer;
+    out.clearRetainingCapacity();
+    try workz.html.writeLaunch(testing.allocator, &out.writer, &l);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "same &middot; align: completed, 20.0 s wall, 7.0 s CPU") != null);
 }

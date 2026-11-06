@@ -12,6 +12,7 @@ One change needs action:
 
 ### Added
 
+- **Report tour.** `examples/report-tour/` runs three small rules through completion, reuse and a failed rerun that restores the last good output, with a page for each outcome and an optional short live view.
 - **Run files.** `workz prepare TEMPLATE --params FILE` reads a run file beside the template: its `[workflow]` keys and `[params]` override the template's one by one, its `[samples]` replaces the template's with a sheet read beside the run file, and the workflow is written beside the run file. One template then serves every run; without `--params`, nothing changes.
 - **Sample-sheet defaults.** `[samples] defaults = { column = "value" }` in a pipeline template gives an empty cell of that column its default, and a column the sheet lacks the default on every row; a default may be empty. An empty cell of a column without a default is still refused. The prepared workflow holds the values, as before.
 - **Quoted placeholders.** `{name:q}` in a template's `shell` puts the value in as one shell word, quoted when it holds a space, a quote or another character the shell would read, and `{input:q}` and `{output:q}` quote each path.
@@ -19,10 +20,13 @@ One change needs action:
 
 ### Changed
 
+- **HTML drawing and memory.** Offscreen SVG charts defer drawing without changing their dimensions, resource charts omit redundant vertices without losing peaks, and HTML files stream through a bounded buffer.
+- **HTML reports.** Running states use steady outlines without continuous animation; live pages are written and reloaded at fifteen-second intervals or longer, and each figure contains its own layout and painting. Resource samples remain five seconds apart, and print includes every section.
 - **Memory.** `report`, the HTML page and the live launch page keep only the fields they use from each attempt record and from `summary.json`, and a rule refers to its attempts instead of holding copies: a launch of 3,000 attempts reads into about half the memory, and its report takes less time.
 
 ### Fixed
 
+- **HTML rendering.** Repeated calls to the Zig HTML renderer release their temporary allocations and loaded report models.
 - **`workz prepare`.**
   - `${name}` in `shell` stays the shell's variable, also for a name `prepare` fills: `${sample}` and `${threads}` no longer turn into `$S1` and `$${WORKZ_THREADS}`.
   - An unknown `{name}` in `shell` that is a typo away from a column, param or placeholder, such as `{sampel}`, is noted on standard error; it still stays as written.

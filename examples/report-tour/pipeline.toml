@@ -1,0 +1,32 @@
+[workflow]
+name = "report-tour"
+
+[defaults]
+threads = 1
+memory = "64M"
+
+[params]
+pause = "0"
+
+[samples]
+sheet = "samples.tsv"
+
+[[steps]]
+name = "count"
+for_each = "sample"
+input = ["{reads}"]
+output = ["counts/{sample}.txt"]
+shell = "printf 'Counting {sample}\\n' >&2; sleep {pause}; wc -l < {input:q} > {output:q}"
+category = "counting"
+tool = "wc"
+cutoff = true
+timeout = "10s"
+
+[[steps]]
+name = "report"
+input = ["counts/{sample}.txt"]
+output = ["report.txt"]
+shell = "if test -f fail-report; then printf 'partial\\n' > {output:q}; printf 'report: demonstration failure\\n' >&2; exit 7; fi; sleep {pause}; cat {input:q} > {output:q}"
+category = "reporting"
+tool = "cat"
+timeout = "10s"

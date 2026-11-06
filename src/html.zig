@@ -5,7 +5,7 @@
 //! time went, each sample's run of each step, the steps with their
 //! requests, the timeline, the use of the budget and what limited the
 //! launch; tables list the failures and every attempt. While the launch
-//! runs the page asks the browser to reload it every 5 s. Colors follow the
+//! runs the page asks the browser to reload it every 15 s. Colors follow the
 //! reader's light or dark setting, and the page prints. No scripts and no
 //! remote assets.
 const std = @import("std");
@@ -18,6 +18,9 @@ const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 const duration = units.duration;
 const size = units.size;
+
+/// Minimum interval between scheduled live page writes and browser reloads, in seconds.
+pub const REFRESH_SECONDS: u32 = 15;
 
 /// A bound's name as the text reports write it, escaped: a group's name
 /// comes from the workflow.
@@ -139,22 +142,85 @@ const style = ".page{" ++ light_theme ++ "}\n" ++
     "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}}\n" ++
     @embedFile("templates/report.css");
 
-/// The page for one launch. Records that do not parse are left out and
-/// added to `unread`.
+/// Keeps the endpoints of straight horizontal and vertical runs. Samples
+/// remain in the records; only redundant vertices of the drawing disappear.
+const Points = struct {
+    const Point = struct { x: f64, y: f64 };
+    w: *std.Io.Writer,
+    first: ?Point = null,
+    last: ?Point = null,
+
+    fn add(self: *Points, x: f64, y: f64) !void {
+        const p: Point = .{ .x = x, .y = y };
+        if (self.first) |a| {
+            if (self.last) |b| {
+                const horizontal = a.y == b.y and b.y == p.y and b.x >= @min(a.x, p.x) and b.x <= @max(a.x, p.x);
+                const vertical = a.x == b.x and b.x == p.x and b.y >= @min(a.y, p.y) and b.y <= @max(a.y, p.y);
+                if (!horizontal and !vertical) {
+                    try self.w.print("{d:.1},{d:.1} ", .{ a.x, a.y });
+                    self.first = b;
+                }
+            }
+            self.last = p;
+        } else self.first = p;
+    }
+
+    fn finish(self: *Points) !void {
+        if (self.first) |p| try self.w.print("{d:.1},{d:.1}", .{ p.x, p.y });
+        if (self.last) |p| try self.w.print(" {d:.1},{d:.1}", .{ p.x, p.y });
+    }
+};
+
+/// The page for one launch. Records that do not parse are left out; their
+/// paths are copied into `a` for `unread`. The loaded model is released here.
 pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
-    var l = try model.load(gpa, a, launch_dir);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    var l = try model.load(gpa, scratch.allocator(), launch_dir);
     defer l.deinit();
-    if (unread) |u| try u.appendSlice(a, l.unreadable.items);
-    try writeLaunch(a, w, &l);
+    if (unread) |u| for (l.unreadable.items) |path| {
+        const owned = try a.dupe(u8, path);
+        errdefer a.free(owned);
+        try u.append(a, owned);
+    };
+    try writeLaunch(gpa, w, &l);
+}
+
+/// Streams a page through a bounded buffer, then replaces `path`. A failed
+/// render leaves the previous page intact. Unreadable record names live in `a`.
+pub fn writeFile(gpa: Allocator, a: Allocator, path: []const u8, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
+    const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
+    defer gpa.free(tmp);
+    const fd = try sys.openWrite(gpa, tmp, .truncate);
+    defer sys.close(fd);
+    errdefer sys.unlink(gpa, tmp) catch {};
+    var io: std.Io.Threaded = .init_single_threaded;
+    const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
+    var buffer: [16 * 1024]u8 = undefined;
+    var out = file.writerStreaming(io.io(), &buffer);
+    write(gpa, a, &out.interface, launch_dir, unread) catch |err| return writeError(out.err, err);
+    out.interface.flush() catch |err| return writeError(out.err, err);
+    try sys.rename(gpa, tmp, path);
+}
+
+fn writeError(cause: ?std.Io.File.Writer.Error, err: anyerror) anyerror {
+    return if (cause) |e| switch (e) {
+        error.NoSpaceLeft => error.NoSpace,
+        else => e,
+    } else err;
 }
 
 /// The page for a launch already read, such as one a `model.Live` keeps.
+/// Rendering scratch is released before returning; the model is borrowed.
 pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
-    const p: Page = .{ .a = a, .w = w, .l = l, .groups = try groups(a, l) };
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const temp = scratch.allocator();
+    const p: Page = .{ .a = temp, .w = w, .l = l, .groups = try groups(temp, l) };
 
     try w.writeAll("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     // A running launch's page asks to be loaded again with its next state.
-    if (!l.finished) try w.writeAll("<meta http-equiv=\"refresh\" content=\"5\">\n");
+    if (!l.finished) try w.print("<meta http-equiv=\"refresh\" content=\"{d}\">\n", .{REFRESH_SECONDS});
     try w.writeAll("<title>");
     try escape(w, l.name);
     try w.writeAll(" - workz launch ");
@@ -183,7 +249,7 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     try w.writeAll(" from <span class=\"mono\">.workz/launches/");
     try escape(w, l.id);
     try w.writeAll("</span>");
-    if (!l.finished) try w.writeAll(" &middot; this page reloads every 5 s while the launch runs");
+    if (!l.finished) try w.print(" &middot; this page reloads every {d} s while the launch runs", .{REFRESH_SECONDS});
     try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere</footer>\n</main></div></body></html>\n");
 }
 
@@ -488,6 +554,7 @@ const Page = struct {
 
         if (boxes.len > 0) try w.writeAll("<p class=\"layers\"><input type=\"checkbox\" id=\"layer-shared\" checked><label for=\"layer-shared\">shared inputs: each held once, the steps using it, the step writing what a service loads</label></p>\n");
         try w.writeAll("<div class=\"wide\">");
+        try w.print("<div class=\"drawing\" style=\"aspect-ratio:{d:.0}/{d:.0};min-width:{d:.0}px\">", .{ width, height, @min(width, 900) });
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" style=\"min-width:{d:.0}px\" role=\"img\" aria-label=\"The pipeline: {d} steps\">\n", .{ width, height, @min(width, 900), l.steps.len });
         try w.writeAll("<defs><pattern id=\"hatch\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><line class=\"hatch\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"4\"/></pattern>");
         try w.writeAll("<marker id=\"arrow\" viewBox=\"0 0 6 6\" refX=\"6\" refY=\"3\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\"><path class=\"arrow\" d=\"M0,0 L6,3 L0,6 z\"/></marker></defs>\n");
@@ -511,7 +578,7 @@ const Page = struct {
         try w.writeAll("\n");
         for (l.steps, 0..) |s, si| try self.stepBox(s, si, xs[si], ys[si], box_w, box_h);
         if (boxes.len > 0) try self.sharedLayer(boxes, xs, ys, box_w, box_h, gap, bottom, res_top, rw, rh);
-        try w.writeAll("</svg></div>\n");
+        try w.writeAll("</svg></div></div>\n");
         try w.writeAll("<ul class=\"legend\"><li><i class=\"st-completed\"></i>done in this launch</li><li><i class=\"st-reused\"></i>reused from an earlier launch</li>");
         try w.writeAll("<li><i class=\"st-running\"></i>running</li><li><i class=\"st-waiting\"></i>ready, waiting for resources</li><li><i class=\"st-pending\"></i>not ready, or not run</li>");
         try w.writeAll("<li><i class=\"st-failed\"></i>failed</li><li><i class=\"st-blocked\"></i>blocked by a failure</li><li><i class=\"st-cancelled\"></i>cancelled</li>");
@@ -756,6 +823,15 @@ const Page = struct {
         const w = self.w;
         const l = self.l;
         if (l.samples.len == 0) return;
+        const cells = try self.a.alloc(std.StringHashMapUnmanaged(usize), l.steps.len);
+        for (cells, l.steps) |*index, s| {
+            index.* = .empty;
+            for (s.rules.items) |ri| {
+                const r = l.rules[ri];
+                const entry = try index.getOrPut(self.a, r.labels.sample orelse "");
+                if (!entry.found_existing or (if (r.run) |run| run.wall_s else -1) > (if (l.rules[entry.value_ptr.*].run) |run| run.wall_s else -1)) entry.value_ptr.* = ri;
+            }
+        }
         try self.figure("samples", "FIG. 3", "Samples by step", "shade: wall time against the step's median");
         try w.writeAll("<p class=\"lead\">One cell for each sample's rule of each step, shaded by its wall time against the median of that step, so a shade means the same in every column. Hover a cell for its numbers.</p>\n");
         var whole = false;
@@ -782,7 +858,7 @@ const Page = struct {
             try w.writeAll("</td>");
             var cpu: f64 = 0;
             for (l.steps, 0..) |s, si| {
-                const ri = l.cell(si, sample) orelse {
+                const ri = cells[si].get(sample orelse "") orelse {
                     try w.writeAll("<td class=\"none\"></td>");
                     continue;
                 };
@@ -951,10 +1027,11 @@ const Page = struct {
         try self.figure("timeline", "FIG. 4", "Timeline", "this launch's attempts, in the order they started");
         const Bar = struct { name: []const u8, attempt: i64, start: f64, wall: f64, waited: f64, status: []const u8, slot: usize, open: bool, crit: bool };
         var bars: std.ArrayList(Bar) = .empty;
+        const critical = try self.a.alloc(bool, l.rules.len);
+        @memset(critical, false);
+        for (l.path) |p| critical[p.rule] = true;
         for (l.rows) |r| if (r.started_ns > 0) {
-            const crit = for (l.path) |p| {
-                if (eql(u8, l.rules[p.rule].name, r.rule)) break true;
-            } else false;
+            const crit = if (l.rule_index.get(r.rule)) |ri| critical[ri] else false;
             try bars.append(self.a, .{ .name = r.rule, .attempt = r.attempt, .start = l.at(r.started_ns), .wall = r.wall_s, .waited = r.waited_s, .status = r.status, .slot = self.slotOfRule(r.rule), .open = false, .crit = crit });
         };
         // Attempts still running have no record yet; they run up to now.
@@ -982,6 +1059,7 @@ const Page = struct {
         const plot_w = width - label_w - 14;
         const top: f64 = 46;
         const height = top + @as(f64, @floatFromInt(n)) * row_h + 8;
+        try w.print("<div class=\"drawing\" style=\"aspect-ratio:{d:.0}/{d:.0}\">", .{ width, height });
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" aria-label=\"Timeline of {d} attempts\">\n", .{ width, height, n });
         try w.writeAll("<defs><marker id=\"dim\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path class=\"arrow\" d=\"M0,1 L8,4 L0,7 z\"/></marker></defs>");
         // The elapsed time as a dimension line over the plot.
@@ -1031,7 +1109,7 @@ const Page = struct {
             try w.writeAll("</title></rect>\n");
         }
         // The legend names only the groups this launch's attempts belong to.
-        try w.writeAll("</svg>\n<ul class=\"legend\">");
+        try w.writeAll("</svg></div>\n<ul class=\"legend\">");
         var other: usize = 0;
         const present = try self.a.alloc(bool, self.groups.names.len);
         @memset(present, false);
@@ -1086,7 +1164,7 @@ const Page = struct {
         var most = budget_v;
         for (samples) |s| most = @max(most, if (memory) @max(s.memory_reserved_mib, if (s.memory_current) |m| @as(f64, @floatFromInt(m)) / 1048576.0 else 0) else @max(s.threads_reserved, s.cpu_cores orelse 0));
         most = @max(most, 1);
-        try w.print("<div><div class=\"k\">{s}</div><svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" aria-label=\"{s}\">\n", .{ if (memory) "memory reserved and in use" else "threads reserved, CPU cores in use", width, height, if (memory) "Memory reserved and in use" else "Threads reserved and CPU cores in use" });
+        try w.print("<div><div class=\"k\">{s}</div><div class=\"drawing\" style=\"aspect-ratio:{d:.0}/{d:.0}\"><svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" aria-label=\"{s}\">\n", .{ if (memory) "memory reserved and in use" else "threads reserved, CPU cores in use", width, height, width, height, if (memory) "Memory reserved and in use" else "Threads reserved and CPU cores in use" });
         var buf: [32]u8 = undefined;
         for ([_]f64{ 0, 0.5, 1 }) |f| {
             const y = top + ph - f * ph;
@@ -1107,36 +1185,46 @@ const Page = struct {
         }
         try w.print("<line class=\"axis\" x1=\"{d:.0}\" y1=\"{d:.1}\" x2=\"{d:.0}\" y2=\"{d:.1}\"/>\n", .{ left, top + ph, width - right, top + ph });
         for ([_]bool{ false, true }) |used| {
-            try w.print("<polygon style=\"fill:var({s});opacity:{s}\" points=\"{d:.1},{d:.1} ", .{ if (used) "--c1" else "--q2", if (used) ".22" else ".85", left, top + ph });
+            try w.print("<polygon style=\"fill:var({s});opacity:{s}\" points=\"", .{ if (used) "--c1" else "--q2", if (used) ".22" else ".85" });
+            var points: Points = .{ .w = w };
+            try points.add(left, top + ph);
             for (samples) |s| {
                 const v: f64 = if (memory) (if (used) (if (s.memory_current) |m| @as(f64, @floatFromInt(m)) / 1048576.0 else continue) else s.memory_reserved_mib) else (if (used) s.cpu_cores orelse continue else s.threads_reserved);
-                try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph });
+                try points.add(left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph);
             }
-            try w.print("{d:.1},{d:.1}\"/>\n", .{ left + pw, top + ph });
+            try points.add(left + pw, top + ph);
+            try points.finish();
+            try w.writeAll("\"/>\n");
             // Under the in-use area, the part of the reserved memory that
             // shared inputs hold once.
             if (memory and !used) {
                 var any = false;
                 for (samples) |s| any = any or s.shared_reserved_mib > 0;
                 if (any) {
-                    try w.print("<polygon class=\"shared-band\" points=\"{d:.1},{d:.1} ", .{ left, top + ph });
-                    for (samples) |s| try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(s.shared_reserved_mib / most, 1) * ph });
-                    try w.print("{d:.1},{d:.1}\"/>\n", .{ left + pw, top + ph });
+                    try w.writeAll("<polygon class=\"shared-band\" points=\"");
+                    var shared_points: Points = .{ .w = w };
+                    try shared_points.add(left, top + ph);
+                    for (samples) |s| try shared_points.add(left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(s.shared_reserved_mib / most, 1) * ph);
+                    try shared_points.add(left + pw, top + ph);
+                    try shared_points.finish();
+                    try w.writeAll("\"/>\n");
                 }
             }
         }
         // The in-use line on top.
         try w.writeAll("<polyline style=\"fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round\" points=\"");
+        var line: Points = .{ .w = w };
         for (samples) |s| {
             const v: f64 = if (memory) (if (s.memory_current) |m| @as(f64, @floatFromInt(m)) / 1048576.0 else continue) else s.cpu_cores orelse continue;
-            try w.print("{d:.1},{d:.1} ", .{ left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph });
+            try line.add(left + @min(l.at(s.ns) / span, 1) * pw, top + ph - @min(v / most, 1) * ph);
         }
+        try line.finish();
         try w.writeAll("\"/>\n");
         if (budget_v > 0) {
             const y = top + ph - @min(budget_v / most, 1) * ph;
             try w.print("<line style=\"stroke:var(--ink2);stroke-width:1.5;stroke-dasharray:5 4\" x1=\"{d:.0}\" y1=\"{d:.1}\" x2=\"{d:.0}\" y2=\"{d:.1}\"/>\n", .{ left, y, width - right, y });
         }
-        try w.writeAll("</svg></div>\n");
+        try w.writeAll("</svg></div></div>\n");
     }
 
     // ---- FIG. 6: what limited the launch ----

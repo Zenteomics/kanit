@@ -18,7 +18,6 @@ h1{font:600 30px/1.1 var(--label);letter-spacing:.03em;margin:0;overflow-wrap:an
 .big{font:500 22px/1.15 var(--mono);white-space:nowrap}.sub{font-size:12px;color:var(--ink2)}
 .stamp{display:inline-block;font:700 15px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;padding:5px 9px;border:2px solid currentColor;transform:rotate(-2deg)}
 .s-ok{color:var(--done)}.s-fail{color:var(--fail)}.s-run{color:var(--ink)}.s-cancel{color:var(--muted)}
-.live{animation:pulse 1.6s ease-in-out infinite}
 .error{background:var(--sheet);border:1.5px solid var(--fail);border-top:0;padding:8px 12px;color:var(--fail)}
 nav{display:flex;flex-wrap:wrap;align-items:stretch;border:1.5px solid var(--rule);border-top:0;background:var(--sheet)}
 nav a{font:600 12px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--ink2);text-decoration:none;padding:9px 13px;border-right:1px solid var(--hair)}
@@ -30,6 +29,10 @@ nav a:hover{color:var(--ink);background:var(--wash)}nav a b{color:var(--muted);m
 #theme-auto:checked~.page label[for=theme-auto],#theme-light:checked~.page label[for=theme-light],#theme-dark:checked~.page label[for=theme-dark]{color:var(--tab-ink);background:var(--tab)}
 #theme-auto:focus-visible~.page label[for=theme-auto],#theme-light:focus-visible~.page label[for=theme-light],#theme-dark:focus-visible~.page label[for=theme-dark]{outline:2px solid var(--ink);outline-offset:-2px}
 .fig{background:var(--sheet);border:1.5px solid var(--rule);margin:26px 0 0}
+@media screen{.fig{contain:layout paint}}
+/* The wrapper keeps the SVG's exact viewBox ratio while its drawing is skipped. */
+.drawing{width:100%}
+@media screen{.drawing{content-visibility:auto}}
 .fig-h{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--rule);padding:0 14px 0 0;flex-wrap:wrap}
 .no{font:700 12px/1 var(--label);letter-spacing:.14em;background:var(--tab);color:var(--tab-ink);padding:9px 11px}
 h2{font:600 17px/1.2 var(--label);letter-spacing:.08em;text-transform:uppercase;margin:0}
@@ -46,13 +49,12 @@ svg{display:block;width:100%;height:auto;font-family:var(--sans)}svg text{fill:v
 .wire{fill:none;stroke:var(--ink2);stroke-width:1}.arrow{fill:var(--ink2)}
 svg text.t-name{font:600 12px var(--mono);fill:var(--ink)}svg text.t-sub{font-size:11px;fill:var(--ink2)}svg text.t-count{font:600 11px var(--mono);fill:var(--ink)}
 .st-completed{fill:var(--done);background:var(--done)}.st-reused{fill:url(#hatch);background:repeating-linear-gradient(135deg,var(--done) 0 1.5px,transparent 1.5px 4px)}
-.st-running{fill:var(--sheet);stroke:var(--ink);stroke-width:2.5;background:var(--sheet);outline:2.5px solid var(--ink);outline-offset:-2.5px;animation:pulse 1.2s ease-in-out infinite}.st-stopping{fill:var(--cancel);background:var(--cancel);animation:pulse 1.2s ease-in-out infinite}
+.st-running{fill:var(--sheet);stroke:var(--ink);stroke-width:2.5;background:var(--sheet);outline:2.5px solid var(--ink);outline-offset:-2.5px}.st-stopping{fill:var(--cancel);background:var(--cancel)}
 .st-waiting{fill:var(--sheet);stroke:var(--ink2);stroke-width:1.25;stroke-dasharray:2.5 1.5;background:var(--sheet);outline:1.25px dashed var(--ink2);outline-offset:-1.25px}
 .st-pending,.st-not_run{fill:var(--sheet);stroke:var(--pend);stroke-width:1;background:var(--sheet);outline:1px solid var(--pend);outline-offset:-1px}
 .st-failed{fill:var(--fail);background:var(--fail)}.st-blocked{fill:var(--fail);fill-opacity:.2;stroke:var(--fail);stroke-width:1;background:color-mix(in srgb,var(--fail) 20%,transparent);outline:1px solid var(--fail);outline-offset:-1px}
 .st-cancelled{fill:var(--cancel);background:var(--cancel)}
 .hatch{stroke:var(--done);stroke-width:1.5}
-@keyframes pulse{50%{opacity:.35}}@media (prefers-reduced-motion:reduce){.st-running,.st-stopping,.live,.matrix td.running{animation:none}}
 .legend{display:flex;flex-wrap:wrap;gap:6px 18px;list-style:none;padding:0;margin:12px 0 0;font-size:12.5px;color:var(--ink2)}
 .legend i{display:inline-block;width:11px;height:11px;margin-right:6px;vertical-align:-1px}.legend b{font-weight:600;color:var(--ink)}
 .split{display:flex;height:26px;gap:2px;border:1px solid var(--rule);padding:2px;margin:4px 0}.split i{display:block;min-width:3px}
@@ -82,7 +84,7 @@ td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;col
 .matrix td.failed{background:var(--fail);color:var(--fail-ink)}.matrix td.cancelled{background:var(--cancel);color:var(--ink)}.matrix td.solo{background:var(--q2)}
 .matrix td.slow{box-shadow:inset 0 0 0 2px var(--sheet),inset 0 0 0 3.5px var(--ink)}
 .matrix td.reused{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.35) 0 1.5px,transparent 1.5px 5px)}
-.matrix td.running{background:var(--sheet);color:var(--ink);box-shadow:inset 0 0 0 2.5px var(--ink);animation:pulse 1.2s ease-in-out infinite}.matrix td.waiting{outline:1.25px dashed var(--ink2);outline-offset:-2px}
+.matrix td.running{background:var(--sheet);color:var(--ink);box-shadow:inset 0 0 0 2.5px var(--ink)}.matrix td.waiting{outline:1.25px dashed var(--ink2);outline-offset:-2px}
 .scale{display:inline-flex;gap:2px;vertical-align:-2px;margin:0 6px 0 2px}.scale i{width:14px;height:10px;margin:0}
 .strip{width:192px;height:26px;display:block}.strip circle{fill:var(--q5);stroke:var(--sheet);stroke-width:2}
 .strip circle.slow{fill:var(--sheet);stroke:var(--ink);stroke-width:2}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
@@ -96,7 +98,7 @@ footer{color:var(--muted);font:600 11px/1.6 var(--label);letter-spacing:.1em;tex
 @media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}.r1>.cell:last-child{grid-column:1/-1}}
 @media print{
 .page{background:#fff}main{max-width:none;padding:0}nav,.corner{display:none}
-.fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}.st-running,.st-stopping,.live,.matrix td.running{animation:none}
+.fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}
 .wide{background:none}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 @page{size:A4 landscape;margin:12mm}
 polygon.shared-band{fill:var(--q4);opacity:.9}.legend i.shared-band{background:var(--q4)}
