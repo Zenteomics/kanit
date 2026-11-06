@@ -139,18 +139,28 @@ const style = ".page{" ++ light_theme ++ "}\n" ++
     "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}}\n" ++
     @embedFile("templates/report.css");
 
-/// The page for one launch. Records that do not parse are left out and
-/// added to `unread`.
+/// The page for one launch. Records that do not parse are left out; their
+/// paths are copied into `a` for `unread`. The loaded model is released here.
 pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
-    var l = try model.load(gpa, a, launch_dir);
+    var scratch: std.heap.ArenaAllocator = .init(gpa);
+    defer scratch.deinit();
+    var l = try model.load(gpa, scratch.allocator(), launch_dir);
     defer l.deinit();
-    if (unread) |u| try u.appendSlice(a, l.unreadable.items);
-    try writeLaunch(a, w, &l);
+    if (unread) |u| for (l.unreadable.items) |path| {
+        const owned = try a.dupe(u8, path);
+        errdefer a.free(owned);
+        try u.append(a, owned);
+    };
+    try writeLaunch(gpa, w, &l);
 }
 
 /// The page for a launch already read, such as one a `model.Live` keeps.
+/// Rendering scratch is released before returning; the model is borrowed.
 pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
-    const p: Page = .{ .a = a, .w = w, .l = l, .groups = try groups(a, l) };
+    var scratch: std.heap.ArenaAllocator = .init(a);
+    defer scratch.deinit();
+    const temp = scratch.allocator();
+    const p: Page = .{ .a = temp, .w = w, .l = l, .groups = try groups(temp, l) };
 
     try w.writeAll("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
     // A running launch's page asks to be loaded again with its next state.

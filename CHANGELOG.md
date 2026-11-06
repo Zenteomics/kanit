@@ -23,6 +23,7 @@ One change needs action:
 
 ### Fixed
 
+- **HTML rendering.** Repeated calls to the Zig HTML renderer release their temporary allocations and loaded report models.
 - **`workz prepare`.**
   - `${name}` in `shell` stays the shell's variable, also for a name `prepare` fills: `${sample}` and `${threads}` no longer turn into `$S1` and `$${WORKZ_THREADS}`.
   - An unknown `{name}` in `shell` that is a typo away from a column, param or placeholder, such as `{sampel}`, is noted on standard error; it still stays as written.

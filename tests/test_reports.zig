@@ -108,6 +108,25 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     // A finished launch's page does not reload itself.
     try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
+
+    out.clearRetainingCapacity();
+    try workz.html.write(testing.allocator, testing.allocator, &out.writer, launch, null);
+    var live = try workz.model.load(testing.allocator, arena.allocator(), launch);
+    defer live.deinit();
+    for (0..3) |_| {
+        out.clearRetainingCapacity();
+        try workz.html.writeLaunch(testing.allocator, &out.writer, &live);
+    }
+    var tiny: [64]u8 = undefined;
+    var full = std.Io.Writer.fixed(&tiny);
+    try testing.expectError(error.WriteFailed, workz.html.writeLaunch(testing.allocator, &full, &live));
+    try testing.checkAllAllocationFailures(testing.allocator, renderOnce, .{&live});
+}
+
+fn renderOnce(a: std.mem.Allocator, l: *const workz.model.Launch) !void {
+    var buffer: [4096]u8 = undefined;
+    var out = std.Io.Writer.Discarding.init(&buffer);
+    try workz.html.writeLaunch(a, &out.writer, l);
 }
 
 test "[regression] - [report]: a launch that reused rules shows them with the run that made their outputs" {
