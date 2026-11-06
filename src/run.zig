@@ -2114,7 +2114,7 @@ const Engine = struct {
             return;
         };
         const now = sys.monoNs();
-        self.next_page_ns = now + @max(sample_interval_ns, (now - t0) * 20);
+        self.next_page_ns = now + @max(@as(i128, html.REFRESH_SECONDS) * std.time.ns_per_s, (now - t0) * 20);
     }
 
     fn saveState(self: *Engine, force: bool) !void {
@@ -2586,10 +2586,7 @@ const ChangedOutput = struct { rule: []const u8, path: []const u8 };
 fn writePage(gpa: Allocator, path: []const u8, launch_dir: []const u8) !void {
     var arena: std.heap.ArenaAllocator = .init(gpa);
     defer arena.deinit();
-    var out: std.Io.Writer.Allocating = .init(gpa);
-    defer out.deinit();
-    try html.write(gpa, arena.allocator(), &out.writer, launch_dir, null);
-    try sys.writeFileReplace(gpa, path, out.written());
+    try html.writeFile(gpa, arena.allocator(), path, launch_dir, null);
 }
 
 /// Ends a launch's records: the `launch_finished` event and `summary.json`.
@@ -3014,7 +3011,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         engine.progress("budget", "{d} threads, {s}, {d} jobs{s}", .{ max_threads, mem.written(), max_jobs, if (defaults) " (the defaults: every CPU and 3/4 of the memory; set --max-threads and --max-memory to share the machine)" else "" });
     }
     engine.drawPage();
-    if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every 5 s while the launch runs", .{monitor.shownPath(a, p)});
+    if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every {d} s while the launch runs", .{ monitor.shownPath(a, p), html.REFRESH_SECONDS });
 
     engine.loop() catch |err| {
         engine.fatal = sys.errorText(err);

@@ -1688,6 +1688,12 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     // An attempt writes its record when it ends; the page shows running ones.
     if ((kind != .html or suggest) and workz.records.launchActive(c.gpa, dir))
         std.debug.print("workz: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
+    if (kind == .html) if (output) |path| {
+        var unread: std.ArrayList([]const u8) = .empty;
+        workz.html.writeFile(c.gpa, c.a, path, dir, &unread) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
+        for (unread.items) |p| std.debug.print("workz: {s} is not valid JSON; the report leaves it out\n", .{p});
+        return if (unread.items.len > 0) .failed else .ok;
+    };
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const w = &text.writer;

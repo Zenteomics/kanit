@@ -19,6 +19,8 @@ One change needs action:
 
 ### Changed
 
+- **HTML drawing and memory.** Offscreen SVG charts defer drawing without changing their dimensions, resource charts omit redundant vertices without losing peaks, and HTML files stream through a bounded buffer.
+- **HTML reports.** Running states use steady outlines without continuous animation; live pages are written and reloaded at fifteen-second intervals or longer, and each figure contains its own layout and painting. Resource samples remain five seconds apart, and print includes every section.
 - **Memory.** `report`, the HTML page and the live launch page keep only the fields they use from each attempt record and from `summary.json`, and a rule refers to its attempts instead of holding copies: a launch of 3,000 attempts reads into about half the memory, and its report takes less time.
 
 ### Fixed
