@@ -334,7 +334,7 @@ test "[unit] - [run]: the readable summary names each failure with its last erro
     try testing.expect(std.mem.indexOfScalar(u8, text, 0x1b) == null);
     try testing.expect(std.mem.startsWith(u8, text, " failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked\n"));
     try testing.expect(std.mem.indexOf(u8, text, "\n failures  align_S1  exited with status 3\n                     | align: reference index is truncated\n") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\n next      workz logs align_S1") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n next      kanit logs align_S1") != null);
     try testing.expect(std.mem.indexOf(u8, text, "prep") == null);
 }
 

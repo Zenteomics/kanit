@@ -161,7 +161,7 @@ const Guard = struct {
         defer sys.close(pipe[0]);
         errdefer sys.close(pipe[1]);
         const exe = try sys.childExe(a);
-        const argv = try process.Vec.init(a, &.{ "workz", "__guard" });
+        const argv = try process.Vec.init(a, &.{ "kanit", "__guard" });
         const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = pipe[0], .stdout = devnull, .stderr = 2 };
         return .{ .pid = try process.spawn(&spec), .fd = pipe[1] };
     }
@@ -203,7 +203,7 @@ const Network = struct {
         defer sys.close(alive[0]);
         errdefer sys.close(alive[1]);
         const exe = try sys.childExe(a);
-        const argv = try process.Vec.init(a, &.{ "workz", "__netns", try std.fmt.allocPrint(a, "{s}/cgroup.kill", .{run_cgroup}) });
+        const argv = try process.Vec.init(a, &.{ "kanit", "__netns", try std.fmt.allocPrint(a, "{s}/cgroup.kill", .{run_cgroup}) });
         const spec: process.Spec = .{ .path = exe.ptr, .argv = argv.items.ptr, .envp = envp.items.ptr, .cwd = "/", .stdin = alive[0], .stdout = pipe[1], .stderr = 2 };
         const pid = process.spawn(&spec) catch |err| {
             sys.close(pipe[1]);
@@ -1197,7 +1197,7 @@ const Engine = struct {
         const s = self.wf.shared[hi];
         // The holder walks a directory itself, so the command line stays one
         // path long however many files the index has.
-        const argv = try process.Vec.init(self.a, &.{ "workz", "__hold", s.path_abs.? });
+        const argv = try process.Vec.init(self.a, &.{ "kanit", "__hold", s.path_abs.? });
         const exe = try sys.childExe(self.a);
 
         var pipe: [2]i32 = undefined;
@@ -1718,7 +1718,7 @@ const Engine = struct {
         self.releaseShared(i);
         released = true;
         self.finished += 1;
-        // A terminal shows the error lines themselves; `workz logs` has the rest.
+        // A terminal shows the error lines themselves; `kanit logs` has the rest.
         if (self.console.on) {
             if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, brief }) else {
                 self.alert("failed", "{s}: {s}", .{ r.name, brief });
@@ -1840,7 +1840,7 @@ const Engine = struct {
     // ---- control ----
 
     /// Applies the lines appended to the control file: `stop RULE`,
-    /// `retry RULE` and `cancel` (see `workz control`).
+    /// `retry RULE` and `cancel` (see `kanit control`).
     fn readControl(self: *Engine) !void {
         var drain: [4096]u8 align(@alignOf(linux.inotify_event)) = undefined;
         _ = linux.read(self.control_watch, &drain, drain.len);
@@ -1940,7 +1940,7 @@ const Engine = struct {
 
     // ---- stopping ----
 
-    /// Marks the end of the run loop in the event stream, which `workz
+    /// Marks the end of the run loop in the event stream, which `kanit
     /// control` reads to refuse commands that would not be applied.
     fn beginEnding(self: *Engine) void {
         if (self.ending) return;
@@ -2109,7 +2109,7 @@ const Engine = struct {
         const path = self.page_path orelse return;
         const t0 = sys.monoNs();
         writePage(self.gpa, path, self.launch_dir) catch |err| {
-            std.debug.print("workz: cannot write {s} ({s}); the page stops updating\n", .{ path, sys.errorText(err) });
+            std.debug.print("kanit: cannot write {s} ({s}); the page stops updating\n", .{ path, sys.errorText(err) });
             self.page_path = null;
             return;
         };
@@ -2167,7 +2167,7 @@ const Engine = struct {
             if (v.started) continue;
             v.started = true;
             v.pid = self.spawnVersion(v) catch |err| {
-                const text = std.fmt.allocPrint(self.a, "workz: cannot start the version command: {s}\n", .{sys.errorText(err)}) catch continue;
+                const text = std.fmt.allocPrint(self.a, "kanit: cannot start the version command: {s}\n", .{sys.errorText(err)}) catch continue;
                 sys.writeFile(self.gpa, v.file, text) catch {};
                 continue;
             };
@@ -2333,7 +2333,7 @@ const Engine = struct {
 
     fn loop(self: *Engine) !void {
         var idle_passes: u32 = 0;
-        // `workz control` may append before the file is watched: those
+        // `kanit control` may append before the file is watched: those
         // commands apply before the first rule starts.
         if (self.control_watch >= 0) try self.readControl();
         while (true) {
@@ -2373,7 +2373,7 @@ const Engine = struct {
                 const now = sys.monoNs();
                 if (self.signalled_at) |at| {
                     if (now - at >= std.time.ns_per_s) {
-                        if (!self.opts.quiet) self.note("workz: interrupted again; killing running tasks");
+                        if (!self.opts.quiet) self.note("kanit: interrupted again; killing running tasks");
                         for (self.tasks) |*t| if (t.status == .running) {
                             t.kill_at = now;
                         };
@@ -2386,11 +2386,11 @@ const Engine = struct {
                     self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
                     if (self.interrupted) {
                         // `control cancel` already stops the launch with its grace period.
-                        if (!self.opts.quiet) self.note("workz: interrupted; the launch is already stopping (interrupt again to kill)");
+                        if (!self.opts.quiet) self.note("kanit: interrupted; the launch is already stopping (interrupt again to kill)");
                     } else {
                         self.interrupted = true;
                         self.interrupted_at = now;
-                        if (!self.opts.quiet) self.note("workz: interrupted; stopping running tasks (interrupt again to kill)");
+                        if (!self.opts.quiet) self.note("kanit: interrupted; stopping running tasks (interrupt again to kill)");
                         self.beginStop();
                     }
                 }
@@ -2574,7 +2574,7 @@ const Summary = struct {
     /// output and the rule that wrote it.
     changed_outputs: []const ChangedOutput = &.{},
     /// Bytes of earlier outputs the launch moved into `previous/`, kept
-    /// until `workz clean --previous` removes them.
+    /// until `kanit clean --previous` removes them.
     previous_bytes: u64 = 0,
 };
 
@@ -2623,11 +2623,11 @@ const Refusal = struct {
     selected: usize,
     t0: i128,
     json: bool,
-    /// Recorded outputs that changed outside workz, when that refused it.
+    /// Recorded outputs that changed outside kanit, when that refused it.
     changed: []const ChangedOutput = &.{},
 
     fn refuse(self: Refusal, outcome: Outcome, reason: []const u8) !Outcome {
-        std.debug.print("workz: {s}\n", .{reason});
+        std.debug.print("kanit: {s}\n", .{reason});
         self.events.emit("launch_refused", .{ .reason = reason });
         const summary: Summary = .{
             .engine = self.engine,
@@ -2669,7 +2669,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     try records.makeRecordsDir(gpa, rec);
     const lock_fd = records.lock(gpa, rec) catch |err| switch (err) {
         error.Busy => {
-            std.debug.print("workz: another launch is running in {s}; watch it with workz watch, or run again after it ends\n", .{wf.root});
+            std.debug.print("kanit: another launch is running in {s}; watch it with kanit watch, or run again after it ends\n", .{wf.root});
             return .failed;
         },
         else => return err,
@@ -2684,7 +2684,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     defer events.close();
     const exe = sys.self_exe;
     const exe_digest = try sys.sha256File(gpa, exe);
-    const engine_id = try std.fmt.allocPrint(a, "workz {s} sha256:{s}", .{ version, &exe_digest });
+    const engine_id = try std.fmt.allocPrint(a, "kanit {s} sha256:{s}", .{ version, &exe_digest });
     var selected: usize = 0;
     for (mask) |m| selected += @intFromBool(m);
     try records.writeJson(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.json" }), .{
@@ -2740,7 +2740,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     // in its previous/: they go back to their paths before anything runs.
     recoverPrevious(gpa, a, wf, rec, launch.id, &events) catch |err| switch (err) {
         error.OutOfMemory => return err,
-        else => std.debug.print("workz: cannot put back the earlier outputs a killed launch moved aside: {s}\n", .{sys.errorText(err)}),
+        else => std.debug.print("kanit: cannot put back the earlier outputs a killed launch moved aside: {s}\n", .{sys.errorText(err)}),
     };
 
     // A recorded output that changed outside the engine is refused unless
@@ -2771,7 +2771,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             if (first_changed.len == 0) first_changed = o.path;
             try changed_outputs.append(a, .{ .rule = r.name, .path = o.path });
             {
-                std.debug.print("workz: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
+                std.debug.print("kanit: output of completed rule {s} changed since it was recorded: {s}\n", .{ r.name, o.path });
                 events.emit("output_changed", .{ .rule = r.name, .path = o.path });
             }
         }
@@ -2795,7 +2795,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             try opts_text.writer.print("{s}--rerun-rule {s}", .{ if (named == 1) "" else " ", c.rule });
         }
         if (rules_n > named) try opts_text.writer.print(" (and {d} more rules)", .{rules_n - named});
-        return refused.refuse(.failed, try std.fmt.allocPrint(a, "{s} changed outside workz ({s}{s}); to run {s} again, keeping the earlier bytes in previous/, run with {s}, or with --rerun for every rule", .{ which, if (changed == 1) "" else "first ", first_changed, if (changed == 1) "the rule that wrote it" else "the rules that wrote them", opts_text.written() }));
+        return refused.refuse(.failed, try std.fmt.allocPrint(a, "{s} changed outside kanit ({s}{s}); to run {s} again, keeping the earlier bytes in previous/, run with {s}, or with --rerun for every rule", .{ which, if (changed == 1) "" else "first ", first_changed, if (changed == 1) "the rule that wrote it" else "the rules that wrote them", opts_text.written() }));
     }
 
     // Input manifest: authoritative digests for external inputs.
@@ -2938,7 +2938,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .images = images,
         .extras = extras,
         .bash = findBash(gpa) orelse {
-            std.debug.print("workz: bash not found\n", .{});
+            std.debug.print("kanit: bash not found\n", .{});
             return .invalid;
         },
         .devnull = devnull,
@@ -2953,7 +2953,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     }
     defer if (engine.network) |n| n.stop();
     if (tree == null) engine.guard = Guard.start(a, &engine.envp, devnull) catch |err| guard: {
-        std.debug.print("workz: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{sys.errorText(err)});
+        std.debug.print("kanit: cannot start the guard of --no-isolation attempts ({s}); they may outlive a killed engine\n", .{sys.errorText(err)});
         break :guard null;
     };
     defer if (engine.guard) |gd| gd.stop();
@@ -2973,19 +2973,19 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.control_path = try std.fs.path.join(a, &.{ launch.dir, "control" });
     control: {
         const cfd = sys.openWrite(gpa, engine.control_path, .append) catch |err| {
-            std.debug.print("workz: cannot create {s} ({s}); `workz control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
+            std.debug.print("kanit: cannot create {s} ({s}); `kanit control` will not reach this launch\n", .{ engine.control_path, sys.errorText(err) });
             break :control;
         };
         sys.close(cfd);
         const ifd = sys.check(linux.inotify_init1(linux.IN.CLOEXEC | linux.IN.NONBLOCK)) catch |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
+            std.debug.print("kanit: cannot watch the control file ({s}); `kanit control` will not reach this launch\n", .{sys.errorText(err)});
             break :control;
         };
         const pz = try a.dupeZ(u8, engine.control_path);
         if (sys.check(linux.inotify_add_watch(@intCast(ifd), pz, linux.IN.MODIFY))) |_| {
             engine.control_watch = @intCast(ifd);
         } else |err| {
-            std.debug.print("workz: cannot watch the control file ({s}); `workz control` will not reach this launch\n", .{sys.errorText(err)});
+            std.debug.print("kanit: cannot watch the control file ({s}); `kanit control` will not reach this launch\n", .{sys.errorText(err)});
             sys.close(@intCast(ifd));
         }
     }
@@ -3030,7 +3030,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.beginEnding();
     engine.awaitVersions(10);
     engine.awaitHelpers(engine.opts.grace_s +| 10);
-    engine.writeVersions() catch |err| std.debug.print("workz: cannot write versions.json: {s}\n", .{sys.errorText(err)});
+    engine.writeVersions() catch |err| std.debug.print("kanit: cannot write versions.json: {s}\n", .{sys.errorText(err)});
 
     // Inputs of rules that ran must not have changed while the run went on:
     // their outputs would not match the inputs recorded in their key. A
@@ -3149,17 +3149,17 @@ pub fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, m
     const t0 = sys.monoNs();
     var res: ManifestCheck = .{ .ok = true };
     const bytes = sys.readFile(gpa, mpath, 256 << 20) catch |err| {
-        std.debug.print("workz: cannot read input manifest {s}: {s}\n", .{ mpath, sys.errorText(err) });
+        std.debug.print("kanit: cannot read input manifest {s}: {s}\n", .{ mpath, sys.errorText(err) });
         return .{ .ok = false, .usable = false };
     };
     defer gpa.free(bytes);
     const parsed = std.json.parseFromSlice(std.json.Value, gpa, bytes, .{}) catch {
-        std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
+        std.debug.print("kanit: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
         return .{ .ok = false, .usable = false };
     };
     defer parsed.deinit();
     if (parsed.value != .object) {
-        std.debug.print("workz: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
+        std.debug.print("kanit: input manifest {s} must be a JSON object of absolute paths\n", .{mpath});
         return .{ .ok = false, .usable = false };
     }
     const sa = st.allocator();
@@ -3183,25 +3183,25 @@ pub fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, m
             else => {},
         }
         if (!std.fs.path.isAbsolute(path) or !std.mem.startsWith(u8, want, "sha256:") or want.len != 71) {
-            std.debug.print("workz: invalid input manifest entry {s}\n", .{path});
+            std.debug.print("kanit: invalid input manifest entry {s}\n", .{path});
             res.ok = false;
             continue;
         }
         // A digest covers one regular file's bytes.
         if (sys.stat(gpa, path) catch null) |id| if (!id.isReg()) {
-            std.debug.print("workz: input manifest entry is not a regular file: {s}\n", .{path});
+            std.debug.print("kanit: input manifest entry is not a regular file: {s}\n", .{path});
             res.ok = false;
             continue;
         };
         const id_text = (ids.get(path) catch |err| switch (err) {
             error.Unreadable => {
-                std.debug.print("workz: {s}\n", .{ids.problem});
+                std.debug.print("kanit: {s}\n", .{ids.problem});
                 res.ok = false;
                 continue;
             },
             else => return err,
         }) orelse {
-            std.debug.print("workz: input manifest file is missing: {s}\n", .{path});
+            std.debug.print("kanit: input manifest file is missing: {s}\n", .{path});
             res.ok = false;
             continue;
         };
@@ -3223,7 +3223,7 @@ pub fn checkManifest(gpa: Allocator, st: *state.State, ids: *state.Identities, m
             hashed_any = true;
         }
         if (!std.mem.eql(u8, digest, want)) {
-            std.debug.print("workz: input does not match its manifest digest: {s}\n", .{path});
+            std.debug.print("kanit: input does not match its manifest digest: {s}\n", .{path});
             res.ok = false;
         }
     }

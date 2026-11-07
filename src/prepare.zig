@@ -1,4 +1,4 @@
-//! `workz prepare`: compiles a pipeline template into the explicit workflow
+//! `kanit prepare`: compiles a pipeline template into the explicit workflow
 //! the engine runs. A template describes each step once; a step with
 //! `for_each = "sample"` becomes one rule per row of the sample sheet, and
 //! `{name}` placeholders take the row's columns, the template's `[params]`
@@ -89,7 +89,7 @@ pub fn readSheet(gpa: Allocator, a: Allocator, path: []const u8, shown: []const 
     const sheet: Sheet = .{ .columns = h, .rows = rows.items, .source = shown };
     const si = sheet.column("sample") orelse return fail(a, problem, "{s} has no column named sample", .{shown});
     for (h, 0..) |col, i| for (h[i + 1 ..]) |other| if (eql(u8, col, other)) return fail(a, problem, "{s} names column {s} twice", .{ shown, col });
-    for (h) |col| if (reserved(col)) return fail(a, problem, "{s}: column {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, col });
+    for (h) |col| if (reserved(col)) return fail(a, problem, "{s}: column {s} has the name of a placeholder kanit prepare fills; rename it", .{ shown, col });
     for (rows.items, 0..) |row, k| {
         if (!workflow.validName(row[si])) return fail(a, problem, "{s}: sample '{s}' must use letters, digits, '_', '.', '-', starting with a letter or digit", .{ shown, row[si] });
         for (rows.items[0..k]) |earlier| if (eql(u8, earlier[si], row[si])) return fail(a, problem, "{s} lists sample {s} twice", .{ shown, row[si] });
@@ -114,7 +114,7 @@ fn withDefaults(a: Allocator, sheet: Sheet, defaults: Defaults) Error!Sheet {
     return .{ .columns = columns.items, .rows = rows, .source = sheet.source };
 }
 
-/// The placeholders `workz prepare` fills from the step itself; a column or
+/// The placeholders `kanit prepare` fills from the step itself; a column or
 /// param of the same name would hide them, so the command and the request
 /// could disagree.
 fn reserved(name: []const u8) bool {
@@ -473,7 +473,7 @@ fn readSamples(gpa: Allocator, a: Allocator, value: ?toml.Value, path: []const u
             const col = e.key_ptr.*;
             if (e.value_ptr.* != .string) return fail(a, problem, "{s}: samples.defaults.{s} must be a string", .{ shown, col });
             if (eql(u8, col, "sample")) return fail(a, problem, "{s}: samples.defaults cannot name sample; every row names its own", .{shown});
-            if (reserved(col)) return fail(a, problem, "{s}: samples.defaults.{s} has the name of a placeholder workz prepare fills; rename it", .{ shown, col });
+            if (reserved(col)) return fail(a, problem, "{s}: samples.defaults.{s} has the name of a placeholder kanit prepare fills; rename it", .{ shown, col });
             try defaults.put(a, col, e.value_ptr.string);
         }
     }
@@ -506,7 +506,7 @@ fn addParams(a: Allocator, problem: *Problem, value: ?toml.Value, shown: []const
     while (pit.next()) |e| {
         const name = e.key_ptr.*;
         if (!isIdent(name)) return fail(a, problem, "{s}: param '{s}' must be a name of letters, digits and '_'", .{ shown, name });
-        if (reserved(name)) return fail(a, problem, "{s}: param {s} has the name of a placeholder workz prepare fills; rename it", .{ shown, name });
+        if (reserved(name)) return fail(a, problem, "{s}: param {s} has the name of a placeholder kanit prepare fills; rename it", .{ shown, name });
         if (sheet) |sh| if (sh.column(name) != null) return fail(a, problem, "{s}: param {s} is also a column of {s}", .{ shown, name, sh.source });
         try params.put(a, name, switch (e.value_ptr.*) {
             .string => |s| s,
@@ -573,8 +573,8 @@ pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []cons
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
     if (run) |r| {
-        try w.print("# Written by `workz prepare` from {s} with {s}: edit those files and run it\n# again, since changes made here are lost.\n\n", .{ std.fs.path.basename(shown), std.fs.path.basename(r.shown) });
-    } else try w.print("# Written by `workz prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
+        try w.print("# Written by `kanit prepare` from {s} with {s}: edit those files and run it\n# again, since changes made here are lost.\n\n", .{ std.fs.path.basename(shown), std.fs.path.basename(r.shown) });
+    } else try w.print("# Written by `kanit prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
     for ([_][]const u8{ "workflow", "defaults" }) |name| {
         const over: ?toml.Value = if (eql(u8, name, "workflow")) (if (run_doc) |d| d.get("workflow") else null) else null;
         const base = doc.get(name);
@@ -616,7 +616,7 @@ pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []cons
         while (kit.next()) |e| {
             const key = e.key_ptr.*;
             if (eql(u8, key, "for_each")) continue;
-            if (eql(u8, key, "step") or eql(u8, key, "sample")) return fail(a, problem, "step {s}: {s} is set by workz prepare; leave it out", .{ name, key });
+            if (eql(u8, key, "step") or eql(u8, key, "sample")) return fail(a, problem, "step {s}: {s} is set by kanit prepare; leave it out", .{ name, key });
             if (contains(&workflow.rule_keys, key)) continue;
             if (workflow.closest(&workflow.rule_keys, key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
             return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });

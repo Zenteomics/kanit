@@ -1,16 +1,16 @@
-# A workz workflow: an explicit graph of rules. Each rule names its inputs,
+# A kanit workflow: an explicit graph of rules. Each rule names its inputs,
 # its outputs, one shell command and what it needs. A rule runs after the
 # rules that produce its inputs. For many samples, write a pipeline
-# template instead and let `workz prepare` write this file:
-# `workz init --template`.
+# template instead and let `kanit prepare` write this file:
+# `kanit init --template`.
 #
-#   workz validate workflow.toml      every key and path, every problem at once
-#   workz graph --layer resources     what feeds what, and the shared inputs
-#   workz plan --budget               what would run, and whether it fits
-#   workz run workflow.toml
-#   workz watch
+#   kanit validate workflow.toml      every key and path, every problem at once
+#   kanit graph --layer resources     what feeds what, and the shared inputs
+#   kanit plan --budget               what would run, and whether it fits
+#   kanit run workflow.toml
+#   kanit watch
 #
-# workz keeps every attempt's output and records in .workz/ beside this
+# kanit keeps every attempt's output and records in .workz/ beside this
 # file; add .workz/ to the project's .gitignore.
 
 [workflow]
@@ -46,7 +46,7 @@ sample = "S1"
 input = ["data/S1.txt"]
 output = ["out/S1.count"]
 shell = "wc -l < data/S1.txt > out/S1.count"
-version = "wc --version | head -1"  # recorded, for workz report --methods
+version = "wc --version | head -1"  # recorded, for kanit report --methods
 log = "logs/S1.count.log"
 cutoff = true                       # consumers rerun only if the count changes
 

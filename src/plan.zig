@@ -72,7 +72,7 @@ pub const Context = struct {
         const refs = try container.imageRefs(self.a, self.wf, mask);
         if (refs.len > 0) {
             const podman = (try container.findPodman(self.gpa, self.a, self.environ.get("PATH") orelse "/usr/bin:/bin")) orelse {
-                std.debug.print("workz: podman is not on PATH; container rules cannot be planned exactly\n", .{});
+                std.debug.print("kanit: podman is not on PATH; container rules cannot be planned exactly\n", .{});
                 return container.ruleExtras(self.a, self.wf, &images);
             };
             // Podman sees the environment a run gives it.
@@ -81,7 +81,7 @@ pub const Context = struct {
             defer sys.close(devnull);
             var unresolved: ?container.Unresolved = null;
             images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &unresolved);
-            if (unresolved) |u| std.debug.print("workz: a run would refuse: {s}\n", .{try u.text(self.a)});
+            if (unresolved) |u| std.debug.print("kanit: a run would refuse: {s}\n", .{try u.text(self.a)});
         }
         return container.ruleExtras(self.a, self.wf, &images);
     }

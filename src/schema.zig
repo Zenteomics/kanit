@@ -1,4 +1,4 @@
-//! `workz schema`: a JSON Schema of the workflow format, for editors that
+//! `kanit schema`: a JSON Schema of the workflow format, for editors that
 //! check TOML against one (Taplo, Even Better TOML). The keys of every
 //! table come from the parser's own key lists, so the schema accepts and
 //! rejects the keys `validate` does; each key here only adds its type and
@@ -112,7 +112,7 @@ fn object(w: *std.Io.Writer, keys: []const []const u8, types: []const Key) std.I
 }
 
 pub fn write(w: *std.Io.Writer) !void {
-    try w.writeAll("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"workz workflow, format 1\",");
+    try w.writeAll("{\"$schema\":\"https://json-schema.org/draft/2020-12/schema\",\"title\":\"kanit workflow, format 1\",");
     try w.writeAll("\"type\":\"object\",\"additionalProperties\":false,\"required\":[\"workflow\",\"rules\"],\"properties\":{");
     try w.writeAll("\"workflow\":{");
     try object(w, &workflow.workflow_keys, &workflow_types);

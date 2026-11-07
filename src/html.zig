@@ -1,4 +1,4 @@
-//! `workz report --format html`, and the page a running launch keeps up to
+//! `kanit report --format html`, and the page a running launch keeps up to
 //! date: one self-contained page drawn like an engineering sheet. A title
 //! block gives the launch at a glance; numbered figures show the pipeline
 //! as a schematic of its steps with the state of every rule, where the CPU
@@ -223,7 +223,7 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     if (!l.finished) try w.print("<meta http-equiv=\"refresh\" content=\"{d}\">\n", .{REFRESH_SECONDS});
     try w.writeAll("<title>");
     try escape(w, l.name);
-    try w.writeAll(" - workz launch ");
+    try w.writeAll(" - kanit launch ");
     try escape(w, l.id);
     try w.print("</title>\n<style>\n{s}</style></head><body>\n", .{style});
     // The theme switch's buttons come before the sheet they restyle; its
@@ -245,7 +245,7 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     try p.attemptsTable();
 
     try w.writeAll("<footer>Drawn by ");
-    try escape(w, if (l.engine.len > 0) l.engine else "workz");
+    try escape(w, if (l.engine.len > 0) l.engine else "kanit");
     try w.writeAll(" from <span class=\"mono\">.workz/launches/");
     try escape(w, l.id);
     try w.writeAll("</span>");
@@ -351,7 +351,7 @@ const Page = struct {
     fn titleBlock(self: Page) !void {
         const w = self.w;
         const l = self.l;
-        try w.writeAll("<header class=\"title\"><div class=\"row r1\"><div class=\"cell\"><span class=\"k\">workz &middot; launch report</span><h1>");
+        try w.writeAll("<header class=\"title\"><div class=\"row r1\"><div class=\"cell\"><span class=\"k\">kanit &middot; launch report</span><h1>");
         try escape(w, l.name);
         try w.writeAll("</h1></div>\n<div class=\"cell\"><span class=\"k\">status</span>");
         const tone: []const u8 = if (!l.finished) "s-run live" else if (eql(u8, l.status, "completed")) "s-ok" else if (eql(u8, l.status, "interrupted") or eql(u8, l.status, "stopped")) "s-cancel" else "s-fail";
@@ -369,7 +369,7 @@ const Page = struct {
             try w.writeAll(" UTC");
         } else try w.writeAll("-");
         try w.writeAll("</div>\n<div class=\"cell\"><span class=\"k\">engine</span>");
-        try escape(w, if (l.engine.len > 0) l.engine else "workz");
+        try escape(w, if (l.engine.len > 0) l.engine else "kanit");
         try w.writeAll("</div></div>\n<div class=\"row r2\">");
 
         // Elapsed, and what limited it: the largest lower bound.
@@ -429,7 +429,7 @@ const Page = struct {
             try w.writeAll("</div><div class=\"sub\">peak in use; budget ");
         } else try w.writeAll("-</div><div class=\"sub\">no run samples; budget ");
         try size(w, l.max_memory_mib);
-        try w.writeAll("</div></div>\n<div class=\"cell\"><span class=\"k\">workz itself</span><div class=\"big\">");
+        try w.writeAll("</div></div>\n<div class=\"cell\"><span class=\"k\">kanit itself</span><div class=\"big\">");
         if (l.engine_cpu_s) |cpu| {
             try w.print("{d:.2} s</div><div class=\"sub\">CPU time of the engine", .{cpu});
             if (l.engine_rss_mib) |rss| {
@@ -933,7 +933,7 @@ const Page = struct {
             try w.writeAll("<p class=\"muted\">No step.</p>");
             return self.endFigure();
         }
-        try w.writeAll("<p class=\"lead\">Every step in pipeline order. The spread places each run on the step's own time scale, from 0 to its longest run, with the median as a line. Memory used is the largest process memory of a run, or its cgroup peak for rules with shared inputs or containers; the rest of the cgroup peak is page cache. The suggested request covers the memory used with a fifth to spare, as <code>workz report --suggest</code> prints it.</p>\n");
+        try w.writeAll("<p class=\"lead\">Every step in pipeline order. The spread places each run on the step's own time scale, from 0 to its longest run, with the median as a line. Memory used is the largest process memory of a run, or its cgroup peak for rules with shared inputs or containers; the rest of the cgroup peak is page cache. The suggested request covers the memory used with a fifth to spare, as <code>kanit report --suggest</code> prints it.</p>\n");
         try w.writeAll("<div class=\"wide\"><table><thead><tr><th>step</th><th class=\"n\">runs</th><th class=\"n\">median</th><th>spread of wall time</th><th class=\"n\">cores used</th><th>memory used of request</th><th class=\"n\">suggested</th></tr></thead><tbody>\n");
         for (l.steps, 0..) |s, si| {
             try w.print("<tr><td class=\"name\"><i class=\"g{d}\"></i>", .{self.slotOfStep(si)});

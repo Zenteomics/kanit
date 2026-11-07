@@ -1033,8 +1033,8 @@ test "[failure] - [prepare]: a template refuses what would be read two ways or n
     const Case = struct { text: []const u8, want: []const u8 };
     for ([_]Case{
         .{ .text = "[workflow]\nname = \"p\"\ndescription = \"{nope}\"\n" ++ step, .want = "workflow: description names {nope}, which is no sample-sheet column, param or placeholder" },
-        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"threads.tsv\"\n" ++ step, .want = "threads.tsv: column threads has the name of a placeholder workz prepare fills" },
-        .{ .text = "[workflow]\nname = \"p\"\n[params]\ninput = \"x\"\n" ++ step, .want = "param input has the name of a placeholder workz prepare fills" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"threads.tsv\"\n" ++ step, .want = "threads.tsv: column threads has the name of a placeholder kanit prepare fills" },
+        .{ .text = "[workflow]\nname = \"p\"\n[params]\ninput = \"x\"\n" ++ step, .want = "param input has the name of a placeholder kanit prepare fills" },
         .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"open.csv\"\n" ++ step, .want = "open.csv line 2: a quoted field must close its quote" },
         .{ .text = "[workflow]\nname = \"p\"\n[samples]\nsheet = \"names.tsv\"\nnames = [\"S2\"]\n" ++ step, .want = "[samples] takes sheet or names, not both" },
     }, 0..) |c, k| {

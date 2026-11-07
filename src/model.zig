@@ -577,7 +577,7 @@ pub const Launch = struct {
     workdir: []const u8 = "",
     /// The working directory's base name, which names the launch.
     name: []const u8 = "launch",
-    /// "workz X.Y.Z", without the executable's digest.
+    /// "kanit X.Y.Z", without the executable's digest.
     engine: []const u8 = "",
     /// The engine with its executable's digest, and the workflow file's
     /// digest, as `launch.json` holds them; "" when not recorded.
@@ -781,7 +781,7 @@ pub const Launch = struct {
     }
 };
 
-/// "workz X.Y.Z" from an engine ID, without the executable's digest.
+/// "kanit X.Y.Z" from an engine ID, without the executable's digest.
 fn engineName(id: []const u8) []const u8 {
     return if (std.mem.indexOf(u8, id, " sha256:")) |i| id[0..i] else id;
 }

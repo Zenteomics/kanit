@@ -1,4 +1,4 @@
-//! `workz report --methods`: what produced the results recorded in a
+//! `kanit report --methods`: what produced the results recorded in a
 //! working directory, for the methods section of a paper or a lab notebook:
 //! the workflow files and engines, each tool with its version and image,
 //! and each step's request and command. It reads `state.json` and the
@@ -98,11 +98,11 @@ fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
     defer gpa.free(bytes);
     const v = std.json.parseFromSliceLeaky(Value, a, bytes, .{ .allocate = .alloc_always }) catch |err| {
         if (err == error.OutOfMemory) return err;
-        std.debug.print("workz: {s} is not valid JSON; its fields are left out\n", .{path});
+        std.debug.print("kanit: {s} is not valid JSON; its fields are left out\n", .{path});
         return null;
     };
     if (fields.newer(v, records.record_version)) {
-        std.debug.print("workz: {s} was written by a newer workz; its fields are left out\n", .{path});
+        std.debug.print("kanit: {s} was written by a newer kanit; its fields are left out\n", .{path});
         return null;
     }
     return v;

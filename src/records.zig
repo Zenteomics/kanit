@@ -208,7 +208,7 @@ pub const Events = struct {
     }
 
     pub fn emit(self: *Events, comptime name: []const u8, fields: anytype) void {
-        self.write(name, fields) catch |err| std.debug.print("workz: cannot write event {s}: {s}\n", .{ name, @errorName(err) });
+        self.write(name, fields) catch |err| std.debug.print("kanit: cannot write event {s}: {s}\n", .{ name, @errorName(err) });
     }
 
     fn write(self: *Events, comptime name: []const u8, fields: anytype) !void {

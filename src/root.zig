@@ -1,4 +1,4 @@
-//! workz: a local workflow engine for prepared rule graphs.
+//! kanit: a local workflow engine for prepared rule graphs.
 pub const version = "0.6.0";
 pub const sys = @import("sys.zig");
 pub const workflow = @import("workflow.zig");

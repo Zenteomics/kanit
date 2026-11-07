@@ -25,7 +25,7 @@ pub const Unresolved = struct {
 
     /// What a launch says when it refuses for this image.
     pub fn text(self: Unresolved, a: Allocator) ![]const u8 {
-        if (self.missing) return std.fmt.allocPrint(a, "container image {s} is not available locally; workz does not pull images", .{self.ref});
+        if (self.missing) return std.fmt.allocPrint(a, "container image {s} is not available locally; kanit does not pull images", .{self.ref});
         if (linux.W.IFEXITED(self.status)) return std.fmt.allocPrint(a, "podman image inspect {s} failed with status {d}; run it to see why", .{ self.ref, linux.W.EXITSTATUS(self.status) });
         return std.fmt.allocPrint(a, "podman image inspect {s} failed; run it to see why", .{self.ref});
     }
@@ -99,7 +99,7 @@ pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []c
 /// Starts removing one container, whatever its state; used after an attempt
 /// that did not end by itself. The engine does not wait for `podman rm`, so
 /// a slow or stuck Podman cannot hold up signals, timeouts or other
-/// attempts; the engine reaps it as it reaps every child, and `workz clean`
+/// attempts; the engine reaps it as it reaps every child, and `kanit clean`
 /// removes a container it left.
 pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *const process.Vec, devnull: sys.Fd) ?linux.pid_t {
     const argv = process.Vec.init(a, &.{ podman, "rm", "--force", "--ignore", "--time", "0", name }) catch return null;

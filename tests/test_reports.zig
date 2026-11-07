@@ -46,10 +46,10 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     _ = try s.dir("launch/attempts/bad");
     _ = try s.dir("launch/attempts/bad/001");
     _ = try s.file("launch/launch.json",
-        \\{"workdir":"/data/rnaseq","started":"2026-01-01T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+        \\{"workdir":"/data/rnaseq","started":"2026-01-01T00:00:00.000Z","engine":"kanit 9.9.9 sha256:ab"}
     );
     _ = try s.file("launch/summary.json",
-        \\{"status":"failed","elapsed_s":12.0,"selected":2,"engine":"workz 9.9.9 sha256:ab","counts":{"completed":1,"failed":1},"engine_cost":{"cpu_s":0.1,"max_rss_mib":5}}
+        \\{"status":"failed","elapsed_s":12.0,"selected":2,"engine":"kanit 9.9.9 sha256:ab","counts":{"completed":1,"failed":1},"engine_cost":{"cpu_s":0.1,"max_rss_mib":5}}
     );
     _ = try s.file("launch/events.jsonl",
         \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":1024}
@@ -81,7 +81,7 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     }.f;
     try testing.expect(!has(page, "<script") and !has(page, "<boom"));
     try testing.expect(has(page, "<h1>rnaseq</h1>") and has(page, "<span class=\"stamp s-fail\">failed</span>"));
-    try testing.expect(has(page, "<span class=\"k\">started</span>2026-01-01 00:00:00 UTC</div>") and has(page, "<span class=\"k\">engine</span>workz 9.9.9</div>"));
+    try testing.expect(has(page, "<span class=\"k\">started</span>2026-01-01 00:00:00 UTC</div>") and has(page, "<span class=\"k\">engine</span>kanit 9.9.9</div>"));
     // A long rule name keeps both ends in the timeline; the table has it whole.
     try testing.expect(has(page, ">align_sample_...3_paired_end</text>"));
     try testing.expect(has(page, "<td class=\"name\"><i class=\"g1\"></i>" ++ long ++ "</td><td>align</td><td>s42</td>"));
@@ -166,7 +166,7 @@ test "[regression] - [report]: a launch that reused rules shows them with the ru
     );
     // The second launch reused it and ran only the merge.
     _ = try s.file(second ++ "/launch.json",
-        \\{"workdir":"/data/rnaseq","started":"2026-01-02T00:00:00.000Z","engine":"workz 9.9.9 sha256:ab"}
+        \\{"workdir":"/data/rnaseq","started":"2026-01-02T00:00:00.000Z","engine":"kanit 9.9.9 sha256:ab"}
     );
     _ = try s.file(second ++ "/summary.json",
         \\{"status":"completed","elapsed_s":1.5,"selected":2,"counts":{"completed":1,"reused":1}}
@@ -211,7 +211,7 @@ test "[regression] - [report]: a reused rule's run may be a retry beyond its dec
     const first = ".workz/launches/20260101T000000.000-aaaaaaaa";
     const second = ".workz/launches/20260102T000000.000-bbbbbbbb";
     for ([_][]const u8{ ".workz", ".workz/launches", first, first ++ "/attempts", first ++ "/attempts/sort", second }) |d| _ = try s.dir(d);
-    // Four failed attempts, then `workz control retry` asked for a fifth.
+    // Four failed attempts, then `kanit control retry` asked for a fifth.
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
