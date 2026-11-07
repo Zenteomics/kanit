@@ -1,4 +1,4 @@
-`workz report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, how two launches differ, and what produced the results, for a methods section. Every report reads `.workz/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 10 threads and 6 GiB, with a 600 MiB shared index. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
+`kanit report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, how two launches differ, and what produced the results, for a methods section. Every report reads `.workz/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 6 threads and 6 GiB, with a 600 MiB shared index. Where a line is wider than the page, the text before it says what was cut. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
 
 Reports look at a launch in two scopes:
 
@@ -18,14 +18,14 @@ The reports use these terms:
 
 ## What each attempt used
 
-`workz report` prints one row per attempt of the newest launch, or of `--launch ID`, as TSV:
+`kanit report` prints one row per attempt of the newest launch, or of `--launch ID`, as TSV; here four of its rows and 9 of its 24 columns, aligned:
 
 ```text
-rule	attempt	status	wall_s	cpu_s	cpu_efficiency	threads	memory_mib	peak_mib	max_rss_mib	peak_per_request	oom_kills	limit_events	waited_s	wait_reason	cpu_stall	memory_stall	io_stall	idle	reason	step	sample	category	tool
-align_S1	1	completed	17.136	47.295	0.9200	3	1500	405.4	403.2	0.2703	0	0	0.000	-	0.001	0.000	0.000	false	-	align	S1	alignment	bowtie2
-align_S2	1	completed	20.013	56.076	0.9340	3	1500	402.7	403.5	0.2684	0	0	0.199	loading shared:genome	0.001	0.000	0.000	false	-	align	S2	alignment	bowtie2
-trim_S4	1	failed	0.002	0.003	0.5147	2	512	1.3	3.7	0.0024	0	0	5.053	group:disk	0.003	0.000	0.000	false	exited with status 1: trim: temporary failure writing trimmed/S4.fq	trim	S4	trimming	fastp
-trim_S4	2	completed	3.073	2.980	0.4849	2	512	1.4	3.8	0.0027	0	0	5.008	threads	0.000	0.000	0.001	false	-	trim	S4	trimming	fastp
+rule      attempt  status     wall_s  cpu_s   memory_mib  peak_mib  waited_s  wait_reason
+align_S1  1        completed  16.991  46.797  1500        402.7     16.083    threads
+align_S2  1        completed  20.005  56.148  1500        403.1     0.181     loading shared:genome
+trim_S4   1        failed     0.002   0.002   512         1.0       10.031    threads
+trim_S4   2        completed  3.013   2.991   512         1.7       8.022     threads
 ```
 
 | Column             | Unit    | Meaning                                    |
@@ -57,79 +57,80 @@ trim_S4	2	completed	3.073	2.980	0.4849	2	512	1.4	3.8	0.0027	0	0	5.008	threads	0.
 
 ## What limited the launch
 
-`workz report --bottlenecks` reads the same records and the event stream and explains where the time went:
+`kanit report --bottlenecks` reads the same records and the event stream and explains where the time went (each step's character cut after its first clause):
 
 ```text
-launch 20261027T224512.478-40c9943e: 48.4 s elapsed; 26 attempts in this launch, 388 thread-seconds reserved
-the thread budget limited this launch: it took 48.4 s, 25% more than its rules' thread requests need at that limit
+launch 20261107T060905.136-0b96682a: 1m 13s elapsed; 26 attempts in this launch, 386 thread-seconds reserved
+the thread budget limited this launch: it took 1m 13s, 14% more than its rules' thread requests need at that limit
 
 what limited the launch (the attempts it made could not take less than any of these)
-    critical path                   29.3 s  4 rules in a chain of work
-  > threads                         38.8 s  8.0 of 10 threads reserved on average
-    CPU time                        33.9 s  7.0 of 10 cores busy on average
-    memory                          32.4 s  4.0 GiB of 6.0 GiB reserved on average
-    group disk                      21.1 s  0.9 of 2 units held on average
-    engine                           0.1 s  the engine's own CPU time: checks, scheduling and records
+    critical path                   29.1 s  4 rules in a chain of work
+  > threads                         1m 04s  5.3 of 6 threads reserved on average
+    CPU time                        56.4 s  4.6 of 6 cores busy on average
+    memory                          34.7 s  2.8 GiB of 6.0 GiB reserved on average
+    group disk                      21.0 s  0.6 of 2 units held on average
+    engine                           80 ms  the engine's own CPU time: checks, scheduling and records
 
 critical path (the longest chain of work in this launch, and when each rule waited once ready)
-  at    5.1 s  trim_S5                                  ran    5.0 s, waited    5.1 s
-  at   22.2 s  align_S5                                 ran   20.3 s, waited   12.1 s
-  at   42.5 s  count_S5                                 ran    2.0 s, waited     0 ms
-  at   46.3 s  report                                   ran    2.0 s, waited     0 ms, held 1.8 s for producers off the path
-  4 rules: 29.3 s of work, 17.2 s waiting once ready, 1.9 s held for producers off the path
+  at   10.0 s  trim_S5                                  ran    5.0 s, waited   10.0 s
+  at   37.2 s  align_S5                                 ran   20.0 s, waited   22.2 s
+  at   59.3 s  count_S5                                 ran    2.0 s, waited    2.0 s
+  at   1m 11s  report                                   ran    2.0 s, waited     0 ms, held 9.8 s for producers off the path
+  4 rules: 29.1 s of work, 34.2 s waiting once ready, 9.8 s held for producers off the path
 
 waiting for resources (ready rules that waited, on average over the launch, and their rule-seconds)
-  threads                             3.0 rules     2m 23s
-  group:disk                          1.2 rules     58.7 s
+  threads                             3.6 rules     4m 26s
+  group:disk                          0.4 rules     30.2 s
   loading shared:genome              <0.1 rules      0.2 s
-  starting                           <0.1 rules      54 ms
+  starting                           <0.1 rules      56 ms
   starting: the budget had room; the engine was recording ended attempts and starting other rules
 
 resource groups (while their rules waited)
-  disk                              58.7 s waited; 1 run sample while they waited, too few to judge
+  disk                              30.2 s waited; no run samples while they waited
 
 steps (the latest completed run of every rule)
   STEP                            RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER
-  qc                                 6      3.0 s      99%        1    256 MiB    4.1 MiB    1.9 MiB     64 MiB  CPU-bound; kept its thread busy: it may use more if given them
-  trim                               6      4.0 s      49%        2    512 MiB    4.0 MiB    1.9 MiB     64 MiB  runs fewer threads; requests 448 MiB more than the suggestion; uses about 1.0 of 2 threads
-  align                              6     17.1 s      92%        3    1.5 GiB    405 MiB    405 MiB    512 MiB  CPU-bound; requests 988 MiB more than the suggestion; kept all 3 of its threads busy: it may use more if given them
-  count                              6      2.0 s      99%        1    256 MiB    4.8 MiB    1.9 MiB     64 MiB  CPU-bound; kept its thread busy: it may use more if given them
-  report                             1      2.0 s      99%        1    256 MiB    4.8 MiB    1.5 MiB     64 MiB  CPU-bound; kept its thread busy: it may use more if given them
+  qc                                 6      3.0 s      99%        1    256 MiB  <=4.0 MiB    1.9 MiB     64 MiB  CPU-bound; ...
+  trim                               6      4.0 s      50%        2    512 MiB  <=3.9 MiB    1.7 MiB     64 MiB  runs fewer threads; ...
+  align                              6     17.0 s      92%        3    1.5 GiB    403 MiB    403 MiB    512 MiB  CPU-bound; ...
+  count                              6      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.6 MiB     64 MiB  CPU-bound; ...
+  report                             1      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.9 MiB     64 MiB  CPU-bound; ...
   USED: the largest resident memory of one process, or the cgroup peak for rules with shared inputs or containers
   PEAK: the memory charged to the rule's cgroup, page cache included; libraries already in memory count in USED only
+  <=: at most this; a process started from the engine counts the engine's memory, which was larger
 
 time per category (the latest run of every rule)
   CATEGORY                       STEPS  RUNS       WALL        CPU  CPU SHARE
-  alignment                          1     6     1m 43s     4m 44s        84%
-  trimming                           1     6     24.1 s     23.8 s         7%
+  alignment                          1     6     1m 42s     4m 43s        84%
+  trimming                           1     6     24.0 s     23.9 s         7%
   qc                                 1     6     18.0 s     17.9 s         5%
-  quantification                     1     6     12.0 s     11.9 s         4%
+  quantification                     1     6     12.0 s     12.0 s         4%
   report                             1     1      2.0 s      2.0 s         1%
 
 time per tool (the latest run of every rule)
   TOOL                           STEPS  RUNS       WALL        CPU  CPU SHARE
-  bowtie2                            1     6     1m 43s     4m 44s        84%
-  fastp                              1     6     24.1 s     23.8 s         7%
+  bowtie2                            1     6     1m 42s     4m 43s        84%
+  fastp                              1     6     24.0 s     23.9 s         7%
   fastqc                             1     6     18.0 s     17.9 s         5%
-  featureCounts                      1     6     12.0 s     11.9 s         4%
+  featureCounts                      1     6     12.0 s     12.0 s         4%
   multiqc                            1     1      2.0 s      2.0 s         1%
 
 samples (the latest run of every rule), most CPU time first
   SAMPLE                         STEPS  RUNS       WALL        CPU  SLOWEST STEP
-  S5                                 4     4     30.3 s     1m 06s  align 20.3 s
+  S5                                 4     4     30.0 s     1m 06s  align 20.0 s
   S2                                 4     4     28.0 s     1m 04s  align 20.0 s
-  S1                                 4     4     27.1 s     57.2 s  align 17.1 s
-  S4                                 4     4     25.1 s     55.2 s  align 17.1 s
-  S3                                 4     4     24.1 s     48.2 s  align 14.1 s
-  S6                                 4     4     22.1 s     46.3 s  align 14.1 s
+  S1                                 4     4     27.0 s     56.8 s  align 17.0 s
+  S4                                 4     4     25.0 s     55.1 s  align 16.9 s
+  S3                                 4     4     24.0 s     48.2 s  align 14.0 s
+  S6                                 4     4     22.0 s     46.3 s  align 14.0 s
 
 shared inputs
   NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
-  genome                         mapped        1      6      0.2 s     41.3 s    600 MiB    602 MiB          -
+  genome                         mapped        1      6      0.2 s     1m 06s    600 MiB    602 MiB          -
 
 use of the budget while rules ran (run samples every 5 s)
-  threads reserved 8.2 of 10 on average; CPU cores in use 7.5 on average
-  memory reserved 4.2 GiB of 6.0 GiB on average; the run's memory in use, page cache included, peaked at 1.2 GiB
+  threads reserved 5.4 of 6 on average; CPU cores in use 4.8 on average
+  memory reserved 2.9 GiB of 6.0 GiB on average; the run's memory in use, page cache included, peaked at 1015 MiB
 ```
 
 Read it from the top:
@@ -140,14 +141,14 @@ Read it from the top:
   - the CPU time its rules used over the threads;
   - the engine's own CPU time, as the engine works on one thread.
 
-  The use column says how full each limit was on average. `>` marks the largest bound, and the line under the launch line says how far the launch ran over it; under the thread budget it also says how much of the reserved threads the rules kept busy, and which step left the most of its threads unused. A launch shorter than 2 s is not judged: starting and recording rules weigh too much in it. A launch close to a budget bound needs a larger budget, or less work, to finish sooner; one close to its critical path needs faster rules on the path; one far over every bound lost time to waits that the order of rules caused, as the critical path then shows.
+  The use column says how full each limit was on average. `>` marks the largest bound, and the line under the launch line says how far the launch ran over it; under the thread budget it also says how much of the reserved threads the rules kept busy, and which step left the most of its threads unused. A launch shorter than 2 s is not judged: starting and recording rules weigh too much in it. The bounds describe the measured attempts under their recorded requests. They suggest where to investigate, but do not prove that a larger budget or a different order will shorten the run. Time above the bounds can also include startup, shared-input loading, recording, retries and runtime delays.
 
-- **Critical path.** The rules of the longest chain of work, each weighing every attempt it made, as retries run one after another; this is the chain the scheduler ranks rules by. `at` is when a rule first started, `waited` how long it was ready before it started, and `held` how long it waited, after the rule before it on the path ended, for producers off the path; a rule retried after a pause shows the time between its attempts. The summary line adds the launch's checks before its first rule, and the time from the end of the path to the end of the launch, while rules off the path still ran: checks, work, waits, holds, the time between attempts and that last stretch make up the elapsed time.
+- **Critical path.** The longest chain using the launch's measured attempt durations, including retries. It can differ from the chain the scheduler estimated from earlier runs. `at` is when a rule first started, `waited` how long it was ready before it started, and `held` how long it waited, after the rule before it on the path ended, for producers off the path; a rule retried after a pause shows the time between its attempts. The summary adds recorded checks and the remaining time after the path ends. Recorded launch time starts after loading the workflow and acquiring the lock, so it excludes earlier systemd setup and parsing. Measure the whole command to compare total invocation time.
 - **Waiting for resources.** How many ready rules waited for each resource, on average over the launch, and the rule-seconds they waited added up, which can exceed the elapsed time.
 - **Resource groups.** For each group that held rules back, the share of the run samples, taken every 5 s while some rule waited for the group, in which the free threads and memory had room for one of the waiting rules; each sample counts once. With fewer than three samples it says they are too few to judge. From 25%, the report says a higher `max` would have started them earlier; below that, it says the budget was full and a higher `max` would not help much. Here the waits for `disk` held only one sample, too few to judge.
 - **Steps.** Each [step](Concepts.md#steps-samples-categories-and-tools) in the order of the workflow's graph: its runs, median wall time, CPU use (CPU time over wall time times threads, at most 100%), thread and memory request, memory used, cgroup peak, suggested memory request and character. `USED` is what the suggestion sizes. A `USED` marked `<=` is at most that much: a process started from the engine counts the engine's memory, and the command's own was smaller. `PEAK` can be smaller than `USED` for small commands: shared libraries already in memory count in a process's resident memory but are charged to the cgroup that loaded them. Notes after the character flag out-of-memory kills, a request more than twice the suggestion and at least 256 MiB above it, a step that reached its limit through page cache without being killed, and a step that uses under half the threads it reserves, or one that kept all of them busy.
 - **Time per category and per tool.** The steps, runs, wall time and CPU time of each category and each tool, most CPU time first, with its share of all CPU time. Here alignment took 84% of it: a faster aligner would save the most.
-- **Samples.** Each sample's steps, runs, wall time and CPU time, most CPU time first, and the step it spent longest in. When that step took at least 1.5 times its median and 2 s more, the line says how many times the median: that sample is the one to look at. Here S5 and S2 aligned for 20 s against a median of 17.1 s, which is not enough to be marked.
+- **Samples.** Each sample's steps, runs, wall time and CPU time, most CPU time first, and the step it spent longest in. When that step took at least 1.5 times its median and 2 s more, the line says how many times the median: that sample is the one to look at. Here S5 and S2 aligned for 20.0 s against a median of 17.0 s, which is not enough to be marked.
 - **Shared inputs.** Each shared input's type, starts, the rules that used it, load time, time held from loading to release, declared memory and peak. Services get a suggested `memory` ([Sizing a service](Containers-and-Services.md#sizing-a-service)).
 - **Use of the budget.** The average threads and memory reserved, the CPU cores in use, and the run's peak memory in use, from the samples taken every 5 s while rules run.
 
@@ -167,15 +168,15 @@ An attempt that completed after at least half a second while using under a tenth
 
 ## Request sizing
 
-`workz report --suggest` prints the suggested request for each step: on a terminal as a table with units, and to a file or a pipe as this TSV, for a workflow generator to apply:
+`kanit report --suggest` prints the suggested request for each step: on a terminal as a table with units, and to a file or a pipe as this TSV, for a workflow generator to apply (here 9 of its 12 columns, aligned):
 
 ```text
-step	runs	threads	threads_used	suggest_threads	memory_mib	used_mib	used_basis	peak_mib	suggest_mib	note	at_thread_limit
-qc	6	1	0.99	1	256	4	process	2	64	measured	true
-trim	6	2	0.99	1	512	4	process	2	64	measured	false
-align	6	3	2.80	3	1500	405	cgroup	405	512	measured	true
-count	6	1	0.99	1	256	5	process	2	64	measured	true
-report	1	1	0.99	1	256	5	process	2	64	measured	true
+step    runs  threads  threads_used  suggest_threads  memory_mib  used_mib  used_basis    suggest_mib
+qc      6     1        1.00          1                256         4         engine_bound  64
+trim    6     2        1.00          1                512         4         engine_bound  64
+align   6     3        2.81          3                1500        403       cgroup        512
+count   6     1        1.00          1                256         4         engine_bound  64
+report  1     1        1.00          1                256         4         engine_bound  64
 ```
 
 - `runs` counts the step's rules with a completed run, the latest of each. A suggestion from one or two runs covers only the inputs those runs had; the HTML page says how many runs it rests on.
@@ -187,31 +188,31 @@ report	1	1	0.99	1	256	5	process	2	64	measured	true
 - `at_thread_limit` is `true` when the runs kept nine tenths or more of their threads busy over their time: the request capped them, so `suggest_threads` cannot be more than the request, and the program may use more threads if given them. The steps section notes it after the character.
 - `--format json` prints the same as a JSON array.
 
-Here `trim` reserves 2 threads and 512 MiB but used 1 thread and 4 MiB, and `align` reserves 1500 MiB for 405 MiB used. Applying the suggestions lets more rules run at once on the same budget. Suggestions come from what the measured inputs needed; size for the largest input you expect, not the smallest you measured.
+Here `trim` reserves 2 threads and 512 MiB but used 1 thread and 4 MiB, and `align` reserves 1500 MiB for 403 MiB used. Applying the suggestions lets more rules run at once on the same budget. Suggestions come from what the measured inputs needed; size for the largest input you expect, not the smallest you measured.
 
 ## Comparing launches
 
-`workz report --compare OTHER` compares the newest launch, or `--launch ID`, with another one, named by launch ID, by launch directory, or by a working directory for its newest launch. Here the demo ran again with `--rerun` on 14 threads instead of 10 (paths shortened):
+`kanit report --compare OTHER` compares the newest launch, or `--launch ID`, with another one, named by launch ID, by launch directory, or by a working directory for its newest launch. Here the demo ran again with `--rerun` on 8 threads instead of 6 (paths shortened):
 
 ```text
-baseline .../.workz/launches/20261027T224512.478-40c9943e
-launch   .../.workz/launches/20261027T224738.820-a4bc8528
-budget   10 threads, 6.0 GiB, 10 jobs against 14 threads, 6.0 GiB, 14 jobs
+baseline .../.workz/launches/20261107T060905.136-0b96682a
+launch   .../.workz/launches/20261107T061157.192-d1b5ca16
+budget   6 threads, 6.0 GiB, 6 jobs against 8 threads, 6.0 GiB, 8 jobs
 note: the budgets differ, so the elapsed time compares the budgets as well as the work
 
                             BASELINE     LAUNCH   CHANGE
-  elapsed s                     48.4       44.3     -8%  budgets differ
+  elapsed s                     73.1       60.1    -18%  budgets differ
   attempts                        26         25
-  thread-seconds reserved        388        388      0%
+  thread-seconds reserved        386        386      0%
 
 per step (latest run of every rule)
                                        WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL
   STEP                           RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE
-  qc                                6      3.00    3.00      0%         2       2       -      17.9    17.9      0%  wall time within its runs' spread
-  trim                              6      4.04    4.01     -1%         2       2       -      23.8    23.9      0%  wall time within its runs' spread
-  align                             6     17.10   17.09      0%       405     404      0%     283.6   283.6      0%  wall time within its runs' spread
-  count                             6      2.00    2.00      0%         2       2       -      11.9    11.9      0%
-  report                            1      2.00    2.01      0%         2       2       -       2.0     2.0      0%
+  qc                                6      3.00    3.00      0%         2       2       -      17.9    17.9      0%
+  trim                              6      4.01    4.00      0%         2       2       -      23.9    23.9      0%  wall time within its runs' spread
+  align                             6     16.97   16.99      0%       403     404      0%     282.7   283.3      0%  wall time within its runs' spread
+  count                             6      2.00    2.00      0%         2       1       -      12.0    12.0      0%  wall time within its runs' spread
+  report                            1      2.00    2.00      0%         2       2       -       2.0     2.0      0%
 ```
 
 - The lines above the table give both budgets; notes say when the budgets, the workflow file or the engine differ, as the elapsed time then compares those too.
@@ -222,22 +223,22 @@ per step (latest run of every rule)
 - A step with no completed run on one side shows `-` for that side and says which.
 - A step reused in the launch compares the run it reused, and says so.
 
-Here four more threads saved 8% of the elapsed time while every step ran as before: the gain came from the larger budget and the order it allowed. The bottleneck report of the second launch shows why no more was gained: the memory budget limits it, with the 600 MiB shared index held the whole time, and waiting for `group:disk` grew from 58.7 s to 1m 36s.
+Here two more threads saved 18% of the elapsed time while every step ran as before: the gain came from the larger budget. The bottleneck report of the second launch shows why no more was gained: the thread budget still limits it, and waiting for `group:disk` grew from 30.2 s to 42.2 s.
 
 ## Methods
 
-`workz report --methods` describes what produced the results in the working directory, for the methods section of a paper or a lab notebook. It reads `state.json` and the records of the attempts it points to, so it covers every recorded rule, whichever launch ran it, including a rule since removed from the workflow whose record remains. A small workflow whose `join` step was rerun in a second launch:
+`kanit report --methods` describes what produced the results in the working directory, for the methods section of a paper or a lab notebook. It reads `state.json` and the records of the attempts it points to, so it covers every recorded rule, whichever launch ran it, including a rule since removed from the workflow whose record remains. A small workflow whose `join` step was rerun in a second launch:
 
 ```text
-Results in .../methods: 3 rules, finished from 2026-10-27T22:48:50.487Z to 2026-10-27T22:48:50.827Z
+Results in .../methods: 3 rules, finished from 2026-11-07T06:09:35.603Z to 2026-11-07T06:09:35.639Z
 
 workflow
-  methods 2.1, file sha256:06a779f6e3ef44eb3afd039a8b6a5757592592fd880b33f9e5e1ab1c0dcd9436
+  methods 2.1, file sha256:fa26c0dbdbdc30630c5c4568700781e8846cb512cf5001f0ab01cae77d6302f0
 engine
-  workz 0.5.0 sha256:19706d99a048b684dba6ede34e8292c8d2f987b773d9226b030297e1c2e5c726
+  kanit 0.7.0 sha256:354e59f1b3f4282be083232c11faa0ce99e420e75f44741f6076c87a919eacda
 launches
-  20261027T224850.478-ecfdb505 (2 rules)
-  20261027T224850.818-1786a936 (1 rule)
+  20261107T060935.595-2f3ad294 (2 rules)
+  20261107T060935.630-4aa809c8 (1 rule)
 
 tools
   upper: upper 1.4.2
@@ -262,7 +263,7 @@ steps
 
 ## The HTML report
 
-`workz report --format html -o report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. The page is drawn as an engineering sheet, ink on grid paper in light and a charcoal sheet in dark. It follows the reader's color scheme until the theme tag at its corner picks auto, light or dark, and it always prints in light.
+`kanit report --format html -o report.html` writes the launch as one self-contained page, with no scripts and nothing loaded from elsewhere, to open in a browser or attach to a message. The page is drawn as an engineering sheet, ink on grid paper in light and a charcoal sheet in dark. It follows the reader's color scheme until the theme tag at its corner picks auto, light or dark, and it always prints in light.
 
 ![The top of an HTML report: a theme tag at the corner set to auto, a title block with the status stamp, elapsed time, rules done, the pipeline's samples and steps, CPU and memory against the budget and the engine's cost; FIG. 1, the pipeline as boxes for qc, trim, align, count and report wired in graph order, each with a filled cell per rule; and FIG. 2, the CPU time split by category, then per tool.](images/report.png)
 
@@ -281,8 +282,8 @@ The sheet holds, in order:
 
 Figures 1 to 3 and Table 1 cover the pipeline, so a launch that reused rules still shows every sample and step, with each reused rule hatched; the rest cover the launch itself. Each category, or each step when no rule declares a category, keeps one color across the sheet, on the left edge of its pipeline box, its timeline bars and its matrix column. Up to eight get a color each, in pipeline order; with more, the first seven keep theirs and the rest share gray as "other". Hovering a cell, dot or bar gives its numbers.
 
-Every launch also keeps this page as `report.html` in its launch directory: `run` draws it as the launch starts, at least 15 s between drawings while it runs, and once more at the end ([Running workflows](Running-Workflows.md#starting-a-launch)). On a large launch it waits at least twenty times the preceding draw's duration. While the launch runs, the page reloads itself every 15 s; the final page stops reloading. `workz report --format html` draws the same page on demand, for any launch. Reload manually for an earlier update, or use `workz watch` for faster progress. A theme picked on a page that reloads itself lasts only while the browser keeps the page's form state; the reader's color scheme is the lasting choice.
+Every launch also keeps this page as `report.html` in its launch directory: `run` draws it as the launch starts, at least 15 s between drawings while it runs, and once more at the end ([Running workflows](Running-Workflows.md#starting-a-launch)). On a large launch it waits at least twenty times the preceding draw's duration. While the launch runs, the page reloads itself every 15 s; the final page stops reloading. `kanit report --format html` draws the same page on demand, for any launch. Reload manually for an earlier update, or use `kanit watch` for faster progress. A theme picked on a page that reloads itself lasts only while the browser keeps the page's form state; the reader's color scheme is the lasting choice.
 
-Running cells and bars have steady outlines, with no continuous animation. Offscreen SVG charts can defer drawing while keeping their exact dimensions; scrolling brings them into view without changing the page layout. Print includes every figure. The CPU and memory charts preserve the shape of every five-second sample, omitting only redundant vertices along straight horizontal or vertical segments. The records keep every sample. These charts show the workflow's recorded resources, not Firefox's CPU or GPU use.
+Running cells and bars are marked by steady outlines, without animation, and printing the page includes every figure. The CPU and memory charts draw every five-second run sample.
 
 For a small runnable demonstration, use `examples/report-tour/` in the repository. Its three rules produce completed, reused and failed-launch pages; optional live mode adds two six-second waits so the resource charts have samples. The tour's README explains the figures, limits and output files.

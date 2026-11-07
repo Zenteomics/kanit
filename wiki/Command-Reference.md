@@ -1,7 +1,7 @@
-Every `workz` command and option. `workz help COMMAND` shows the same for one command, and `workz completion bash` completes commands, options and rule names in bash.
+Every `kanit` command and option. `kanit help COMMAND` shows the same for one command, and `kanit completion bash` completes commands, options and rule names in bash.
 
 ```text
-workz <command> [options]
+kanit <command> [options]
 ```
 
 ## Common options
@@ -11,30 +11,32 @@ workz <command> [options]
 | `-d`, `--workdir`   | DIR      | working directory, instead of the workflow's     |
 | `-t`, `--target`    | RULE     | select RULE and its dependencies; repeatable     |
 
-WORKFLOW defaults to `workflow.toml` in the current directory, the file `workz init` writes. The working directory is the directory of the workflow file, or `-d DIR`. Commands that only read records (`watch`, `status`, `logs`, `report`, `control`, `clean`) take the workflow path only to find that directory, and work without it from inside the working directory. `--target` applies to the commands that read the workflow.
+WORKFLOW defaults to `workflow.toml` in the current directory, the file `kanit init` writes. The working directory is the directory of the workflow file, or `-d DIR`. Commands that only read records (`watch`, `status`, `logs`, `report`, `control`, `clean`) take the workflow path only to find that directory, and work without it from inside the working directory. `--target` applies to the commands that read the workflow.
 
 An option's value is the next word, or follows `=` in the same word, as in `--launch=ID`; a word that starts with `-` or is empty is never taken as a value. After `--`, every word is the workflow or an argument, even one that starts with `-`. `-d` must name a directory, and WORKFLOW a file. `--launch ID` takes a launch ID, as `status --history` lists them, never a path.
+
+Output on a terminal uses colors unless `--no-color` is given, the environment variable `NO_COLOR` is set to a non-empty value, or `TERM` is `dumb`. Output to a file or a pipe never has colors.
 
 ## init
 
 ```text
-workz init [FILE] [--template]
+kanit init [FILE] [--template]
 ```
 
-Writes a commented starter workflow to `FILE` (default `workflow.toml`). With `--template`, writes a commented pipeline template instead (default `pipeline.toml`) and a `samples.tsv` beside it, for `workz prepare`. It never overwrites an existing file.
+Writes a commented starter workflow to `FILE` (default `workflow.toml`). With `--template`, writes a commented pipeline template instead (default `pipeline.toml`) and a `samples.tsv` beside it, for `kanit prepare`. It never overwrites an existing file.
 
 ## prepare
 
 ```text
-workz prepare [TEMPLATE] [--params FILE] [-o WORKFLOW] [--check]
+kanit prepare [TEMPLATE] [--params FILE] [-o WORKFLOW] [--check]
 ```
 
-Writes the workflow a pipeline template describes ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)): TEMPLATE defaults to `pipeline.toml` and WORKFLOW to `workflow.toml` beside it. The result is checked as `validate` would before it replaces WORKFLOW; one that is not valid is kept beside it as `WORKFLOW.prepare-tmp` to read, with exit status 2. `--check` writes nothing: it prints the rules the template would add, remove and change against WORKFLOW, and whether the other tables changed, and exits 1 if anything would. `--params FILE` names a run file: its `[workflow]` keys and `[params]` take the place of the template's one by one, its `[samples]` replaces the template's with a sheet read beside it, and the workflow goes beside it (`workflow.toml`), so one template serves every run. A run file holds no other table.
+Writes the workflow a pipeline template describes ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)): TEMPLATE defaults to `pipeline.toml` and WORKFLOW, given with `-o` or `--output`, to `workflow.toml` beside it. The result is checked as `validate` would before it replaces WORKFLOW; one that is not valid is kept beside it as `WORKFLOW.prepare-tmp` to read, with exit status 2. `--check` writes nothing: it prints the rules the template would add, remove and change against WORKFLOW, and whether the other tables changed, and exits 1 if anything would. `--params FILE` names a run file: its `[workflow]` keys and `[params]` take the place of the template's one by one, its `[samples]` replaces the template's with a sheet read beside it, and the workflow goes beside it (`workflow.toml`), so one template serves every run. A run file holds no other table.
 
 ## schema
 
 ```text
-workz schema
+kanit schema
 ```
 
 Prints a JSON Schema of the workflow format: every table and key `validate` accepts, with its type and a line of help, and no other key ([Writing workflows](Writing-Workflows.md#editor-support)).
@@ -42,7 +44,7 @@ Prints a JSON Schema of the workflow format: every table and key `validate` acce
 ## validate
 
 ```text
-workz validate [WORKFLOW] [--inputs]
+kanit validate [WORKFLOW] [--inputs]
 ```
 
 Checks the file, every key and value, and the graph ([what it checks](Workflow-Reference.md#what-validate-checks-and-what-it-does-not)). It reports every problem it finds, up to 50 and a count of the rest, each with its line where it has one ([Troubleshooting](Troubleshooting.md#workflow-errors)). Prints `valid: NAME (R rules, S selected, G groups, H shared)`, then a `note:` line for a shared input or resource group no selected rule uses, and for a rule without `sample` among rules of its step that have one, which the per-sample views leave out. Notes do not change the exit status. `--inputs` also lists every input that does not exist and that no rule writes, as `run` would refuse it, and exits 1 if there is one.
@@ -50,10 +52,10 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 ## plan
 
 ```text
-workz plan [WORKFLOW] [--summary] [--budget] [--rerun] [--rerun-rule RULE] [--input-manifest FILE] [--pass-env NAME] [--threads STEP=N]
+kanit plan [WORKFLOW] [options]
 ```
 
-Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, an output changed outside workz without `--rerun`, or an input that does not match `--input-manifest`, which it names on standard error. While a launch runs in the working directory, it says so: the rules that launch has not finished show their earlier records. `dry-run` is another name for `plan`.
+Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, an output changed outside kanit without `--rerun`, or an input that does not match `--input-manifest`, which it names on standard error. While a launch runs in the working directory, it says so: the rules that launch has not finished show their earlier records. `dry-run` is another name for `plan`.
 
 | Option             | Argument | Meaning                                    |
 | ------------------ | -------- | ------------------------------------------ |
@@ -72,7 +74,7 @@ Prints, for every selected rule, whether a run would run it or reuse it, and why
 ## explain
 
 ```text
-workz explain [WORKFLOW] RULE [--rerun] [--rerun-rule RULE] [--input-manifest FILE] [--pass-env NAME] [--threads STEP=N]
+kanit explain [WORKFLOW] RULE [options]
 ```
 
 Shows one rule's decision. For a rule that has a record and whose producers do not run, it also shows each part of its key against the record: `command`, `environment`, `request`, `writes`, `inputs`, `producers` and `engine key`, each `same` or `changed`, then what changed: the environment variables, the request, the inputs with their old and new identities, or the producers that run. It takes the options of `plan` that change a decision: `--rerun`, `--rerun-rule`, `--input-manifest`, `--pass-env` and `--threads`.
@@ -80,7 +82,7 @@ Shows one rule's decision. For a rule that has a record and whose producers do n
 ## graph
 
 ```text
-workz graph [WORKFLOW] [options]
+kanit graph [WORKFLOW] [options]
 ```
 
 Shows the selected rules and what links them, in layers: as text on a terminal, Graphviz DOT when the output goes to a file or a pipe, or JSON ([Writing workflows](Writing-Workflows.md#check-before-running)).
@@ -102,7 +104,7 @@ Shows the selected rules and what links them, in layers: as text on a terminal, 
 ## run
 
 ```text
-workz run [WORKFLOW] [options]
+kanit run [WORKFLOW] [options]
 ```
 
 Runs the selected rules that are not reusable. Progress goes to standard error and the summary to standard output: a short report on a terminal, one line of JSON otherwise ([Running workflows](Running-Workflows.md)).
@@ -135,7 +137,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 ## watch
 
 ```text
-workz watch [WORKFLOW] [--once] [--interval MS] [--launch ID] [--no-color]
+kanit watch [WORKFLOW] [--once] [--interval MS] [--launch ID] [--no-color]
 ```
 
 Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([keys](Watching-a-Launch.md#keys)); otherwise it prints a plain view every interval until the launch ends, and with `--once` it prints one. A launch whose engine ended without recording its end shows as `unfinished`, and `watch` exits 1.
@@ -150,7 +152,7 @@ Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([key
 ## status
 
 ```text
-workz status [WORKFLOW] [--history [N]] [--json] [--launch ID] [--no-color]
+kanit status [WORKFLOW] [--history [N]] [--json] [--launch ID] [--no-color]
 ```
 
 Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`. A launch whose engine ended without recording its end, as when it was killed, shows what it recorded with `"status": "unfinished"`, says so on standard error and exits 1.
@@ -167,7 +169,7 @@ Prints the summary of the newest launch, or `--launch ID`, once it has ended: on
 ## logs
 
 ```text
-workz logs [WORKFLOW] RULE [options]
+kanit logs [WORKFLOW] RULE [options]
 ```
 
 Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed; `--follow` prints the streams as they grow until the attempt ends, or its launch stops running, then the diagnostics. With `--follow` and neither `--launch` nor `--attempt`, a rule that the running launch has yet to start is waited for, and its new attempt is followed; one that the launch reuses or blocks shows its newest recorded attempt.
@@ -185,9 +187,9 @@ Give `--stdout` or `--stderr`, not both; without either, `logs` prints both stre
 ## control
 
 ```text
-workz control [WORKFLOW] stop RULE
-workz control [WORKFLOW] retry RULE
-workz control [WORKFLOW] cancel
+kanit control [WORKFLOW] stop RULE
+kanit control [WORKFLOW] retry RULE
+kanit control [WORKFLOW] cancel
 ```
 
 Sends a command to the running launch ([Steering a running launch](Running-Workflows.md#steering-a-running-launch)). It fails if the newest launch has ended or is ending, if no engine runs it any longer, or if RULE is not one of the rules the launch runs.
@@ -195,7 +197,7 @@ Sends a command to the running launch ([Steering a running launch](Running-Workf
 ## report
 
 ```text
-workz report [WORKFLOW] [options]
+kanit report [WORKFLOW] [options]
 ```
 
 Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
@@ -216,7 +218,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 ## verify
 
 ```text
-workz verify [WORKFLOW] [--content]
+kanit verify [WORKFLOW] [--content]
 ```
 
 Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
@@ -224,7 +226,7 @@ Checks that every recorded output of the selected rules still has its recorded i
 ## clean
 
 ```text
-workz clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
+kanit clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
 ```
 
 Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. Both keep what a launch killed during an attempt moved aside, which the next launch puts back, and say so. `--dry-run` removes nothing: it names each launch directory `--keep` would remove, and each launch whose `previous/` directories `--previous` would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
@@ -232,30 +234,30 @@ Removes containers that earlier launches left behind. `--keep N` also removes al
 ## completion
 
 ```text
-workz completion bash
+kanit completion bash
 ```
 
-Prints a bash completion script: `source <(workz completion bash)`. It completes the commands, the options of each command, the `control` commands, rule names after `--target` and `--rerun-rule` and for `explain`, `logs` and `control`, and launch IDs after `--launch` and `--compare`.
+Prints a bash completion script: `source <(kanit completion bash)`. It completes the commands, the options of each command, the `control` commands, rule names after `--target` and `--rerun-rule` and for `explain`, `logs` and `control`, and launch IDs after `--launch` and `--compare`.
 
 ## help and version
 
 ```text
-workz help [COMMAND]
-workz COMMAND --help
+kanit help [COMMAND]
+kanit COMMAND --help
 ```
 
-`workz help` lists the commands grouped by job. `workz help COMMAND`, `workz COMMAND --help` and `workz COMMAND -h` show a command's usage, options with their defaults, and examples. `workz version` (or `--version`) prints the version, such as `workz 0.6.0`.
+`kanit help` lists the commands grouped by job. `kanit help COMMAND`, `kanit COMMAND --help` and `kanit COMMAND -h` show a command's usage, options with their defaults, and examples. `kanit version` (or `--version`) prints the version, such as `kanit 0.7.0`.
 
 A mistyped command or option is named in the error with the one probably meant:
 
 ```text
-workz: unknown option '--max-thread' for run; did you mean '--max-threads'?
-Run 'workz help run' for its options.
+kanit: unknown option '--max-thread' for run; did you mean '--max-threads'?
+Run 'kanit help run' for its options.
 ```
 
 ## Exit statuses
 
-- `0`: success. For `run`, no rule failed, was blocked or was left unstarted; a rule stopped with `workz control stop` that nothing depends on counts as `cancelled` and still allows 0.
+- `0`: success. For `run`, no rule failed, was blocked or was left unstarted; a rule stopped with `kanit control stop` that nothing depends on counts as `cancelled` and still allows 0.
 - `1`: `run` had a failed or blocked rule, or was refused by changed outputs, an input manifest mismatch or another running launch; `verify` found a difference; `validate --inputs` found a missing input, `plan` a launch `run` would refuse, `plan --budget` a rule that does not fit, or `prepare --check` a change; a file could not be written; or there is nothing recorded to show or act on: no launch for `watch`, `status`, `report` or `control`, no attempt for `logs`, a launch that has ended or a rule it does not run for `control`, a launch holding the lock for `verify` or `clean`.
 - `2`: an invalid command line or workflow: an unknown command or option, a missing or invalid value, options that exclude each other, an argument the command does not take, a rule or target that does not exist, or a launch refused before it started: by the workflow or its budget, a missing input or image, an input manifest that cannot be read, or isolation that cannot be set up.
-- `130`: `run` was interrupted, or cancelled with `workz control cancel`.
+- `130`: `run` was interrupted, or cancelled with `kanit control cancel`.
