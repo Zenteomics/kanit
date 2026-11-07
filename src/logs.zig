@@ -1,4 +1,4 @@
-//! `workz logs RULE`: the standard output and error of a rule's attempt,
+//! `kanit logs RULE`: the standard output and error of a rule's attempt,
 //! and the diagnostics a failed attempt kept, found without browsing
 //! `.workz/launches`. By default the newest attempt
 //! in the newest launch that ran the rule, else the attempt recorded in

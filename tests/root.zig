@@ -1,4 +1,4 @@
-//! Unit tests for workz modules, one suite per area. Process behaviour is
+//! Unit tests for kanit modules, one suite per area. Process behaviour is
 //! checked separately by validation/process.sh with real children, cgroups
 //! and signals.
 const std = @import("std");

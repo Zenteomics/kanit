@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Prepares a workz workflow that runs fdz on four Heyer 2019 samples with
+# Prepares a kanit workflow that runs fdz on four Heyer 2019 samples with
 # known fusions: subset the reads, classify read pairs against a refz
 # reference, search junctions, merge the calls and report the expected
 # fusions. The refz files fdz maps are declared as shared inputs, loaded once

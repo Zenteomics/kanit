@@ -1,22 +1,22 @@
-workz runs a prepared graph of file-producing rules on one Linux workstation. You describe each rule's input files, output files, shell command and resource request in a TOML file; workz runs every rule whose inputs are ready, as many at once as the machine's CPU and memory budget allows, and keeps a complete record of every attempt.
+kanit runs a prepared graph of file-producing rules on one Linux workstation. You describe each rule's input files, output files, shell command and resource request in a TOML file; kanit runs every rule whose inputs are ready, as many at once as the machine's CPU and memory budget allows, and keeps a complete record of every attempt.
 
-It runs pipelines expanded into concrete steps, one rule per sample and step, hundreds or thousands of them: `workz prepare` writes them from a pipeline template, or a program of your own does. workz does not match wildcards at run time, install tools or talk to a cluster. It is one executable, with no daemon and no database: it schedules, isolates, reuses and records, and it shows you what limited the run.
+It runs pipelines expanded into concrete steps, one rule per sample and step, hundreds or thousands of them: `kanit prepare` writes them from a pipeline template, or a program of your own does. kanit does not match wildcards at run time, install tools or talk to a cluster. It is one executable, with no daemon and no database: it schedules, isolates, reuses and records, and it shows you what limited the run.
 
 ```mermaid
 flowchart LR
-    T[pipeline.toml<br/>steps, samples] -. workz prepare .-> W
-    W[workflow.toml<br/>rules, files, requests] --> P[workz plan<br/>what runs and why]
-    P --> R[workz run<br/>rules within the budget]
+    T[pipeline.toml<br/>steps, samples] -. kanit prepare .-> W
+    W[workflow.toml<br/>rules, files, requests] --> P[kanit plan<br/>what runs and why]
+    P --> R[kanit run<br/>rules within the budget]
     R --> D[.workz/<br/>state, events, attempts]
     D --> V[watch, status, logs<br/>while it runs]
     D --> A[report<br/>after it ends]
 ```
 
-`workz plan` reads the workflow and the records of earlier launches and says which rules would run and why. `workz run` starts the rules that need to run inside one systemd scope for the launch, each in a cgroup that enforces its request. Everything workz learns goes into `.workz/` in the working directory, which `watch`, `status`, `logs` and `report` read during the launch and after it.
+`kanit plan` reads the workflow and the records of earlier launches and says which rules would run and why. `kanit run` starts the rules that need to run inside one systemd scope for the launch, each in a cgroup that enforces its request. Everything kanit learns goes into `.workz/` in the working directory, which `watch`, `status`, `logs` and `report` read during the launch and after it.
 
 ## Read in this order
 
-1. **[Installation](Installation.md)**: what workz needs from the system, and how to build it.
+1. **[Installation](Installation.md)**: what kanit needs from the system, and how to build it.
 2. **[Getting started](Getting-Started.md)**: a four-rule workflow, run, reused and run again after an edit.
 3. **[Concepts](Concepts.md)**: rules, launches, attempts, budgets and rule keys, the words every other page uses.
 4. **Write workflows**

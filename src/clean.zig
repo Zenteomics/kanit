@@ -1,4 +1,4 @@
-//! `workz clean`: removes what earlier launches left behind in a working
+//! `kanit clean`: removes what earlier launches left behind in a working
 //! directory. It takes the run lock, so it never races a run. It removes
 //! containers labelled with the working directory, and with `--keep N` the
 //! launch directories older than the newest N, except a launch that holds

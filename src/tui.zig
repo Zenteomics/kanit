@@ -670,7 +670,7 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     // Title bar: the whole line in reverse video, the state as a badge.
     var l = f.begin();
     l.sgr(reverse ++ bold);
-    l.text(" workz ");
+    l.text(" kanit ");
     l.sgr(reset ++ reverse);
     if (t.workdir_name.len > 0) l.print(" {s} ", .{t.workdir_name});
     if (f.cols >= 70) l.print(" launch {s} ", .{t.launch});

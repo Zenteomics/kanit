@@ -1,6 +1,6 @@
 # Fusion calls on four Heyer 2019 samples
 
-`prepare.sh` writes a workz workflow, `main.toml`, that runs the fusion caller fdz on four samples of the Heyer 2019 data set with known fusions:
+`prepare.sh` writes a kanit workflow, `main.toml`, that runs the fusion caller fdz on four samples of the Heyer 2019 data set with known fusions:
 
 1. `subset_SAMPLE` takes the first PAIRS read pairs of each sample. It is a quick demonstration, not a random sample of the reads.
 2. `classify_SAMPLE` classifies the read pairs against a refz reference.
@@ -22,9 +22,9 @@ It needs the fdz binary, the Heyer 2019 directory with its `samples.tsv`, and a 
 ```sh
 bash prepare.sh FDZ_BINARY HEYER2019_DIR REFZ_DIR PAIRS OUT_DIR
 cd OUT_DIR
-workz plan main.toml
-workz run main.toml --max-threads 8 --max-memory 16G
-workz report --bottlenecks
+kanit plan main.toml
+kanit run main.toml --max-threads 8 --max-memory 16G
+kanit report --bottlenecks
 ```
 
 The paths in `main.toml` are absolute, so the workflow runs only on the machine that prepared it.

@@ -1,14 +1,14 @@
-# A workz pipeline template: each step once, and the samples it runs for.
-# `workz prepare` writes the explicit workflow.toml from it, one rule per
+# A kanit pipeline template: each step once, and the samples it runs for.
+# `kanit prepare` writes the explicit workflow.toml from it, one rule per
 # sample for a step with `for_each = "sample"`; run and inspect that file as
 # any workflow.
 #
-#   workz prepare                     writes workflow.toml
-#   workz prepare --check             the rules an edit would add, remove or change
-#   workz graph --by step             the steps and what feeds them
-#   workz run
+#   kanit prepare                     writes workflow.toml
+#   kanit prepare --check             the rules an edit would add, remove or change
+#   kanit graph --by step             the steps and what feeds them
+#   kanit run
 #
-# workz keeps every attempt's output and records in .workz/ beside the
+# kanit keeps every attempt's output and records in .workz/ beside the
 # workflow; add .workz/ to the project's .gitignore.
 #
 # {name} takes a column of the sample sheet, a [params] value or {step}; in

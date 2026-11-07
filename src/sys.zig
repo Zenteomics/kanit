@@ -1,6 +1,6 @@
 //! Linux system calls used by the engine: files, identity, clocks, randomness.
 //!
-//! workz targets Linux only, so these wrappers call `std.os.linux` directly and
+//! kanit targets Linux only, so these wrappers call `std.os.linux` directly and
 //! translate the errno values the engine distinguishes into Zig errors.
 const std = @import("std");
 const linux = std.os.linux;
@@ -447,8 +447,8 @@ pub fn sha256Bytes(bytes: []const u8) Digest {
 /// after the path it was started from was replaced or deleted.
 pub const self_exe: [:0]const u8 = "/proc/self/exe";
 
-/// The executable for a child of workz to exec: its path, so the child is
-/// named workz, or `/proc/self/exe` once that path was replaced or deleted
+/// The executable for a child of kanit to exec: its path, so the child is
+/// named kanit, or `/proc/self/exe` once that path was replaced or deleted
 /// (a rebuild during a run); a child resolves the link to the running file
 /// until its execve.
 pub fn childExe(a: Allocator) ![:0]const u8 {

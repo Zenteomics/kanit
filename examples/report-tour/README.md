@@ -4,7 +4,7 @@ Two tiny text inputs and three rules demonstrate run files, quoted paths, rule l
 
 ## Run
 
-Use a built workz binary, Bash, GNU coreutils, and the systemd user manager and cgroup v2 required by an isolated run. The script uses `zig-out/bin/workz` by default; `WORKZ` can name another binary. It does not build or install anything.
+Use a built kanit binary, Bash, GNU coreutils, and the systemd user manager and cgroup v2 required by an isolated run. The script uses `zig-out/bin/kanit` by default; `WORKZ` can name another binary. It does not build or install anything.
 
 From the repository root, choose a new output directory under an existing parent:
 
@@ -38,7 +38,7 @@ The failure marker deliberately simulates a transient command failure. It is not
 
 Open `reports/completed.html` in Firefox. Try the light and dark theme controls, follow the navigation links, and hover a rule cell or timeline bar for its values. Open `reused.html` and `failed.html` beside it to compare outcomes. All three are complete local files with no scripts or remote assets.
 
-In live mode, the script prints a `workz watch -d ...` command for another terminal. It also writes `reports/live.html` near the end of the live launch, then replaces it with the completed page. The live page reloads every fifteen seconds; reload it manually to see the final result sooner. The terminal view remains the faster way to follow this short demonstration.
+In live mode, the script prints a `kanit watch -d ...` command for another terminal. It also writes `reports/live.html` near the end of the live launch, then replaces it with the completed page. The live page reloads every fifteen seconds; reload it manually to see the final result sooner. The terminal view remains the faster way to follow this short demonstration.
 
 Running rules have a steady outline, and print renders every section. CPU and memory figures remain five-second samples: changing the HTML refresh period does not change the measurements. The quick tour is too short for those charts; live mode normally records two samples, enough to show the chart but not to judge resource sizing.
 
@@ -49,4 +49,4 @@ Running rules have a steady outline, and print renders every section. CPU and me
 - `reports/`: HTML pages, launch summaries, sizing suggestions, the failure log and history.
 - `.workz/`: full launch and attempt records, including the failed attempt's partial output.
 
-You can inspect an output directory with `workz status -d DIR --history`, `workz logs -d DIR report` and `workz report -d DIR --format html`. The existing `.workz/` records and generated HTML retain the version and behavior of the binary that wrote them; use a fresh binary and new directory when checking a changed report.
+You can inspect an output directory with `kanit status -d DIR --history`, `kanit logs -d DIR report` and `kanit report -d DIR --format html`. The existing `.workz/` records and generated HTML retain the version and behavior of the binary that wrote them; use a fresh binary and new directory when checking a changed report.

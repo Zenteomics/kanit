@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Process checks for the workz binary with real child processes, cgroups and
+# Process checks for the kanit binary with real child processes, cgroups and
 # signals. Usage: validation/process.sh WORKZ_BINARY OUTPUT_DIR [SECTION...]
 # OUTPUT_DIR must not exist; every check gets its own working directory there.
 # A SECTION is the first word of a section heading below, such as reuse,
@@ -69,7 +69,7 @@ alive() { [ -d "/proc/$1" ] && ! grep -q '^State:.*Z' "/proc/$1/status" 2>/dev/n
 iso=(--max-threads 4 --max-memory 2G)
 
 # Container and service checks need rootless Podman with these local images
-# (workz never pulls); the terminal checks need tmux. Missing ones are skipped.
+# (kanit never pulls); the terminal checks need tmux. Missing ones are skipped.
 img=community.wave.seqera.io/library/coreutils_grep_gzip_lbzip2_pruned:838ba80435a629f8
 img2=community.wave.seqera.io/library/fastp:1.1.0--08aa7c5662a30d57
 star=community.wave.seqera.io/library/htslib_samtools_star_gawk:ae438e9a604351a4
@@ -108,7 +108,7 @@ check "a changed recorded output is refused" '[ $rc = 1 ] && grep -q "changed si
 check "the refused launch's summary names each changed output and its rule" 'jq -e ".status == \"refused\" and .changed_outputs == [{\"rule\": \"a\", \"path\": \"$PWD/a.txt\"}]" s5.json > /dev/null'
 "$workz" report -d . > refused.tsv 2> refused.err
 "$workz" report -d . --format html -o refused.html
-check "a report of a refused launch says why it has no attempts and which launch last ran some" 'grep -q "has no attempts; it was refused: a recorded output changed" refused.err && grep -q "the newest launch that ran attempts is .*: workz report --launch " refused.err && grep -q "class=\"sub why\">a recorded output changed" refused.html && grep -q "No attempt ran in this launch" refused.html'
+check "a report of a refused launch says why it has no attempts and which launch last ran some" 'grep -q "has no attempts; it was refused: a recorded output changed" refused.err && grep -q "the newest launch that ran attempts is .*: kanit report --launch " refused.err && grep -q "class=\"sub why\">a recorded output changed" refused.html && grep -q "No attempt ran in this launch" refused.html'
 "$workz" explain wf.toml b > explain.txt
 check "explain reports the changed input" 'grep -q "input changed: .*a.txt" explain.txt'
 "$workz" run wf.toml "${iso[@]}" -q --rerun -t a > s6.json
@@ -1037,11 +1037,11 @@ mkdir ref && head -c $((1024 * 1024)) /dev/urandom > ref/index.bin
   rule first '[]' '["w.txt"]' '"sleep 1; touch w.txt"'
   printf '[shared.ref]\npath = "ref"\n\n[[rules]]\nname = "use"\ninput = ["ref/index.bin", "w.txt"]\noutput = ["u.txt"]\nshell = "touch u.txt"\n[rules.resources]\nthreads = 1\nmemory = "64M"\nshared = ["ref"]\n'
 } > wf.toml
-cp "$workz" ./workz
-./workz run wf.toml --no-isolation --max-threads 1 --max-memory 1G -q > s.json 2> err.txt &
+cp "$workz" ./kanit
+./kanit run wf.toml --no-isolation --max-threads 1 --max-memory 1G -q > s.json 2> err.txt &
 engine=$!
 for _ in $(seq 50); do grep -qs task_started .workz/launches/*/events.jsonl && break; sleep 0.1; done
-cp ./workz ./workz.new && mv ./workz.new ./workz
+cp ./kanit ./workz.new && mv ./workz.new ./kanit
 wait $engine
 check "a launch whose binary is replaced while it runs still starts its guard and holders" '[ "$(status_of s.json completed)" = 2 ] && [ ! -s err.txt ]'
 
@@ -1194,7 +1194,7 @@ new slice
 "$workz" run wf.toml "${iso[@]}" --slice workz-validation.slice -q > s.json
 check "--slice places the run in the named slice and the summary has the engine's cost" 'jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | grep -q "/workz-validation.slice/" && jq -e ".engine_cost.cpu_s > 0 and .engine_cost.max_rss_mib > 0" s.json > /dev/null'
 
-# systemd-run execs workz in its own pid, so workz's scope needs another name.
+# systemd-run execs kanit in its own pid, so kanit's scope needs another name.
 new outer-scope
 { header outer-scope; rule a '[]' '["a.txt"]' '"touch a.txt"'; } > wf.toml
 systemd-run --user --scope -q "$workz" run wf.toml "${iso[@]}" -q > s.json 2> err.txt
@@ -1263,7 +1263,7 @@ prc=$?
 vrc=$?
 "$workz" clean -d . --keep 1 > /dev/null 2> c.err
 crc=$?
-check "a corrupt state.json stops plan, verify and clean --keep with one message" '[ $prc = 1 ] && [ $vrc = 1 ] && [ $crc = 1 ] && grep -q "state.json cannot be read: it is not a valid workz state; move it aside" p.err && cmp -s <(tail -1 p.err) <(tail -1 v.err) && grep -q "clean --keep cannot tell which launches hold recorded results" c.err'
+check "a corrupt state.json stops plan, verify and clean --keep with one message" '[ $prc = 1 ] && [ $vrc = 1 ] && [ $crc = 1 ] && grep -q "state.json cannot be read: it is not a valid kanit state; move it aside" p.err && cmp -s <(tail -1 p.err) <(tail -1 v.err) && grep -q "clean --keep cannot tell which launches hold recorded results" c.err'
 
 new prepare-check-tmp
 mkdir own-tmp
@@ -1338,7 +1338,7 @@ echo new > st.txt
 "$workz" run stale.toml "${iso[@]}" -q --input-manifest stale.json > /dev/null 2> err.txt
 rc=$?
 cd ..
-check "a stale stamp makes workz read the file and refuse changed content" '[ $rc = 1 ] && grep -q "does not match its manifest digest" stale/err.txt && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" stale/.workz/launches/*/events.jsonl > /dev/null'
+check "a stale stamp makes kanit read the file and refuse changed content" '[ $rc = 1 ] && grep -q "does not match its manifest digest" stale/err.txt && jq -e "select(.event == \"inputs_checked\") | select(.files_read == 1)" stale/.workz/launches/*/events.jsonl > /dev/null'
 "$workz" status -d stale > stale-status.json
 check "a refused launch is recorded and shown by status" 'jq -e ".status == \"refused\" and (.error | test(\"manifest\"))" stale-status.json > /dev/null'
 
@@ -1356,7 +1356,7 @@ printf '[workflow]\nname = "f"\nversion = "1"\n\n[[rules]]\nname = "x"\noutptu =
 "$workz" validate typo.toml 2> err.txt
 check "an unknown key names its line and the closest key" 'grep -q "line 7: unknown key .outptu. in a rule; did you mean .output.?" err.txt'
 { echo "written before"; "$workz" validate typo.toml; "$workz" version; } > shared.txt 2>&1
-check "output to a file other commands also write appends to it" '[ "$(head -1 shared.txt)" = "written before" ] && grep -q "unknown key .outptu." shared.txt && grep -q "^  7 | outptu" shared.txt && tail -1 shared.txt | grep -q "^workz "'
+check "output to a file other commands also write appends to it" '[ "$(head -1 shared.txt)" = "written before" ] && grep -q "unknown key .outptu." shared.txt && grep -q "^  7 | outptu" shared.txt && tail -1 shared.txt | grep -q "^kanit "'
 { header cycle; rule p '["q.txt"]' '["p.txt"]' '"true"'; rule q '["p.txt"]' '["q.txt"]' '"true"'; } > cycle.toml
 "$workz" validate cycle.toml 2> err.txt
 check "a cycle is rejected" 'grep -q "cycle" err.txt'
@@ -1383,18 +1383,18 @@ mkdir tpl && cd tpl && mkdir data && seq 3 > data/S1.txt && seq 4 > data/S2.txt
 "$workz" run "${iso[@]}" -q > s.json
 check "init --template writes a template and sample sheet that prepare and run" '[ "$(status_of s.json completed)" = 3 ] && [ "$(cat out/report.txt)" = "$(printf "3\n4")" ]'
 cd ..
-words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run workflow.toml -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
-opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz plan --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+words=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit run workflow.toml -t ""); COMP_CWORD=4; _kanit; echo "${COMPREPLY[*]}"')
+opts=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit plan --su); COMP_CWORD=2; _kanit; echo "${COMPREPLY[*]}"')
 check "bash completion offers rule names and command options" '[ "$words" = "S1__count report" ] && [ "$opts" = "--summary" ]'
-ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz control ""); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
-sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --su); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+ctl=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit control ""); COMP_CWORD=2; _kanit; echo "${COMPREPLY[*]}"')
+sug=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit report --su); COMP_CWORD=2; _kanit; echo "${COMPREPLY[*]}"')
 check "bash completion offers control commands and every report option" '[ "$ctl" = "stop retry cancel" ] && [ "$sug" = "--suggest" ]'
-ids=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz report --launch ""); COMP_CWORD=3; _workz; echo "${COMPREPLY[*]}"')
+ids=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit report --launch ""); COMP_CWORD=3; _kanit; echo "${COMPREPLY[*]}"')
 check "bash completion offers launch IDs" '[ "$ids" = "$(basename "$(last_launch)")" ]'
 "$workz" init "my flow.toml" > /dev/null && touch "zz b.txt"
-spaced=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run "my\ flow.toml" -t ""); COMP_CWORD=4; _workz; echo "${COMPREPLY[*]}"')
-files=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz run zz); COMP_CWORD=2; _workz; echo "${#COMPREPLY[@]}:${COMPREPLY[0]}"')
-params=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(workz completion bash); COMP_WORDS=(workz prepare --pa); COMP_CWORD=2; _workz; echo "${COMPREPLY[*]}"')
+spaced=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit run "my\ flow.toml" -t ""); COMP_CWORD=4; _kanit; echo "${COMPREPLY[*]}"')
+files=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit run zz); COMP_CWORD=2; _kanit; echo "${#COMPREPLY[@]}:${COMPREPLY[0]}"')
+params=$(PATH="$(dirname "$workz"):$PATH" bash -c 'source <(kanit completion bash); COMP_WORDS=(kanit prepare --pa); COMP_CWORD=2; _kanit; echo "${COMPREPLY[*]}"')
 check "bash completion keeps names with a space whole and offers prepare --params" '[ "$spaced" = "S1__count report" ] && [ "$files" = "1:zz b.txt" ] && [ "$params" = "--params" ]'
 "$workz" validate > default.txt
 rc1=$?
@@ -1412,7 +1412,7 @@ rc2=$?
 check "conflicting stream options and a bad --grace duration are refused" '[ $rc1 = 2 ] && grep -q "give --stdout or --stderr" streams.txt && [ $rc2 = 2 ] && grep -q "use a duration" grace.txt'
 "$workz" report --launch --format html 2> novalue.txt
 rc=$?
-check "an option is never taken as another option's value" '[ $rc = 2 ] && grep -q "^workz: --launch needs a value" novalue.txt'
+check "an option is never taken as another option's value" '[ $rc = 2 ] && grep -q "^kanit: --launch needs a value" novalue.txt'
 
 new command-line
 "$workz" help run > help-run.txt
@@ -1462,7 +1462,7 @@ mkdir cl && cd cl && touch afile
 "$workz" plan .. 2> dir-wf.txt; r2=$?
 "$workz" plan wf.toml -d afile 2> file-d.txt; r3=$?
 "$workz" watch --once --launch .. 2> launch-dot.txt; r4=$?
-check "an empty -d, a directory as WORKFLOW, -d naming a file and a launch ID that is a path are refused with a message" '[ $r1 = 2 ] && grep -q "^workz: -d needs a value" empty-d.txt && [ $r2 = 2 ] && grep -q "is a directory; name the workflow file in it" dir-wf.txt && [ $r3 = 2 ] && grep -q "names a file, not a directory" file-d.txt && [ $r4 = 2 ] && grep -q "use a launch ID" launch-dot.txt && ! grep -q "error:" empty-d.txt dir-wf.txt file-d.txt launch-dot.txt && [ ! -e .workz ]'
+check "an empty -d, a directory as WORKFLOW, -d naming a file and a launch ID that is a path are refused with a message" '[ $r1 = 2 ] && grep -q "^kanit: -d needs a value" empty-d.txt && [ $r2 = 2 ] && grep -q "is a directory; name the workflow file in it" dir-wf.txt && [ $r3 = 2 ] && grep -q "names a file, not a directory" file-d.txt && [ $r4 = 2 ] && grep -q "use a launch ID" launch-dot.txt && ! grep -q "error:" empty-d.txt dir-wf.txt file-d.txt launch-dot.txt && [ ! -e .workz ]'
 "$workz" plan --target=a -- wf.toml > eq.txt 2> eq.err; r1=$?
 "$workz" plan wf.toml --summary=yes 2> flag-eq.txt; r2=$?
 check "an option takes its value after =, a flag takes none, and -- ends the options" '[ $r1 = 0 ] && grep -q "^run   a " eq.txt && ! grep -q " b " eq.txt && [ $r2 = 2 ] && grep -q "summary takes no value" flag-eq.txt'
@@ -1496,7 +1496,7 @@ cp "$(last_launch)/report.html" live.html
 "$workz" control -d . stop nosuch 2> ctl.txt
 ctl_rc=$?
 wait $runner
-check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1 and (.counts | has(\"not_started\")) and .finished == null and .failures == [] and .changed_outputs == [] and .engine_key == 4 and (.engine | startswith(\"workz \"))" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
+check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1 and (.counts | has(\"not_started\")) and .finished == null and .failures == [] and .changed_outputs == [] and .engine_key == 4 and (.engine | startswith(\"kanit \"))" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
 check "watch shows the running rule with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " [KMG]iB" view.txt'
 check "a launch keeps its page, which reloads while the launch runs and stops once it ends" 'grep -q "http-equiv=\"refresh\"" live.html && grep -q "live\">running</span>" live.html && ! grep -q "http-equiv=\"refresh\"" "$(last_launch)/report.html" && grep -q "s-ok\">completed</span>" "$(last_launch)/report.html"'
 "$workz" status -d . > status.txt
@@ -1633,13 +1633,13 @@ for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "q leaves the view with status 0 and the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt && grep -q " echo " stty.txt'
 rm -f exit.txt stty.txt
 sess=w2; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-wait_for "workz .*launch" && tm send-keys -t "$sess" C-c
+wait_for "kanit .*launch" && tm send-keys -t "$sess" C-c
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "an interrupt key leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
 rm -f exit.txt stty.txt
 sess=w3; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$workz\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-wait_for "workz .*launch"
-kill -TERM "$(pgrep -P "$(tm display-message -p -t "$sess" '#{pane_pid}')" -x workz)"
+wait_for "kanit .*launch"
+kill -TERM "$(pgrep -P "$(tm display-message -p -t "$sess" '#{pane_pid}')" -x kanit)"
 for _ in $(seq 50); do [ -s exit.txt ] && break; sleep 0.1; done
 check "SIGTERM leaves the view with the terminal restored" '[ "$(cat exit.txt)" = 0 ] && grep -q " icanon" stty.txt'
 new watch-control
@@ -1688,7 +1688,7 @@ new run-tty
 } > wf.toml
 sess=r1; start -s "$sess" -x 120 -y 20 "NO_COLOR=1 \"$workz\" run wf.toml ${iso[*]} -k; echo \$? > exit.txt; sleep 30"
 for _ in $(seq 100); do [ -s exit.txt ] && break; sleep 0.1; done
-check "on a terminal run prints a failure's last error lines, the blocked rules and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "failed  *bad: exited with status 3$" && screen | grep -q "^ *| last-error-line" && screen | grep -q "blocked  *after: it needs a rule that did not complete" && screen | grep -q "^ failed  *after .* 1 completed, 0 reused, 1 failed, 1 blocked" && screen | grep -q "^ next  *workz logs bad" && ! screen | grep -q "{"'
+check "on a terminal run prints a failure's last error lines, the blocked rules and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "failed  *bad: exited with status 3$" && screen | grep -q "^ *| last-error-line" && screen | grep -q "blocked  *after: it needs a rule that did not complete" && screen | grep -q "^ failed  *after .* 1 completed, 0 reused, 1 failed, 1 blocked" && screen | grep -q "^ next  *kanit logs bad" && ! screen | grep -q "{"'
 rm -f exit.txt
 sess=r2; start -s "$sess" -x 120 -y 20 "\"$workz\" status -d .; sleep 30"
 check "on a terminal status prints the readable summary, the failure's reason with its last error line" 'wait_for "^ failures  *bad  *exited with status 3: last-error-line"'

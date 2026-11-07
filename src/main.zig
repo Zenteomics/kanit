@@ -56,14 +56,14 @@ const commands = [_]Command{
         .about =
         \\Writes a commented starter workflow to FILE (default: workflow.toml) in the
         \\current directory. With --template, writes a pipeline template instead
-        \\(default: pipeline.toml) and a samples.tsv beside it, for workz prepare. It
+        \\(default: pipeline.toml) and a samples.tsv beside it, for kanit prepare. It
         \\never overwrites a file that exists.
         ,
         .options = &.{.{ .flag = "--template", .desc = "write a pipeline template and samples.tsv instead" }},
         .examples =
-        \\workz init
-        \\workz init rnaseq.toml
-        \\workz init --template
+        \\kanit init
+        \\kanit init rnaseq.toml
+        \\kanit init --template
         ,
     },
     .{
@@ -92,10 +92,10 @@ const commands = [_]Command{
             .{ .flag = "--check", .desc = "compare with the current workflow; write nothing" },
         },
         .examples =
-        \\workz prepare
-        \\workz prepare ../pipeline/pipeline.toml --params run.toml
-        \\workz prepare --check
-        \\workz prepare rnaseq.pipeline.toml -o rnaseq.toml
+        \\kanit prepare
+        \\kanit prepare ../pipeline/pipeline.toml --params run.toml
+        \\kanit prepare --check
+        \\kanit prepare rnaseq.pipeline.toml -o rnaseq.toml
         ,
     },
     .{
@@ -110,7 +110,7 @@ const commands = [_]Command{
         \\check TOML against a schema, such as Taplo and the Even Better TOML
         \\extension, then complete keys and mark mistakes as you type.
         ,
-        .examples = "workz schema > workz.schema.json",
+        .examples = "kanit schema > kanit.schema.json",
     },
     .{
         .name = "validate",
@@ -126,8 +126,8 @@ const commands = [_]Command{
         ,
         .options = &.{.{ .flag = "--inputs", .desc = "also list inputs that exist nowhere; exit 1 if any" }},
         .examples =
-        \\workz validate workflow.toml
-        \\workz validate --inputs
+        \\kanit validate workflow.toml
+        \\kanit validate --inputs
         ,
     },
     .{
@@ -138,15 +138,15 @@ const commands = [_]Command{
         .about =
         \\Prints, for every selected rule, whether a run would run it or reuse it and
         \\why, then how many of each. Nothing runs. It exits 1 when run would refuse
-        \\the launch: a missing input, an output changed outside workz, or an input
+        \\the launch: a missing input, an output changed outside kanit, or an input
         \\that does not match --input-manifest.
         \\'dry-run' is another name for it.
         ,
         .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
-        \\workz plan workflow.toml
-        \\workz plan workflow.toml --summary
-        \\workz plan workflow.toml --rerun-rule align_s1
+        \\kanit plan workflow.toml
+        \\kanit plan workflow.toml --summary
+        \\kanit plan workflow.toml --rerun-rule align_s1
         ,
     },
     .{
@@ -161,7 +161,7 @@ const commands = [_]Command{
         \\changed.
         ,
         .options = &rerun_opts,
-        .examples = "workz explain workflow.toml align_s1",
+        .examples = "kanit explain workflow.toml align_s1",
     },
     .{
         .name = "graph",
@@ -184,10 +184,10 @@ const commands = [_]Command{
             .{ .flag = "--format FORMAT", .desc = "text, dot or json (default: text on a terminal)" },
         },
         .examples =
-        \\workz graph --layer resources --by step
-        \\workz graph --users genome
-        \\workz graph --why trim_S1:report
-        \\workz graph --focus +report --format dot > report.dot
+        \\kanit graph --layer resources --by step
+        \\kanit graph --users genome
+        \\kanit graph --why trim_S1:report
+        \\kanit graph --focus +report --format dot > report.dot
         ,
     },
     .{
@@ -222,9 +222,9 @@ const commands = [_]Command{
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
-        \\workz run workflow.toml --max-threads 16 --max-memory 60G
-        \\workz run workflow.toml --target align_s1 --keep-going
-        \\workz run workflow.toml --rerun-rule align_s1
+        \\kanit run workflow.toml --max-threads 16 --max-memory 60G
+        \\kanit run workflow.toml --target align_s1 --keep-going
+        \\kanit run workflow.toml --rerun-rule align_s1
         ,
     },
     .{
@@ -240,9 +240,9 @@ const commands = [_]Command{
         \\launch like an interrupt.
         ,
         .examples =
-        \\workz control stop align_s3
-        \\workz control retry align_s3
-        \\workz control cancel
+        \\kanit control stop align_s3
+        \\kanit control retry align_s3
+        \\kanit control cancel
         ,
     },
     .{
@@ -265,8 +265,8 @@ const commands = [_]Command{
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
-        \\workz watch
-        \\workz watch path/to/workflow.toml
+        \\kanit watch
+        \\kanit watch path/to/workflow.toml
         ,
     },
     .{
@@ -294,8 +294,8 @@ const commands = [_]Command{
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
-        \\workz status
-        \\workz status --history 5
+        \\kanit status
+        \\kanit status --history 5
         ,
     },
     .{
@@ -316,9 +316,9 @@ const commands = [_]Command{
             .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
         },
         .examples =
-        \\workz logs align_s1
-        \\workz logs align_s1 --stderr --follow
-        \\workz logs trim_s4 --attempt 1
+        \\kanit logs align_s1
+        \\kanit logs align_s1 --stderr --follow
+        \\kanit logs trim_s4 --attempt 1
         ,
     },
     .{
@@ -348,10 +348,10 @@ const commands = [_]Command{
             .{ .flag = "-o, --output FILE", .desc = "write to FILE instead of standard output" },
         },
         .examples =
-        \\workz report --bottlenecks
-        \\workz report --format html -o report.html
-        \\workz report --compare 20261026T033653.780-bb9b10ee
-        \\workz report --methods -o methods.txt
+        \\kanit report --bottlenecks
+        \\kanit report --format html -o report.html
+        \\kanit report --compare 20261026T033653.780-bb9b10ee
+        \\kanit report --methods -o methods.txt
         ,
     },
     .{
@@ -361,12 +361,12 @@ const commands = [_]Command{
         .group = .maintain,
         .about =
         \\Checks that every recorded output of the selected rules still has the
-        \\identity workz recorded. With --content it also compares the bytes with
+        \\identity kanit recorded. With --content it also compares the bytes with
         \\stored digests, and stores a digest for every output that has none. It
         \\exits 1 on a difference, or when a selected rule has no record to check.
         ,
         .options = &.{.{ .flag = "--content", .desc = "also compare and store content digests" }},
-        .examples = "workz verify workflow.toml --content",
+        .examples = "kanit verify workflow.toml --content",
     },
     .{
         .name = "clean",
@@ -387,8 +387,8 @@ const commands = [_]Command{
             .{ .flag = "--dry-run", .desc = "show what would be removed" },
         },
         .examples =
-        \\workz clean --keep 5 --dry-run
-        \\workz clean --previous --dry-run
+        \\kanit clean --keep 5 --dry-run
+        \\kanit clean --previous --dry-run
         ,
     },
     .{
@@ -399,16 +399,16 @@ const commands = [_]Command{
         .common = .none,
         .about =
         \\Prints a bash completion script for commands, options and rule names. Load it
-        \\in the current shell with: source <(workz completion bash)
+        \\in the current shell with: source <(kanit completion bash)
         ,
     },
     .{
         .name = "help",
         .args = "[COMMAND]",
-        .summary = "show help for workz or for one command",
+        .summary = "show help for kanit or for one command",
         .group = .maintain,
         .common = .none,
-        .about = "Shows the commands of workz, or the options and examples of COMMAND.",
+        .about = "Shows the commands of kanit, or the options and examples of COMMAND.",
     },
     .{
         .name = "version",
@@ -416,7 +416,7 @@ const commands = [_]Command{
         .summary = "print the version",
         .group = .maintain,
         .common = .none,
-        .about = "Prints the version of workz.",
+        .about = "Prints the version of kanit.",
     },
 };
 
@@ -463,8 +463,8 @@ fn optionNames(a: std.mem.Allocator, c: *const Command) ![]const []const u8 {
 
 /// The list of commands, grouped by job.
 fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
-    try w.print("{s}workz {s}{s} runs a prepared graph of file-producing rules on one Linux\nworkstation.\n\n", .{ s.bold(), workz.version, s.reset() });
-    try w.print("{s}usage:{s} workz <command> [options]\n", .{ s.bold(), s.reset() });
+    try w.print("{s}kanit {s}{s} runs a prepared graph of file-producing rules on one Linux\nworkstation.\n\n", .{ s.bold(), workz.version, s.reset() });
+    try w.print("{s}usage:{s} kanit <command> [options]\n", .{ s.bold(), s.reset() });
     for (group_titles, 0..) |title, gi| {
         try w.print("\n{s}{s}:{s}\n", .{ s.bold(), title, s.reset() });
         for (commands) |c| {
@@ -473,7 +473,7 @@ fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
         }
     }
     try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current\ndirectory.\n", .{default_workflow});
-    try w.print("Run '{s}workz help COMMAND{s}' for a command's usage, options and examples.\n", .{ s.bold(), s.reset() });
+    try w.print("Run '{s}kanit help COMMAND{s}' for a command's usage, options and examples.\n", .{ s.bold(), s.reset() });
 }
 
 fn writeOptions(w: *std.Io.Writer, title: []const u8, list: []const Opt, s: term.Style) !void {
@@ -484,7 +484,7 @@ fn writeOptions(w: *std.Io.Writer, title: []const u8, list: []const Opt, s: term
 
 /// The usage, options and examples of one command.
 fn writeCommandHelp(w: *std.Io.Writer, c: *const Command, s: term.Style) !void {
-    try w.print("{s}usage:{s} workz {s}{s}{s}\n\n{s}\n", .{ s.bold(), s.reset(), c.name, if (c.args.len > 0) " " else "", c.args, c.about });
+    try w.print("{s}usage:{s} kanit {s}{s}{s}\n\n{s}\n", .{ s.bold(), s.reset(), c.name, if (c.args.len > 0) " " else "", c.args, c.about });
     try writeOptions(w, "options", c.options, s);
     try writeOptions(w, "common options", switch (c.common) {
         .none => &.{},
@@ -517,8 +517,8 @@ fn unknownCommand(name: []const u8) Exit {
     for (commands, 0..) |c, i| names[i] = c.name;
     names[commands.len] = "dry-run";
     if (didYouMean(&names, name)) |hint| {
-        std.debug.print("workz: unknown command '{s}'; did you mean '{s}'?\nRun 'workz help' for the commands.\n", .{ name, hint });
-    } else std.debug.print("workz: unknown command '{s}'\nRun 'workz help' for the commands.\n", .{name});
+        std.debug.print("kanit: unknown command '{s}'; did you mean '{s}'?\nRun 'kanit help' for the commands.\n", .{ name, hint });
+    } else std.debug.print("kanit: unknown command '{s}'\nRun 'kanit help' for the commands.\n", .{name});
     return .usage;
 }
 
@@ -528,14 +528,14 @@ const Exit = enum(u8) { ok = 0, failed = 1, usage = 2, interrupted = 130, _ };
 
 /// An invalid command line or workflow: exit status 2.
 fn fail(comptime fmt: []const u8, args: anytype) Exit {
-    std.debug.print("workz: " ++ fmt ++ "\n", args);
+    std.debug.print("kanit: " ++ fmt ++ "\n", args);
     return .usage;
 }
 
 /// Nothing to show or act on, or a state that stops the command: exit
 /// status 1.
 fn failed(comptime fmt: []const u8, args: anytype) Exit {
-    std.debug.print("workz: " ++ fmt ++ "\n", args);
+    std.debug.print("kanit: " ++ fmt ++ "\n", args);
     return .failed;
 }
 
@@ -583,8 +583,8 @@ pub fn main(init: std.process.Init) !u8 {
     if (command(cmd) != null) for (rest) |arg| {
         if (eq(u8, arg, "--help") or eq(u8, arg, "-h")) return @intFromEnum(try cmdHelp(ctx, &.{cmd}));
     };
-    const code: Exit = if ((eq(u8, cmd, "version") or eq(u8, cmd, "--version")) and rest.len > 0) fail("version takes no arguments; run workz version", .{}) else if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
-        try out(init.io, "workz {s}\n", .{workz.version});
+    const code: Exit = if ((eq(u8, cmd, "version") or eq(u8, cmd, "--version")) and rest.len > 0) fail("version takes no arguments; run kanit version", .{}) else if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
+        try out(init.io, "kanit {s}\n", .{workz.version});
         break :blk .ok;
     } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "prepare")) try cmdPrepare(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
     return @intFromEnum(code);
@@ -661,16 +661,16 @@ fn unknownOption(ctx: Ctx, arg: []const u8) !Exit {
     const name = ctx.argv[1];
     const cmd = command(name) orelse return fail("unknown option '{s}'", .{arg});
     if (didYouMean(try optionNames(ctx.a, cmd), arg)) |hint| {
-        std.debug.print("workz: unknown option '{s}' for {s}; did you mean '{s}'?\n", .{ arg, cmd.name, hint });
-    } else std.debug.print("workz: unknown option '{s}' for {s}\n", .{ arg, cmd.name });
-    std.debug.print("Run 'workz help {s}' for its options.\n", .{cmd.name});
+        std.debug.print("kanit: unknown option '{s}' for {s}; did you mean '{s}'?\n", .{ arg, cmd.name, hint });
+    } else std.debug.print("kanit: unknown option '{s}' for {s}\n", .{ arg, cmd.name });
+    std.debug.print("Run 'kanit help {s}' for its options.\n", .{cmd.name});
     return .usage;
 }
 
 /// A word left after a command that takes no more than WORKFLOW.
 fn extraArgs(ctx: Ctx, common: *const Common) ?Exit {
     if (common.positional.items.len == 0) return null;
-    return fail("unexpected argument '{s}'; run 'workz help {s}' for the usage", .{ common.positional.items[0], ctx.argv[1] });
+    return fail("unexpected argument '{s}'; run 'kanit help {s}' for the usage", .{ common.positional.items[0], ctx.argv[1] });
 }
 
 /// A name `--pass-env` can pass: a letter or `_`, then letters, digits and `_`.
@@ -682,7 +682,7 @@ fn envName(name: []const u8) bool {
 
 /// An option given without the value it takes.
 fn missingValue(arg: []const u8) usize {
-    std.debug.print("workz: {s} needs a value\n", .{arg});
+    std.debug.print("kanit: {s} needs a value\n", .{arg});
     return std.math.maxInt(usize);
 }
 
@@ -706,7 +706,7 @@ fn launchValue(arg: []const u8, value: ?[]const u8, launch: *?[]const u8) usize 
 
 /// An option value that does not parse; `hint` says what is expected.
 fn invalidValue(arg: []const u8, value: []const u8, hint: []const u8) usize {
-    std.debug.print("workz: {s}: invalid value '{s}' ({s})\n", .{ arg, value, hint });
+    std.debug.print("kanit: {s}: invalid value '{s}' ({s})\n", .{ arg, value, hint });
     return std.math.maxInt(usize);
 }
 
@@ -733,20 +733,20 @@ fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
     if (common.workflow) |w| {
         const id = (try sys.stat(c.gpa, w)) orelse {
             if (common.workdir == null) {
-                std.debug.print("workz: no workflow file {s}; -d DIR names a working directory\n", .{w});
+                std.debug.print("kanit: no workflow file {s}; -d DIR names a working directory\n", .{w});
                 return null;
             }
             return try workdirOf(c, here, common.workdir.?);
         };
         if (id.isDir()) {
-            std.debug.print("workz: {s} is a directory; name the workflow file in it, or give -d {s} to work there\n", .{ w, w });
+            std.debug.print("kanit: {s} is a directory; name the workflow file in it, or give -d {s} to work there\n", .{ w, w });
             return null;
         }
     }
     if (common.workdir) |d| return try workdirOf(c, here, d);
     const given = if (common.workflow) |w| std.fs.path.dirname(try sys.absolute(c.a, here, w)) orelse "/" else here;
     return (try sys.realpath(c.a, given)) orelse {
-        std.debug.print("workz: working directory does not exist: {s}\n", .{given});
+        std.debug.print("kanit: working directory does not exist: {s}\n", .{given});
         return null;
     };
 }
@@ -755,11 +755,11 @@ fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
 fn workdirOf(c: Ctx, here: []const u8, dir: []const u8) !?[]const u8 {
     const given = try sys.absolute(c.a, here, dir);
     const real = (try sys.realpath(c.a, given)) orelse {
-        std.debug.print("workz: working directory does not exist: {s}\n", .{given});
+        std.debug.print("kanit: working directory does not exist: {s}\n", .{given});
         return null;
     };
     if (!((try sys.stat(c.gpa, real)) orelse return null).isDir()) {
-        std.debug.print("workz: -d names a file, not a directory: {s}\n", .{given});
+        std.debug.print("kanit: -d names a file, not a directory: {s}\n", .{given});
         return null;
     }
     return real;
@@ -780,9 +780,9 @@ fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
 /// under their count, then the source line of the first.
 fn printProblems(c: Ctx, wpath: []const u8, wf_abs: []const u8, problem: workflow.Problem) void {
     if (problem.count <= 1) {
-        std.debug.print("workz: {s}: {s}\n", .{ wpath, problem.message });
+        std.debug.print("kanit: {s}: {s}\n", .{ wpath, problem.message });
     } else {
-        std.debug.print("workz: {s}: {d} problems\n", .{ wpath, problem.count });
+        std.debug.print("kanit: {s}: {d} problems\n", .{ wpath, problem.count });
         var lines = std.mem.splitScalar(u8, problem.message, '\n');
         while (lines.next()) |line| std.debug.print("  {s}\n", .{line});
         if (problem.count > workflow.Problem.max_listed) std.debug.print("  and {d} more\n", .{problem.count - workflow.Problem.max_listed});
@@ -794,7 +794,7 @@ fn printProblems(c: Ctx, wpath: []const u8, wf_abs: []const u8, problem: workflo
 fn load(c: Ctx, common: *const Common) !?Loaded {
     const wpath = common.workflow orelse default: {
         if (sys.exists(c.gpa, default_workflow)) break :default default_workflow;
-        std.debug.print("workz: no workflow file given, and no {s} in this directory\n", .{default_workflow});
+        std.debug.print("kanit: no workflow file given, and no {s} in this directory\n", .{default_workflow});
         return null;
     };
     const root = (try rootOf(c, common)) orelse return null;
@@ -825,8 +825,8 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
             var names: std.ArrayList([]const u8) = .empty;
             for (wf.rules) |r| try names.append(c.a, r.name);
             if (workflow.closest(names.items, unknown.?)) |hint| {
-                std.debug.print("workz: unknown target '{s}'; did you mean '{s}'?\n", .{ unknown.?, hint });
-            } else std.debug.print("workz: unknown target '{s}': no rule of {s} has that name\n", .{ unknown.?, wpath });
+                std.debug.print("kanit: unknown target '{s}'; did you mean '{s}'?\n", .{ unknown.?, hint });
+            } else std.debug.print("kanit: unknown target '{s}': no rule of {s} has that name\n", .{ unknown.?, wpath });
             g.deinit();
             wf.deinit();
             return null;
@@ -1017,7 +1017,7 @@ fn checkPlanManifest(c: Ctx, st: *state.State, ids: *state.Identities, manifest:
 /// each rule only once it ends.
 fn noteLiveLaunch(c: Ctx, root: []const u8) !void {
     const rec = try workz.records.recordsDir(c.a, root);
-    if (workz.records.running(c.gpa, rec)) std.debug.print("workz: a launch is running in {s}; rules it has not finished show their earlier records\n", .{root});
+    if (workz.records.running(c.gpa, rec)) std.debug.print("kanit: a launch is running in {s}; rules it has not finished show their earlier records\n", .{root});
 }
 
 fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pass: []const []const u8) !plan.Context {
@@ -1069,11 +1069,11 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     };
     if (missing + changed > 0) {
         refused += missing + changed;
-        std.debug.print("workz: run would refuse this launch: {d} {s} with a missing input, {d} with an output changed outside workz\n", .{ missing, if (missing == 1) "rule" else "rules", changed });
+        std.debug.print("kanit: run would refuse this launch: {d} {s} with a missing input, {d} with an output changed outside kanit\n", .{ missing, if (missing == 1) "rule" else "rules", changed });
     }
     if (!manifest_ok) {
         refused += 1;
-        std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
+        std.debug.print("kanit: run would refuse this launch: inputs do not match the input manifest\n", .{});
     }
     if (budget) {
         const runs = try c.a.alloc(bool, l.wf.rules.len);
@@ -1119,7 +1119,7 @@ fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
     ctx.rerun = rerun;
     ctx.rerun_rules = reruns.items;
     if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
-    if (!((try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage)) std.debug.print("workz: run would refuse this launch: inputs do not match the input manifest\n", .{});
+    if (!((try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage)) std.debug.print("kanit: run would refuse this launch: inputs do not match the input manifest\n", .{});
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const found = plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]) catch |err| return unreadable(err, &ids);
@@ -1188,8 +1188,8 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     if (!ok) return fail("control needs: stop RULE, retry RULE, or cancel", .{});
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
-    const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
-    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; workz run starts another", .{dir});
+    const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; kanit run starts one", .{rec});
+    if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; kanit run starts another", .{dir});
     if (!workz.records.launchActive(c.gpa, dir)) return failed("the newest launch did not finish, and no engine runs it: {s}; its engine ended without recording its end", .{dir});
     var tr = try workz.tracker.Tracker.init(c.gpa, dir);
     defer tr.deinit();
@@ -1230,13 +1230,13 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
         for ([_][]const u8{ path, sheet }) |p| if (sys.exists(c.gpa, p)) return fail("{s} exists; init does not overwrite", .{p});
         sys.writeFile(c.gpa, path, starter_pipeline) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
         sys.writeFile(c.gpa, sheet, "sample\treads\nS1\tdata/S1.txt\nS2\tdata/S2.txt\n") catch |err| return failed("cannot write {s}: {s}", .{ sheet, sys.errorText(err) });
-        try out(c.io, "wrote {s} and {s}; its steps read data/S1.txt and data/S2.txt, which it does not create. Edit them, then: workz prepare\n", .{ path, sheet });
+        try out(c.io, "wrote {s} and {s}; its steps read data/S1.txt and data/S2.txt, which it does not create. Edit them, then: kanit prepare\n", .{ path, sheet });
         return .ok;
     }
     const path = file orelse default_workflow;
     if (sys.exists(c.gpa, path)) return fail("{s} exists; init does not overwrite", .{path});
     sys.writeFile(c.gpa, path, starter_workflow) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
-    try out(c.io, "wrote {s}; its example rules read data/S1.txt, which it does not create. Edit it, then: workz validate {s}\n", .{ path, path });
+    try out(c.io, "wrote {s}; its example rules read data/S1.txt, which it does not create. Edit it, then: kanit validate {s}\n", .{ path, path });
     return .ok;
 }
 
@@ -1276,7 +1276,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     const cwd = try sys.cwd(c.a);
     const shown = template orelse "pipeline.toml";
     const path = try sys.absolute(c.a, cwd, shown);
-    if (!sys.exists(c.gpa, path)) return fail("no template {s}; a template is a pipeline file with [[steps]] (see workz help prepare)", .{shown});
+    if (!sys.exists(c.gpa, path)) return fail("no template {s}; a template is a pipeline file with [[steps]] (see kanit help prepare)", .{shown});
     const run_spec: ?workz.prepare.RunFile = if (run_file) |r| .{ .path = try sys.absolute(c.a, cwd, r), .shown = r } else null;
     if (run_spec) |r| if (!sys.exists(c.gpa, r.path)) return fail("no run file {s}", .{r.shown});
     // The workflow goes beside the run file, which belongs to the run, or else beside the template.
@@ -1288,7 +1288,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         error.Invalid => return fail("{s}", .{problem.message}),
         else => return err,
     };
-    for (problem.notes.items) |note| std.debug.print("workz: note: {s}\n", .{note});
+    for (problem.notes.items) |note| std.debug.print("kanit: note: {s}\n", .{note});
     // The prepared workflow passes the same checks as any other before it
     // replaces the current one.
     // A check leaves the directory alone: its copy goes to the temporary
@@ -1345,7 +1345,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     }
     try sys.rename(c.gpa, tmp, out_path);
     keep_tmp = true;
-    try out(c.io, "wrote {s}: {d} {s} from {d} {s}. Next: workz graph --by step, then workz plan\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps" });
+    try out(c.io, "wrote {s}: {d} {s} from {d} {s}. Next: kanit graph --by step, then kanit plan\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps" });
     return .ok;
 }
 
@@ -1353,10 +1353,10 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
 /// file is removed, as a check writes nothing; otherwise it is kept to read.
 fn notValid(c: Ctx, shown: []const u8, tmp: []const u8, check: bool, keep_tmp: *bool, problem: workflow.Problem) void {
     if (check) {
-        std.debug.print("workz: the workflow {s} prepares is not valid\n", .{shown});
+        std.debug.print("kanit: the workflow {s} prepares is not valid\n", .{shown});
     } else {
         keep_tmp.* = true;
-        std.debug.print("workz: the workflow {s} prepares is not valid; it is kept as {s} to read\n", .{ shown, tmp });
+        std.debug.print("kanit: the workflow {s} prepares is not valid; it is kept as {s} to read\n", .{ shown, tmp });
     }
     printProblems(c, if (check) "the prepared workflow" else tmp, tmp, problem);
     c.gpa.free(problem.message);
@@ -1401,7 +1401,7 @@ const LogsExtra = struct {
         if (eq(u8, arg, "--stdout") or eq(u8, arg, "--stderr")) {
             const want: @TypeOf(self.opts.stream) = if (eq(u8, arg, "--stdout")) .stdout else .stderr;
             if (self.opts.stream != .both and self.opts.stream != want) {
-                std.debug.print("workz: give --stdout or --stderr; without either, logs prints both\n", .{});
+                std.debug.print("kanit: give --stdout or --stderr; without either, logs prints both\n", .{});
                 return std.math.maxInt(usize);
             }
             self.opts.stream = want;
@@ -1483,7 +1483,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
         error.OutOfMemory => return err,
         error.CorruptState, error.UnsupportedState => {
-            std.debug.print("workz: clean --keep cannot tell which launches hold recorded results\n", .{});
+            std.debug.print("kanit: clean --keep cannot tell which launches hold recorded results\n", .{});
             return stateFailed(c, err, root);
         },
         else => return failed("cannot clean {s}: {s}", .{ root, sys.errorText(err) }),
@@ -1563,7 +1563,7 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     if (history) |n| {
         const rec = try workz.records.recordsDir(c.a, root);
-        if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}; workz run starts one", .{rec});
+        if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}; kanit run starts one", .{rec});
         var buf: [16384]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
         try monitor.history(c.gpa, &w.interface, root, n);
@@ -1589,7 +1589,7 @@ const ReportExtra = struct {
     /// rather than left to win.
     fn setFormat(self: ReportExtra, f: ReportFormat, used: usize) usize {
         if (self.format.*) |had| if (had != f) {
-            std.debug.print("workz: give one format; --json is --format json\n", .{});
+            std.debug.print("kanit: give one format; --json is --format json\n", .{});
             return std.math.maxInt(usize);
         };
         self.format.* = f;
@@ -1669,7 +1669,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     const root = (try rootOf(c, &common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (methods) {
-        if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; workz run starts one", .{rec});
+        if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; kanit run starts one", .{rec});
         const m = workz.methods.collect(c.gpa, c.a, root) catch |err| switch (err) {
             error.CorruptState, error.UnsupportedState => return stateFailed(c, err, root),
             else => return err,
@@ -1683,15 +1683,15 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
         } else try sys.writeAll(1, text.written());
         return .ok;
     }
-    const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; workz run starts one", .{rec});
+    const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; kanit run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
     // An attempt writes its record when it ends; the page shows running ones.
     if ((kind != .html or suggest) and workz.records.launchActive(c.gpa, dir))
-        std.debug.print("workz: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
+        std.debug.print("kanit: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
     if (kind == .html) if (output) |path| {
         var unread: std.ArrayList([]const u8) = .empty;
         workz.html.writeFile(c.gpa, c.a, path, dir, &unread) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
-        for (unread.items) |p| std.debug.print("workz: {s} is not valid JSON; the report leaves it out\n", .{p});
+        for (unread.items) |p| std.debug.print("kanit: {s} is not valid JSON; the report leaves it out\n", .{p});
         return if (unread.items.len > 0) .failed else .ok;
     };
     var text: std.Io.Writer.Allocating = .init(c.gpa);
@@ -1720,7 +1720,7 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
             if (rows.len == 0 and unread.items.len == 0) try noAttempts(c, rec, dir, launch == null);
         },
     }
-    for (unread.items) |p| std.debug.print("workz: {s} is not valid JSON; the report leaves it out\n", .{p});
+    for (unread.items) |p| std.debug.print("kanit: {s} is not valid JSON; the report leaves it out\n", .{p});
     const done: Exit = if (unread.items.len > 0) .failed else .ok;
     if (output) |path| {
         sys.writeFileReplace(c.gpa, path, text.written()) catch |err| return failed("cannot write {s}: {s}", .{ path, sys.errorText(err) });
@@ -1865,8 +1865,8 @@ fn closestRule(a: std.mem.Allocator, wf: *const workflow.Workflow, name: []const
 fn knownRules(a: std.mem.Allocator, wf: *const workflow.Workflow, names: []const []const u8) !bool {
     for (names) |n| if (wf.ruleIndex(n) == null) {
         if (try closestRule(a, wf, n)) |hint| {
-            std.debug.print("workz: --rerun-rule {s}: no such rule; did you mean '{s}'?\n", .{ n, hint });
-        } else std.debug.print("workz: --rerun-rule {s}: no such rule\n", .{n});
+            std.debug.print("kanit: --rerun-rule {s}: no such rule; did you mean '{s}'?\n", .{ n, hint });
+        } else std.debug.print("kanit: --rerun-rule {s}: no such rule\n", .{n});
         return false;
     };
     return true;
@@ -1905,7 +1905,7 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
         if (std.mem.indexOfScalar(u8, arg, '$') != null) break true;
     } else false;
     if (dollar) try argv.append(c.a, "--expand-environment=no");
-    // systemd-run names a scope after its own pid. When workz itself was
+    // systemd-run names a scope after its own pid. When kanit itself was
     // started by `systemd-run --scope`, that pid is ours and its scope is still
     // loaded, so the run's scope gets a name of its own.
     const unit = try std.fmt.allocPrint(c.a, "workz-{d}-{x}", .{ linux.getpid(), sys.realNs() });
@@ -2067,7 +2067,7 @@ fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
             if (workz.fields.str(v, "error")) |e| why = try std.fmt.allocPrint(c.a, "it was {s}: {s}", .{ workz.fields.str(v, "status") orelse "stopped", e });
         } else |_| {}
     } else |_| {}
-    std.debug.print("workz: launch {s} has no attempts; {s}\n", .{ id, why });
+    std.debug.print("kanit: launch {s} has no attempts; {s}\n", .{ id, why });
     if (!newest) return;
     const names = try workz.records.launchNames(c.gpa, c.a, rec);
     var k = names.len;
@@ -2076,7 +2076,7 @@ fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
         const attempts = try std.fs.path.join(c.a, &.{ rec, "launches", names[k], "attempts" });
         const inside = (try sys.dirNames(c.gpa, c.a, attempts)) orelse continue;
         if (inside.len == 0) continue;
-        std.debug.print("workz: the newest launch that ran attempts is {s}: workz report --launch {s}\n", .{ names[k], names[k] });
+        std.debug.print("kanit: the newest launch that ran attempts is {s}: kanit report --launch {s}\n", .{ names[k], names[k] });
         return;
     }
 }

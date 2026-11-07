@@ -1,4 +1,4 @@
-Every table and key workz reads in a workflow file, with its type, default and limits. The guide pages explain what each one is for; this page is for looking things up. workz reads workflow format 1.
+Every table and key kanit reads in a workflow file, with its type, default and limits. The guide pages explain what each one is for; this page is for looking things up. kanit reads workflow format 1.
 
 ## Example
 
@@ -24,7 +24,9 @@ path = "ref/bowtie2"
 [shared.genome]
 path = "ref/star"
 container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
-command = "STAR --genomeDir /data/project/ref/star --genomeLoad LoadAndExit --outFileNamePrefix /tmp/"
+# Containers see the working directory, here /data/project, at its own path.
+command = """STAR --genomeDir /data/project/ref/star --genomeLoad LoadAndExit \
+  --outFileNamePrefix /tmp/"""
 memory = "32G"
 timeout = "30m"
 retries = 1
@@ -38,7 +40,9 @@ tool = "bowtie2"
 version = "bowtie2 --version | head -1"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
-shell = "bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz | samtools view -b -o aligned/s1.bam -"
+shell = """bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome \
+  -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz \
+  | samtools view -b -o aligned/s1.bam -"""
 priority = 10
 retries = 1
 timeout = "2h"
@@ -60,7 +64,9 @@ diagnostics = ["star/s1/Log.out"]
 container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
 workdir = "star/s1"
 links = { "r1.fq.gz" = "reads/s1_1.fq.gz", "r2.fq.gz" = "reads/s1_2.fq.gz" }
-shell = "STAR --genomeDir /data/project/ref/star --genomeLoad LoadAndKeep --runThreadN $WORKZ_THREADS --readFilesCommand zcat --readFilesIn r1.fq.gz r2.fq.gz --outSAMtype BAM Unsorted"
+shell = """STAR --genomeDir /data/project/ref/star --genomeLoad LoadAndKeep \
+  --runThreadN $WORKZ_THREADS --readFilesCommand zcat \
+  --readFilesIn r1.fq.gz r2.fq.gz --outSAMtype BAM Unsorted"""
 
 [rules.resources]
 threads = 8
@@ -84,8 +90,8 @@ shared = ["genome"]
 | ---------------- | ------- | -------- | -------------------------- |
 | `name`           | string  | required | names the workflow         |
 | `version`        | string  | `""`     | your version label         |
-| `description`    | any     | none     | for readers; workz ignores |
-| `author`         | any     | none     | for readers; workz ignores |
+| `description`    | any     | none     | for readers; kanit ignores |
+| `author`         | any     | none     | for readers; kanit ignores |
 | `format_version` | integer | 1        | must be 1 when given       |
 
 ## [defaults]
@@ -172,7 +178,7 @@ An entry with `container` is a service:
 - An input that reaches another rule's output, or a directory it writes into, through a symlink is an error: declare the output's own path, so the dependency is visible.
 - An input whose `..` follows a symlink, such as `link/../file` where `link` points into another directory, is an error: the program would read another file than the path spells. Write the path without `..`.
 - `workdir` is a directory below the working directory, made before each attempt. `links` needs a `workdir`, and each link points at one of the rule's inputs; link names are plain file names.
-- `mounts` needs a `container`. Each source is also an input of the rule. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
+- `mounts` needs a `container`. Each source is also an input of the rule, a local path without `:` or `,`. Targets are absolute paths in the image other than `/`, without `..`, `:` or `,`.
 - `step`, `sample`, `category` and `tool` are UTF-8 labels of 1 to 200 characters without control characters. They are not part of the rule key, so changing one reruns nothing. [Concepts](Concepts.md#steps-samples-categories-and-tools) defines them and says how undeclared ones are derived.
 
 ## [rules.resources]
@@ -191,7 +197,7 @@ Written as a table after the rule, or inline as `resources = { ... }`:
 
 ## Pipeline templates
 
-The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; their values may name `[params]` values as `{name}`.
+The file `kanit prepare` reads ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)). `[workflow]`, `[defaults]`, `[resource_groups.NAME]` and `[shared.NAME]` are as above and are copied into the workflow; their values may name `[params]` values as `{name}`.
 
 | Table          | Key        | Type   | Meaning                                    |
 | -------------- | ---------- | ------ | ------------------------------------------ |
@@ -209,11 +215,24 @@ The file `workz prepare` reads ([Writing workflows](Writing-Workflows.md#prepare
 - In a step without `for_each`, a list element naming a column becomes one element per sample; a column anywhere else in such a step is an error.
 - An unknown `{name}` is an error except in `shell` and a service's `command`, where it stays as written; when it is a typo away from a column, param or placeholder, `prepare` prints a note naming that one. `${name}` is the shell's variable and always stays as written, also for a name `prepare` knows.
 
+### Run files
+
+The file `kanit prepare TEMPLATE --params FILE` reads beside a template, so one template serves many runs. It holds only these tables; any other is an error.
+
+| Table        | Effect on the template's table              |
+| ------------ | ------------------------------------------- |
+| `[workflow]` | each key replaces the template's key        |
+| `[params]`   | each value replaces the template's value    |
+| `[samples]`  | replaces it whole; `sheet` is beside FILE   |
+
+- Tables the run file leaves out come from the template unchanged.
+- The workflow is written beside the run file as `workflow.toml`; `-o FILE` writes FILE instead.
+
 ## What validate checks, and what it does not
 
-`workz validate` checks everything above and the graph: every key, every value, every name, unique outputs, and the absence of cycles. Some things are checked only when a launch starts, because they depend on the machine and the files, and only for the selected rules:
+`kanit validate` checks everything above and the graph: every key, every value, every name, unique outputs, and the absence of cycles. Some things are checked only when a launch starts, because they depend on the machine and the files, and only for the selected rules:
 
-- An input that no rule produces must exist; otherwise `workz run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `workz plan` shows `input missing: PATH`.
-- The path of every shared file input must exist and be readable; otherwise `workz run` refuses with `shared input NAME (PATH): ...`.
-- Every container image must be available locally; otherwise `workz run` refuses with `container image NAME is not available locally; workz does not pull images`.
-- Every rule that runs must fit the budget of the launch, while a rule that is reused needs none; otherwise `workz run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.
+- An input that no rule produces must exist; otherwise `kanit run` refuses with `missing input of rule NAME: PATH`, naming the directory input paths are relative to, and `kanit plan` shows `input missing: PATH`.
+- The path of every shared file input must exist and be readable; otherwise `kanit run` refuses with `shared input NAME (PATH): ...`.
+- Every container image must be available locally; otherwise `kanit run` refuses with `container image NAME is not available locally; kanit does not pull images`.
+- Every rule that runs must fit the budget of the launch, while a rule that is reused needs none; otherwise `kanit run` refuses with `rule NAME requests N threads; the run allows M`, or `rule NAME needs N MiB; the run allows M MiB`, which names what N includes beside the request: shared inputs, and the Podman client of a container rule.

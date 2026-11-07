@@ -1,4 +1,4 @@
-//! `workz graph`: views of the rule graph in layers. The rules layer shows
+//! `kanit graph`: views of the rule graph in layers. The rules layer shows
 //! which rules feed which; the files layer puts the files between them; the
 //! resources layer adds the shared inputs, each held once, with the rules
 //! that map or join them and the rules writing what a service loads, and

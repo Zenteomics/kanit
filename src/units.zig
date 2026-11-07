@@ -1,4 +1,4 @@
-//! How workz shows durations and sizes to people: one form everywhere, so a
+//! How kanit shows durations and sizes to people: one form everywhere, so a
 //! figure reads the same in the terminal, the text reports and the HTML
 //! page. Machine output (TSV, JSON) keeps plain numbers.
 const std = @import("std");

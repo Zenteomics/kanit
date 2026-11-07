@@ -1,4 +1,4 @@
-Everything workz writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. workz refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
+Everything kanit writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. kanit refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
 
 ## Layout
 
@@ -8,11 +8,11 @@ Everything workz writes for itself lives in `.workz/` in the working directory, 
   state.json                        resume state: the record of every completed rule
   journal                           rules started and completed, for crash recovery
   launches/
-    20261026T033653.780-bb9b10ee/   one directory per launch
+    20261107T060905.136-0b96682a/   one directory per launch
       workflow                      the workflow file as it was read
       launch.json                   options and budget
       events.jsonl                  the event stream
-      control                       commands from workz control
+      control                       commands from kanit control
       summary.json                  the result, written at the end
       report.html                   the launch as one page, drawn again while it runs
       versions.json                 the output of each tool's version command
@@ -34,7 +34,7 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 
 ## state.json
 
-`state.json` is the memory of the working directory: workz reads it at the start of every launch to decide what to reuse, and rewrites it, atomically, as rules complete. It is one line of JSON with a `format_version` and these fields:
+`state.json` is the memory of the working directory: kanit reads it at the start of every launch to decide what to reuse, and rewrites it, atomically, as rules complete. It is one line of JSON with a `format_version` and these fields:
 
 - `rules`: for each completed rule, its key and the seven parts it was made from, its outputs with their identities and digests (`path`, `id`, `sha256`), its attempt directory, finish time and wall time.
 - `files`: the last recorded identity of every input and output path, which `explain` compares against.
@@ -43,7 +43,7 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 
 Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
 
-workz reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+kanit reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
 ## Launch files
 
@@ -64,37 +64,50 @@ Written when the launch ends, if a rule that ran names a `version` command ([Wri
 
 ### summary.json
 
-Written when the launch ends, and printed by `workz run` as one line. From the demo launch in [Reports](Reports.md) (path and digest shortened, nested objects on one line):
+Written when the launch ends, and printed by `kanit run` as one line. From the demo launch in [Reports](Reports.md) (path and digest shortened):
 
 ```json
 {
   "v": 1,
-  "engine": "workz 0.6.0 sha256:...",
+  "engine": "kanit 0.7.0 sha256:...",
   "engine_key": 4,
-  "launch": "20261027T224512.478-40c9943e",
+  "launch": "20261107T060905.136-0b96682a",
   "status": "completed",
-  "counts": { "completed": 25, "reused": 0, "failed": 0, "blocked": 0, "cancelled": 0, "not_started": 0, "running": 0, "waiting": 0, "pending": 0 },
+  "counts": {
+    "completed": 25,
+    "reused": 0,
+    "failed": 0,
+    "blocked": 0,
+    "cancelled": 0,
+    "not_started": 0,
+    "running": 0,
+    "waiting": 0,
+    "pending": 0
+  },
   "selected": 25,
-  "elapsed_s": 48.368567907,
-  "finished": "2026-10-27T22:46:00.846Z",
+  "elapsed_s": 73.10328057,
+  "finished": "2026-11-07T06:10:18.239Z",
   "error": null,
-  "engine_cost": { "cpu_s": 0.111436, "max_rss_mib": 6.5546875 },
-  "launch_dir": ".../.workz/launches/20261027T224512.478-40c9943e",
+  "engine_cost": {
+    "cpu_s": 0.08044,
+    "max_rss_mib": 6.51953125
+  },
+  "launch_dir": ".../.workz/launches/20261107T060905.136-0b96682a",
   "failures": [],
   "changed_outputs": [],
   "previous_bytes": 0
 }
 ```
 
-- `status` is `completed`, `failed`, `stopped` (rules were stopped with `workz control stop` and none failed), `interrupted` or `refused`.
+- `status` is `completed`, `failed`, `stopped` (rules were stopped with `kanit control stop` and none failed), `interrupted` or `refused`.
 - `error` holds the reason a launch was refused or stopped, or `null`.
 - `engine_cost` is the CPU time and peak memory of the engine itself.
 - A refused launch counts every selected rule as `not_started`.
 - `running`, `waiting` and `pending` count only while a launch runs, in `status` off a terminal. For a launch whose engine ended without a summary, `status` prints the same fields with `"status": "unfinished"`.
 - In that running summary, `not_started` counts the rules waiting and pending, `finished`, `error` and `engine_cost` are `null`, and `failures` holds the failures so far.
 - `failures` lists each rule that failed, was blocked or was cancelled: `rule`, `status`, `reason`, and `stderr`, the path of its last attempt's standard error, or `null` when no attempt started, and `diagnostics`, the paths of the copies its last attempt kept ([Writing workflows](Writing-Workflows.md#diagnostics)).
-- `changed_outputs` lists, for a launch refused because recorded outputs changed outside workz, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
-- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/` and kept there, which stay until `workz clean --previous` removes them. Outputs put back after an attempt that did not complete are not counted.
+- `changed_outputs` lists, for a launch refused because recorded outputs changed outside kanit, each `path` and the `rule` that wrote it; `--rerun-rule` with those rules replaces them.
+- `previous_bytes` counts the bytes of earlier outputs the launch moved into `previous/` and kept there, which stay until `kanit clean --previous` removes them. Outputs put back after an attempt that did not complete are not counted.
 
 ## Attempt files
 
@@ -102,7 +115,7 @@ Written when the launch ends, and printed by `workz run` as one line. From the d
 - `request.json` holds `v`, `rule`, `attempt`, `shell`, `threads`, `memory_mib`, `groups`, `shared`, `input`, `output` and `timeout_s`.
 - `stdout.log` and `stderr.log` are the command's output.
 - `record.json` is written last, when the attempt ends. An attempt that could not start, such as one whose workdir link would replace a file, gets one too, with `started` `null`.
-- `previous/` holds the earlier outputs moved aside before the attempt ran. When the attempt does not complete, workz moves them back to their paths, so the last result stays where its record says, and moves what the attempt left there into `failed/`.
+- `previous/` holds the earlier outputs moved aside before the attempt ran. When the attempt does not complete, kanit moves them back to their paths, so the last result stays where its record says, and moves what the attempt left there into `failed/`.
 
 `record.json` fields:
 
@@ -141,8 +154,8 @@ The `cgroup` object holds:
 `events.jsonl` holds one JSON object per line, appended as things happen. Every event has `v` (1), `time` (UTC, to the millisecond) and `event`:
 
 ```json
-{"v":1,"time":"2026-10-26T03:36:53.792Z","event":"task_waiting","rule":"trim_S3","reason":"group:disk","threads":2,"memory_mib":1024}
-{"v":1,"time":"2026-10-26T03:36:56.801Z","event":"task_finished","rule":"trim_S2","attempt":1,"status":"completed","wall_s":3.007621927,"cpu_s":2.981506,"maxrss_kib":3840,"memory_peak":1712128}
+{"v":1,"time":"2026-11-07T06:09:05.146Z","event":"memory_protected","memory_low_mib":600,"ok":true}
+{"v":1,"time":"2026-11-07T06:09:15.196Z","event":"task_retry","rule":"trim_S4","next_attempt":2}
 ```
 
 Launch events:
@@ -165,7 +178,7 @@ Rule events:
 - `task_started`: `rule`, `attempt`, `pid`, `cgroup`, `directory`, `threads`, `memory_mib`, `waited_s`, `shared` (the shared inputs it holds).
 - `task_finished`: `rule`, `attempt`, `status`, `wall_s`; then `cpu_s`, `maxrss_kib` and `memory_peak` for a completed attempt, or `reason`, `exit_code` and `signal` for a failed or cancelled one. A rule cancelled before its attempt started has only `rule`, a null `attempt`, `status` `cancelled` and `reason`.
 - `task_retry`: `rule`, `next_attempt`.
-- `task_failed`: `rule`, `attempt` (null when the rule failed before an attempt started) and `reason`.
+- `task_failed`: `rule`, `attempt` and `reason`, for a rule that failed outside a `task_finished`: before an attempt started (`attempt` null, such as a missing input), while its attempt was set up, or after its attempt completed when its inputs changed during the run. A command that fails is reported by `task_finished` alone.
 - `task_blocked`, `task_reused`, `task_cancelling`: `rule`.
 - `task_timeout`: `rule`, `attempt`.
 - `output_preserved`: `rule`, `path`, `moved_to`, `bytes`.
@@ -188,18 +201,18 @@ Shared input events:
 
 ## Cleaning up
 
-Launch directories accumulate; each holds the output of every attempt. `workz clean` removes what the working directory does not need:
+Launch directories accumulate; each holds the output of every attempt. `kanit clean` removes what the working directory does not need:
 
 ```sh
-workz clean --keep 1 --dry-run
+kanit clean --keep 1 --dry-run
 ```
 
 ```text
-would remove launch 20261026T034055.329-130819e8
-would remove 0 container(s) and 1 launch(es), 0.0 MiB; kept 1 older launch(es) that hold recorded attempts
+would remove launch 20261107T060905.136-0b96682a
+would remove 0 container(s) and 1 launch(es), 0.2 MiB
 ```
 
-- Without options, `workz clean` removes only the containers earlier launches left behind.
+- Without options, `kanit clean` removes only the containers earlier launches left behind.
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to, and a launch whose engine was killed during an attempt: its `previous/` holds the only copy of that rule's earlier outputs until the next launch puts them back.
 - `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
@@ -218,5 +231,5 @@ To cite a run, in a lab notebook or a methods section, note its launch ID and ke
 - `report.html`, the launch as one page.
 - `attempts/RULE/NNN/`, each attempt's command, request, record, standard output and standard error.
 
-`workz report --methods` turns these records into a description of what produced the results ([Reports](Reports.md#methods)); give each rule a `tool` label and a `version` command so it can name them. `workz report --format json` lists every attempt's measures in one file.
+`kanit report --methods` turns these records into a description of what produced the results ([Reports](Reports.md#methods)); give each rule a `tool` label and a `version` command so it can name them. `kanit report --format json` lists every attempt's measures in one file.
 

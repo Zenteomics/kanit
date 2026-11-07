@@ -7,8 +7,8 @@ if [ "$#" -lt 1 ] || [ "$#" -gt 2 ] || { [ "$#" = 2 ] && [ "$2" != --live ]; }; 
   exit 2
 fi
 here=$(cd "$(dirname "$0")" && pwd)
-workz=$(realpath "${WORKZ:-$here/../../zig-out/bin/workz}")
-[ -x "$workz" ] || { echo "workz binary is not executable: $workz" >&2; exit 2; }
+workz=$(realpath "${WORKZ:-$here/../../zig-out/bin/kanit}")
+[ -x "$workz" ] || { echo "kanit binary is not executable: $workz" >&2; exit 2; }
 out=$(realpath -m "$1")
 if [ -e "$out" ] || [ -L "$out" ]; then
   echo "output directory already exists: $out" >&2

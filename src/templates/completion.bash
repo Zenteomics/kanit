@@ -1,6 +1,6 @@
-# bash completion for workz: source this file, or put it in
-# ~/.local/share/bash-completion/completions/workz.
-_workz() {
+# bash completion for kanit: source this file, or put it in
+# ~/.local/share/bash-completion/completions/kanit.
+_kanit() {
     local cur prev cmd wf wd i words
     cur=${COMP_WORDS[COMP_CWORD]}
     prev=${COMP_WORDS[COMP_CWORD-1]}
@@ -30,7 +30,7 @@ _workz() {
     fi
     case $prev in
         -t | --target | --rerun-rule | --focus)
-            COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
+            COMPREPLY=($(compgen -W "$(kanit __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
             return ;;
         --pass-env) COMPREPLY=($(compgen -e -- "$cur")); return ;;
         # Numbers, sizes, durations and names: nothing to offer, and never files.
@@ -76,13 +76,13 @@ _workz() {
     elif [ "$cmd" = control ] && [ ${#words[@]} = 0 ]; then
         COMPREPLY=($(compgen -W "stop retry cancel" -- "$cur"))
     elif [ "$cmd" = control ] && [ ${#words[@]} = 1 ] && [ "${words[0]}" != cancel ]; then
-        COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(kanit __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
     elif [ "$cmd" = control ]; then
         COMPREPLY=()
     elif { [ "$cmd" = explain ] || [ "$cmd" = logs ]; } && [ ${#words[@]} = 0 ]; then
         # The rule, of the workflow named or of workflow.toml; a workflow
         # file may come first.
-        COMPREPLY=($(compgen -W "$(workz __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
+        COMPREPLY=($(compgen -W "$(kanit __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
         if [ -z "$wf" ]; then
             compopt -o filenames 2> /dev/null
             mapfile -t -O "${#COMPREPLY[@]}" COMPREPLY < <(compgen -f -X "!*.toml" -- "$cur")
@@ -94,4 +94,4 @@ _workz() {
         mapfile -t COMPREPLY < <(compgen -f -- "$cur")
     fi
 }
-complete -F _workz workz
+complete -F _kanit kanit

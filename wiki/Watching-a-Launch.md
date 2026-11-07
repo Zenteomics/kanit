@@ -1,10 +1,10 @@
-While a launch runs, and after it ends, three commands show it: `watch` for the live view, `status` for its summary, and `logs` for a rule's output. They read only the records in `.workz/`, so they work from any terminal and never slow the launch down.
+While a launch runs, and after it ends, three commands show it: `watch` for the live view, `status` for its summary, and `logs` for a rule's output. They read the records in `.workz/` from a separate process. Reading and drawing still use CPU, memory and I/O shared with the launch.
 
 ## The live view
 
-Run `workz watch` in the working directory, or `workz watch path/to/workflow.toml` from elsewhere, while `workz run` works in another terminal:
+Run `kanit watch` in the working directory, or `kanit watch path/to/workflow.toml` from elsewhere, while `kanit run` works in another terminal:
 
-![The workz watch view of a launch 15 seconds in: a progress bar at 7 of 25 rules done, gauges for 10 of 10 threads reserved and 4.6 of 6.0 GiB of memory, a shared genome index holding 602 MiB, and a table with four running rules first, each with its CPU use and a memory bar against its request.](images/watch.png)
+![The kanit watch view of a launch 15 seconds in: a progress bar at 6 of 25 rules done, gauges for 6 of 6 threads reserved and 2.2 of 6.0 GiB of memory, a shared genome index holding 602 MiB, and a table with three running rules first, each with its CPU use and a memory bar against its request, then the rules waiting for threads.](images/watch.png)
 
 The header holds four gauges:
 
@@ -38,76 +38,75 @@ On a narrow terminal the memory bar goes first, then the CPU column, then the me
 - <kbd>a</kbd> shows all rules, <kbd>r</kbd> running and retrying ones, <kbd>w</kbd> waiting and pending ones, <kbd>f</kbd> failed, blocked and cancelled ones, and <kbd>d</kbd> done ones.
 - <kbd>/</kbd> searches rule names; <kbd>Enter</kbd> keeps the search and <kbd>Esc</kbd> clears it.
 - <kbd>s</kbd> cycles the order: status, elapsed time, peak memory, name.
-- <kbd>S</kbd> stops the selected rule and <kbd>R</kbd> retries it, as [`workz control`](Running-Workflows.md#steering-a-running-launch) does. <kbd>X</kbd> cancels the launch when pressed a second time within 3 s.
+- <kbd>S</kbd> stops the selected rule and <kbd>R</kbd> retries it, as [`kanit control`](Running-Workflows.md#steering-a-running-launch) does. <kbd>X</kbd> cancels the launch when pressed a second time within 3 s.
 - <kbd>q</kbd> or <kbd>Esc</kbd> goes back, or leaves from the table; <kbd>h</kbd> or the left arrow goes back to the table; <kbd>Ctrl</kbd>+<kbd>C</kbd> leaves.
 
 ### Timeline
 
 <kbd>t</kbd> draws every rule on one time axis, with ticks such as `30s`, `1m` and `1m30s`. A dotted stretch is the time a rule waited to start; then a bar shows its run, green when it completed, cyan while it runs, red where it failed and magenta where it was cancelled. Without colors the bar is drawn with `=`, `>`, `!` and `x`.
 
-![The timeline of the same launch after it ended: qc rules wait while align rules with a higher priority run, and each count rule follows its alignment.](images/watch-timeline.png)
+![The timeline of the same launch after it ended: the qc and trim rules run first, each align rule waits for three free threads, and each count rule follows its alignment.](images/watch-timeline.png)
 
-Here the align rules, with `priority = 10`, start as soon as their trim is done, while the qc rules wait for threads until the alignments finish. The critical path ran through `trim_S5`, `align_S5` and `count_S5` to `report`.
+Here the qc and trim rules, which need one or two threads, run first. Each align rule, with `priority = 10`, starts before any other ready rule once three threads are free, so the alignments wait for threads while smaller rules fill the gaps. The critical path ran through `trim_S5`, `align_S5` and `count_S5` to `report`.
 
 ### Off a terminal
 
-When its output is not a terminal, `watch` prints a plain view of the running rules instead, again at every refresh until the launch ends; `--once` prints it once:
+When its output is not a terminal, `watch` prints a plain view of the running rules instead, again at every refresh until the launch ends; `--once` prints it once (one long last output shortened):
 
 ```text
-launch 20261027T225229.160-ba6a63f2  running for 19.0 s
-25 selected: 7 pending, 6 waiting, 4 running, 8 completed, 8 done
+launch 20261107T060905.136-0b96682a  running for 19.0 s
+25 selected: 8 pending, 4 waiting, 3 running, 10 completed, 10 done
 shared genome: ready
 
 RUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT
-align_S1                                       1    14.0 s   203 MiB   403 MiB  Mapping reads: 3 threads
-align_S2                                       1    15.8 s   203 MiB   402 MiB  Mapping reads: 3 threads
-qc_S3                                          1     1.9 s   0.9 MiB   1.4 MiB  Started analysis of S3.fq
-align_S3                                       1     5.9 s   203 MiB   403 MiB  Mapping reads: 3 threads
+align_S2                                       1    15.8 s   203 MiB   403 MiB  Mapping reads: 3 threads
+trim_S4                                        2     0.9 s   1.1 MiB   1.6 MiB  Read1 before filterin...
+qc_S6                                          1     0.9 s   1.4 MiB   1.6 MiB  Started analysis of S6.fq
 ```
 
 - The second line counts the selected rules in each state; `done` adds the completed and reused ones.
 - Failed rules follow under `FAILED`, each with its reason and the path of its standard error; once the launch has ended, the view drops the running table.
 - `--interval MS` sets the refresh period (default 1000 ms, at least 100), and `--launch ID` shows an earlier launch instead of the newest.
-- A launch whose engine was killed never records its end, so the repeating view does not stop by itself; `watch --once` and `status` show such a launch.
-- Each refresh reads only the events added since the last one, so watching a launch of thousands of rules costs little.
+- If the engine ends without a final summary, the plain repeating view reports the unfinished launch and exits with failure. The interactive view marks it unfinished.
+- The tracker reads newly appended events between refreshes; drawing the task table and reading resource counters and log tails still take work.
 
 ## status
 
-`workz status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `workz run` ends with: the outcome and counts, each failed rule with its reason, which quotes the last line of its error output, the launch's page, and the commands to look further:
+`kanit status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `kanit run` ends with: the outcome and counts, each failed rule with its reason, which quotes the last line of its error output, the launch's page, and the commands to look further:
 
 ```text
   failed   after 3.0 s: 2 completed, 0 reused, 1 failed, 1 blocked
  failures  align_S1  exited with status 3: align: reference index is truncated
- page      .workz/launches/20261027T225300.744-8ac4d839/report.html
- next      workz logs align_S1   the output of the failed attempt
+ blocked   count_S1
+ page      .workz/launches/20261107T060918.810-57b00e74/report.html
+ next      kanit logs align_S1   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```
 
 A launch that completed lists its three slowest rules instead of failures. Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written.
 
-While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state:
+While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
 
 ```json
-{"engine":"workz 0.6.0 sha256:...","engine_key":4,"launch":"20261027T225229.160-ba6a63f2","status":"running","counts":{"completed":8,"reused":0,"failed":0,"blocked":0,"cancelled":0,"not_started":13,"running":4,"waiting":6,"pending":7},"selected":25,"elapsed_s":18.978690066,"finished":null,"error":null,"engine_cost":null,"launch_dir":"/home/me/rnaseq/.workz/launches/20261027T225229.160-ba6a63f2","failures":[],"changed_outputs":[],"previous_bytes":0}
+{"engine":"kanit 0.7.0 sha256:...",...,"status":"running","counts":{"completed":10,...},...}
 ```
 
-`workz status --history [N]` prints one line for each of the last N launches (default 10), newest first:
+`kanit status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 
 ```text
 LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
-20261027T225424.351-a2f4b4e8    completed       48.2 s    25       0          0
-20261027T225335.359-36b6dba2    completed       49.0 s    25       0          0
-20261027T225229.160-ba6a63f2    completed       48.4 s    25       0          0
+20261107T061157.192-d1b5ca16    completed       1m 00s    25       0          0
+20261107T060905.136-0b96682a    completed       1m 13s    25       0          0
 ```
 
 `DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `CANCELLED` the rules it stopped or never started. A launch that ended with an error shows it at the end of its line. The newest launch shows `running` while a run holds the working directory's lock; a launch whose engine ended without recording its end, as when killed, shows `unfinished`.
 
 ## logs
 
-`workz logs RULE` prints the standard output and error of the rule's newest attempt: in the newest launch that ran the rule, or else the attempt recorded for it. Here, the first attempt of a rule that failed once and then succeeded:
+`kanit logs RULE` prints the standard output and error of the rule's newest attempt: in the newest launch that ran the rule, or else the attempt recorded for it. Here, the first attempt of a rule that failed once and then succeeded:
 
 ```sh
-workz logs trim_S4 --attempt 1
+kanit logs trim_S4 --attempt 1
 ```
 
 ```text

@@ -113,7 +113,7 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     try w.print(" {d} done\n", .{t.count(.completed) + t.count(.reused)});
     for (t.shared.items) |s| try w.print("shared {s}: {s}\n", .{ s.name, s.state });
 
-    // An ended launch has nothing running; its summary is `workz status`.
+    // An ended launch has nothing running; its summary is `kanit status`.
     if (!t.finished and alive) {
         try w.writeAll("\nRUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT\n");
         var shown: usize = 0;
@@ -164,11 +164,11 @@ pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]con
     if (launch) |id| {
         const dir = try std.fs.path.join(a, &.{ rec, "launches", id });
         if (sys.exists(gpa, dir)) return dir;
-        std.debug.print("workz: no launch {s} recorded in {s}\n", .{ id, rec });
+        std.debug.print("kanit: no launch {s} recorded in {s}\n", .{ id, rec });
         return null;
     }
     return (try records.latestLaunch(gpa, a, rec)) orelse {
-        std.debug.print("workz: no launch recorded in {s}; workz run starts one\n", .{rec});
+        std.debug.print("kanit: no launch recorded in {s}; kanit run starts one\n", .{rec});
         return null;
     };
 }
@@ -193,7 +193,7 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
         try render(gpa, &out.interface, &tr, sys.realNs(), alive);
         try out.interface.flush();
         if (!alive) {
-            std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
+            std.debug.print("kanit: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
             return false;
         }
         if (once or tr.finished) return true;
@@ -355,7 +355,7 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     }
     if (failures > shown) {
         try label(w, s, col, "");
-        try w.print("and {d} more; workz report lists every attempt\n", .{failures - shown});
+        try w.print("and {d} more; kanit report lists every attempt\n", .{failures - shown});
     }
     // A blocked rule never ran, so it has no attempt: the summary names it.
     var blocked_names: std.ArrayList([]const u8) = .empty;
@@ -390,17 +390,17 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     if (int(v, "previous_bytes")) |b| if (b > 0 and try keepsPrevious(gpa, a, launch_dir)) {
         try label(w, s, col, "previous");
         try units.size(w, @as(f64, @floatFromInt(b)) / 1048576.0);
-        try w.print(" of replaced outputs kept; {s}workz clean --previous{s} removes them\n", .{ s.cyan(), s.reset() });
+        try w.print(" of replaced outputs kept; {s}kanit clean --previous{s} removes them\n", .{ s.cyan(), s.reset() });
     };
     try label(w, s, col, "next");
     if (std.mem.eql(u8, outcome, "completed")) {
-        try w.print("{s}workz report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
+        try w.print("{s}kanit report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
         if (!has_page) {
             try label(w, s, col, "");
-            try w.print("{s}workz report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
+            try w.print("{s}kanit report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
         }
     } else if (std.mem.eql(u8, outcome, "refused")) {
-        // Outputs changed outside workz: the command that reruns their rules.
+        // Outputs changed outside kanit: the command that reruns their rules.
         var rules: std.ArrayList([]const u8) = .empty;
         if (get(v, "changed_outputs")) |cs| if (cs == .array) for (cs.array.items) |c| {
             const rule = str(c, "rule") orelse continue;
@@ -409,14 +409,14 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             } else try rules.append(a, rule);
         };
         if (rules.items.len > 0) {
-            try w.print("{s}workz run", .{s.cyan()});
+            try w.print("{s}kanit run", .{s.cyan()});
             if (try workflowArg(gpa, a, launch_dir)) |wf| try w.print(" {s}", .{wf});
             for (rules.items) |r| try w.print(" --rerun-rule {s}", .{r});
             try w.print("{s}   run {s} again; the changed bytes go to previous/\n", .{ s.reset(), if (rules.items.len == 1) "it" else "them" });
         } else try w.writeAll("fix the cause above and run the same command again\n");
     } else {
         for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
-            try w.print("{s}workz logs {s}{s}   the output of the failed attempt\n", .{ s.cyan(), r.rule, s.reset() });
+            try w.print("{s}kanit logs {s}{s}   the output of the failed attempt\n", .{ s.cyan(), r.rule, s.reset() });
             try label(w, s, col, "");
             break;
         };
@@ -437,7 +437,7 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
             // The view says itself when the launch did not finish.
             if (human) return try watch(gpa, io, dir, true, 1000, color);
             const active = records.launchActive(gpa, dir);
-            if (!active) std.debug.print("workz: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
+            if (!active) std.debug.print("kanit: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
             return try runningJson(gpa, dir, if (active) "running" else "unfinished") and active;
         },
         else => return err,
@@ -447,7 +447,7 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     _ = std.json.parseFromSliceLeaky(std.json.Value, a, summary, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
-            std.debug.print("workz: {s}/summary.json is not valid JSON, so the launch's result cannot be shown; its events and attempt records remain\n", .{dir});
+            std.debug.print("kanit: {s}/summary.json is not valid JSON, so the launch's result cannot be shown; its events and attempt records remain\n", .{dir});
             return false;
         },
     };

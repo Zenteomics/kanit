@@ -119,8 +119,8 @@ pub fn loadRecorded(gpa: Allocator, a: Allocator, rec: []const u8) !State {
 /// `load` error; null for any other error.
 pub fn loadErrorText(a: Allocator, err: anyerror, path: []const u8) !?[]const u8 {
     return switch (err) {
-        error.CorruptState => try std.fmt.allocPrint(a, "{s} cannot be read: it is not a valid workz state; move it aside, and the next launch runs every rule", .{path}),
-        error.UnsupportedState => try std.fmt.allocPrint(a, "{s} has a format version this workz cannot read; use the workz that wrote it, or move it aside, and the next launch runs every rule", .{path}),
+        error.CorruptState => try std.fmt.allocPrint(a, "{s} cannot be read: it is not a valid kanit state; move it aside, and the next launch runs every rule", .{path}),
+        error.UnsupportedState => try std.fmt.allocPrint(a, "{s} has a format version this kanit cannot read; use the kanit that wrote it, or move it aside, and the next launch runs every rule", .{path}),
         else => null,
     };
 }

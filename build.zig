@@ -1,4 +1,4 @@
-//! Builds the workz executable and its unit tests.
+//! Builds the kanit executable and its unit tests.
 const std = @import("std");
 
 pub fn build(b: *std.Build) void {
@@ -17,7 +17,7 @@ pub fn build(b: *std.Build) void {
     workz.addImport("toml", toml);
 
     const exe = b.addExecutable(.{
-        .name = "workz",
+        .name = "kanit",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -28,12 +28,12 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("workz", workz);
     b.installArtifact(exe);
     // The licence, and the notice of z-toml, which the binary links, ship with it.
-    b.installFile("LICENSE", "share/doc/workz/LICENSE");
-    b.installFile("THIRD_PARTY.md", "share/doc/workz/THIRD_PARTY.md");
+    b.installFile("LICENSE", "share/doc/kanit/LICENSE");
+    b.installFile("THIRD_PARTY.md", "share/doc/kanit/THIRD_PARTY.md");
 
     const run = b.addRunArtifact(exe);
     if (b.args) |args| run.addArgs(args);
-    b.step("run", "Run workz").dependOn(&run.step);
+    b.step("run", "Run kanit").dependOn(&run.step);
 
     const tests = b.addTest(.{
         .root_module = b.createModule(.{
