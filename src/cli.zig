@@ -160,7 +160,7 @@ pub const commands = [_]Command{
         \\changed.
         ,
         .options = &rerun_opts,
-        .examples = "kanit explain workflow.toml align_s1",
+        .examples = "kanit explain workflow.toml align/S1",
     },
     .{
         .name = "graph",
@@ -239,7 +239,7 @@ pub const commands = [_]Command{
         \\launch like an interrupt.
         ,
         .examples =
-        \\kanit control stop align_s3
+        \\kanit control stop align/S3
         \\kanit control retry align_s3
         \\kanit control cancel
         ,
@@ -315,7 +315,7 @@ pub const commands = [_]Command{
             .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
         },
         .examples =
-        \\kanit logs align_s1
+        \\kanit logs align/S1
         \\kanit logs align_s1 --stderr --follow
         \\kanit logs trim_s4 --attempt 1
         ,
@@ -466,7 +466,7 @@ pub fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
             try w.print("  {s}{s:<12}{s}{s}\n", .{ s.cyan(), c.name, s.reset(), c.summary });
         }
     }
-    try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current\ndirectory.\n", .{default_workflow});
+    try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current\ndirectory. RULE is a rule's name, or its step and sample as STEP/SAMPLE,\nsuch as align/S2 for the rule S2__align.\n", .{default_workflow});
     try w.print("Run '{s}kanit help COMMAND{s}' for a command's usage, options and examples.\n", .{ s.bold(), s.reset() });
 }
 
@@ -610,8 +610,8 @@ pub const Parser = struct {
         return p.fail("{s}{s}: no such rule", .{ prefix, name });
     }
 
-    pub fn knownRules(p: Parser, wf: *const workflow.Workflow, names: []const []const u8) !?Exit {
-        for (names) |n| if (wf.ruleIndex(n) == null) return try p.unknownRule(wf, "--rerun-rule ", n);
+    pub fn knownRules(p: Parser, wf: *const workflow.Workflow, names: [][]const u8) !?Exit {
+        for (names) |*n| n.* = wf.rules[wf.findRule(n.*) orelse return try p.unknownRule(wf, "--rerun-rule ", n.*)].name;
         return null;
     }
 };

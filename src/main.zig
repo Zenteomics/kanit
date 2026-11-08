@@ -243,10 +243,10 @@ fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const v = workz.views.build(c.a, &l.wf, &l.g, l.mask, opts) catch |err| switch (err) {
-        error.UnknownRule => return fail("no rule named {s} in {s}", .{ if (opts.focus) |f| f.rule else if (opts.why) |p| if (l.wf.ruleIndex(p[0]) == null) p[0] else p[1] else "?", l.wf.path }),
+        error.UnknownRule => return fail("no rule named {s} in {s}", .{ if (opts.focus) |f| f.rule else if (opts.why) |p| if (l.wf.findRule(p[0]) == null) p[0] else p[1] else "?", l.wf.path }),
         error.UnknownShared => return fail("no shared input named {s} in {s}", .{ opts.users.?, l.wf.path }),
         error.NoPath => return failed("{s} does not lead to {s}: no rule between them reads what the one before writes", .{ opts.why.?[0], opts.why.?[1] }),
-        error.NotSelected => return fail("{s} is not among the rules --target selects", .{if (!l.mask[l.wf.ruleIndex(opts.why.?[0]).?]) opts.why.?[0] else opts.why.?[1]}),
+        error.NotSelected => return fail("{s} is not among the rules --target selects", .{if (!l.mask[l.wf.findRule(opts.why.?[0]).?]) opts.why.?[0] else opts.why.?[1]}),
         else => return err,
     };
     switch (kind) {
@@ -392,8 +392,9 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     defer tr.deinit();
     _ = try tr.update();
     if (tr.ending) return failed("the newest launch is ending and applies no more commands: {s}", .{dir});
-    if (ca.rule) |name| if (!tr.index.contains(name)) return failed("rule {s} is not part of the running launch", .{name});
-    const line = if (ca.rule) |name| try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ ca.verb, name }) else "cancel\n";
+    const rule: ?[]const u8 = if (ca.rule) |token| workz.names.resolve(c.gpa, c.a, dir, token) orelse token else null;
+    if (rule) |name| if (!tr.index.contains(name)) return failed("rule {s} is not part of the running launch", .{ca.rule.?});
+    const line = if (rule) |name| try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ ca.verb, name }) else "cancel\n";
     const fd = try sys.openWrite(c.gpa, try std.fs.path.join(c.a, &.{ dir, "control" }), .append);
     defer sys.close(fd);
     try sys.writeAll(fd, line);
@@ -537,7 +538,11 @@ fn cmdRules(c: Ctx, args: []const [:0]const u8) !Exit {
     defer wf.deinit();
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    for (wf.rules) |r| try w.interface.print("{s}\n", .{r.name});
+    const n = try workz.names.Names.init(c.a, wf.rules);
+    for (wf.rules, n.word) |r, word| {
+        try w.interface.print("{s}\n", .{r.name});
+        if (!std.mem.eql(u8, word, r.name)) try w.interface.print("{s}\n", .{word});
+    }
     try w.interface.flush();
     return .ok;
 }
@@ -546,10 +551,11 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     var la: cli.Logs = .{};
     if (try la.parse(c.parser(), args)) |e| return e;
     const opts = la.opts;
-    const rule = la.rule;
     const root = (try rootOf(c, &la.common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (opts.launch) |id| if (!sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ rec, "launches", id }))) return failed("no launch {s} recorded in {s}", .{ id, rec });
+    const named = if (opts.launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else try workz.records.latestLaunch(c.gpa, c.a, rec);
+    const rule = workz.names.resolve(c.gpa, c.a, named, la.rule) orelse return failed("no rule {s} in the newest launch's workflow", .{la.rule});
     const fresh = if (opts.follow and opts.launch == null and opts.attempt == null) try workz.logs.awaitAttempt(c.gpa, c.a, root, rule) else null;
     const dir = fresh orelse (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
         if (opts.attempt) |n| return failed("no attempt {d} of rule {s} recorded in {s}", .{ n, rule, rec });
@@ -707,7 +713,7 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     var l = (try load(c, &ra.common)) orelse return .usage;
     defer l.deinit();
     if (try c.parser().applyThreads(&l.wf, ra.threads.items)) |e| return e;
-    if (try c.parser().knownRules(&l.wf, opts.rerun_rules)) |e| return e;
+    if (try c.parser().knownRules(&l.wf, ra.reruns.items)) |e| return e;
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
         .ok => .ok,

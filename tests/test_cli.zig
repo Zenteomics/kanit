@@ -353,8 +353,10 @@ test "[failure] - [command line]: thread overrides and rerun rules are checked a
     try testing.expectEqual(@as(?cli.Exit, null), try l.parser("run").applyThreads(&wf, &.{ "align=8", "count=2" }));
     try testing.expectEqual(@as(u32, 8), wf.rules[0].threads);
     try testing.expectEqual(@as(u32, 2), wf.rules[1].threads);
-    try testing.expectEqual(@as(?cli.Exit, null), try l.parser("run").knownRules(&wf, &.{"count_s1"}));
-    try testing.expectEqual(@as(?cli.Exit, .usage), try l.parser("run").knownRules(&wf, &.{"count_s2"}));
+    var known = [_][]const u8{"count_s1"};
+    try testing.expectEqual(@as(?cli.Exit, null), try l.parser("run").knownRules(&wf, &known));
+    var unknown = [_][]const u8{"count_s2"};
+    try testing.expectEqual(@as(?cli.Exit, .usage), try l.parser("run").knownRules(&wf, &unknown));
     try testing.expectEqualStrings("kanit: --rerun-rule count_s2: no such rule; did you mean 'count_s1'?\n", l.err.written());
 }
 

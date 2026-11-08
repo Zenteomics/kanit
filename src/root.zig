@@ -27,4 +27,5 @@ pub const schema = @import("schema.zig");
 pub const lint = @import("lint.zig");
 pub const prepare = @import("prepare.zig");
 pub const schedule = @import("schedule.zig");
+pub const names = @import("names.zig");
 pub const cli = @import("cli.zig");

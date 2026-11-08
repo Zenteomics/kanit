@@ -28,7 +28,7 @@ pub const Focus = struct {
         var first: ?Focus = null;
         for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, true } }) |use| {
             const f = reading(text, use[0], use[1]) orelse continue;
-            if (wf) |w| if (w.ruleIndex(f.rule) != null) return f;
+            if (wf) |w| if (w.findRule(f.rule) != null) return f;
             if (first == null) first = f;
         }
         return first;
@@ -104,7 +104,7 @@ pub const Error = error{ UnknownRule, UnknownShared, NoPath, NotSelected, OutOfM
 fn chosen(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, opts: Options) ![]bool {
     const sel = try a.dupe(bool, mask);
     if (opts.focus) |f| {
-        const start = wf.ruleIndex(f.rule) orelse return error.UnknownRule;
+        const start = wf.findRule(f.rule) orelse return error.UnknownRule;
         const keep = try a.alloc(bool, wf.rules.len);
         @memset(keep, false);
         keep[start] = true;
@@ -153,8 +153,8 @@ fn loads(wf: *const workflow.Workflow, g: *const graph.Graph, i: usize, si: usiz
 }
 
 pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, from: []const u8, to: []const u8) ![]const usize {
-    const s = wf.ruleIndex(from) orelse return error.UnknownRule;
-    const t = wf.ruleIndex(to) orelse return error.UnknownRule;
+    const s = wf.findRule(from) orelse return error.UnknownRule;
+    const t = wf.findRule(to) orelse return error.UnknownRule;
     if (!mask[s] or !mask[t]) return error.NotSelected;
     const prev = try a.alloc(?usize, wf.rules.len);
     @memset(prev, null);

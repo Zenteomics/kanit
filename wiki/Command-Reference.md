@@ -13,6 +13,8 @@ kanit <command> [options]
 
 WORKFLOW defaults to `workflow.toml` in the current directory, the file `kanit init` writes. The working directory is the directory of the workflow file, or `-d DIR`. Commands that only read records (`watch`, `status`, `logs`, `report`, `control`, `clean`) take the workflow path only to find that directory, and work without it from inside the working directory. `--target` applies to the commands that read the workflow.
 
+RULE, wherever a command or option takes one, is a rule's name or its step and sample as `STEP/SAMPLE`, such as `align/S2` for the rule `S2__align`. A rule has a sample when `kanit prepare` wrote it for a sample-sheet row, when its name has the form `SAMPLE__STEP`, or when it sets `sample`; a step and sample that two rules share names neither of them, so use their names. `graph --why` takes two of them: `--why trim/S1:count/S1`.
+
 An option's value is the next word, or follows `=` in the same word, as in `--launch=ID`; a word that starts with `-` or is empty is never taken as a value. After `--`, every word is the workflow or an argument, even one that starts with `-`. `-d` must name a directory, and WORKFLOW a file. `--launch ID` takes a launch ID, as `status --history` lists them, never a path.
 
 Output on a terminal uses colors unless `--no-color` is given, the environment variable `NO_COLOR` is set to a non-empty value, or `TERM` is `dumb`. Output to a file or a pipe never has colors.

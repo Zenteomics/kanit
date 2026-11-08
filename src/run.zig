@@ -1686,7 +1686,7 @@ const Engine = struct {
             self.beginStop();
             return "stopping the launch";
         }
-        const i = self.wf.ruleIndex(name) orelse return "no such rule";
+        const i = self.wf.findRule(name) orelse return "no such rule";
         const t = &self.tasks[i];
         if (eql(u8, cmd, "stop")) switch (t.status) {
             .running => {

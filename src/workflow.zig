@@ -130,6 +130,20 @@ pub const Workflow = struct {
         return null;
     }
 
+    pub fn findRule(self: *const Workflow, token: []const u8) ?usize {
+        if (self.ruleIndex(token)) |i| return i;
+        var found: ?usize = null;
+        for (self.rules, 0..) |r, i| {
+            const sample = r.labels.sample orelse continue;
+            const step = r.labels.step;
+            if (token.len != step.len + 1 + sample.len or token[step.len] != '/') continue;
+            if (!std.mem.startsWith(u8, token, step) or !std.mem.endsWith(u8, token, sample)) continue;
+            if (found != null) return null;
+            found = i;
+        }
+        return found;
+    }
+
     pub fn groupMax(self: *const Workflow, name: []const u8) ?u32 {
         for (self.groups) |g| if (std.mem.eql(u8, g.name, name)) return g.max;
         return null;

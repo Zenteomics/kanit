@@ -1043,7 +1043,7 @@ check "init --template writes a template and sample sheet that prepare and run" 
 cd ..
 completions() { PATH="$(dirname "$kanit"):$PATH" bash -c "source <(kanit completion bash); COMP_WORDS=($1); COMP_CWORD=$2; _kanit; IFS='|'; echo \"\${COMPREPLY[*]}\""; }
 "$kanit" init "my flow.toml" > /dev/null && touch "zz b.txt"
-check "bash completion offers rule names, options, control commands and launch IDs, and keeps names with a space whole" '[ "$(completions "kanit run workflow.toml -t \"\"" 4)" = "S1__count|report" ] && [ "$(completions "kanit plan --su" 2)" = "--summary" ] && [ "$(completions "kanit control \"\"" 2)" = "stop|retry|cancel" ] && [ "$(completions "kanit report --launch \"\"" 3)" = "$(basename "$(last_launch)")" ] && [ "$(completions "kanit run \"my\\ flow.toml\" -t \"\"" 4)" = "S1__count|report" ] && [ "$(completions "kanit run zz" 2)" = "zz b.txt" ] && [ "$(completions "kanit prepare --pa" 2)" = "--params" ]'
+check "bash completion offers rule names and STEP/SAMPLE, options, control commands and launch IDs, and keeps names with a space whole" '[ "$(completions "kanit run workflow.toml -t \"\"" 4)" = "S1__count|count/S1|report" ] && [ "$(completions "kanit plan --su" 2)" = "--summary" ] && [ "$(completions "kanit control \"\"" 2)" = "stop|retry|cancel" ] && [ "$(completions "kanit report --launch \"\"" 3)" = "$(basename "$(last_launch)")" ] && [ "$(completions "kanit run \"my\\ flow.toml\" -t \"\"" 4)" = "S1__count|count/S1|report" ] && [ "$(completions "kanit run zz" 2)" = "zz b.txt" ] && [ "$(completions "kanit prepare --pa" 2)" = "--params" ]'
 "$kanit" help run > help-run.txt
 rc1=$?
 "$kanit" run --help > run-help.txt
@@ -1097,13 +1097,15 @@ new logs-command
 { header logs
   rule talk '[]' '["t.txt"]' '"echo to-out; echo to-err >&2; touch t.txt"'
   rule flaky '[]' '["f.txt"]' '"if [ -f tried ]; then echo second; touch f.txt; else touch tried; echo first; exit 1; fi"' 'retries = 1'
+  rule S1__speak '[]' '["p.txt"]' '"echo spoken; touch p.txt"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -q > /dev/null 2>&1
+"$kanit" logs -d . speak/S1 --stdout > pair.txt
 "$kanit" logs -d . talk > both.txt
 "$kanit" logs wf.toml talk --stderr > err.txt
 "$kanit" logs -d . flaky --attempt 1 --stdout > first.txt
 "$kanit" logs -d . flaky --stdout > last.txt
-check "logs shows a rule's streams, one stream, or an earlier attempt" 'grep -q "^to-out$" both.txt && grep -q "^to-err$" both.txt && [ "$(cat err.txt)" = to-err ] && [ "$(cat first.txt)" = first ] && [ "$(cat last.txt)" = second ]'
+check "logs shows a rule's streams, one stream, an earlier attempt, or a rule named by STEP/SAMPLE" 'grep -q "^to-out$" both.txt && grep -q "^to-err$" both.txt && [ "$(cat err.txt)" = to-err ] && [ "$(cat first.txt)" = first ] && [ "$(cat last.txt)" = second ] && [ "$(cat pair.txt)" = spoken ]'
 { header logs; rule slow '[]' '["s.txt"]' '"for i in 1 2 3; do echo tick-$i; sleep 0.4; done; touch s.txt"'; } > slow.toml
 "$kanit" run slow.toml "${iso[@]}" -q > /dev/null &
 runner=$!

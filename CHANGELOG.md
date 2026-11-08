@@ -8,6 +8,10 @@ All notable changes to kanit are documented in this file. Versions up to 0.6.0 w
 
 Large workflows run faster in less memory, and a launch writes its resume state in small appends. Nothing needs action.
 
+### Added
+
+- Every command and option that takes a rule also takes its step and sample as `STEP/SAMPLE`, such as `kanit logs align/S2` for the rule `S2__align`; bash completion offers both.
+
 ### Changed
 
 - On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.

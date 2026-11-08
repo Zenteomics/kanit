@@ -163,11 +163,12 @@ pub fn printPlan(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, m
     try w.print("{d} to run, {d} to reuse\n", .{ runs, reuse });
 }
 
-pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []const u8) !bool {
-    const i = ctx.wf.ruleIndex(name) orelse return false;
+pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, token: []const u8) !bool {
+    const i = ctx.wf.findRule(token) orelse return false;
     const ds = try ctx.decideAll(mask);
     const d = ds[i];
     const r = &ctx.wf.rules[i];
+    const name = r.name;
     try w.print("rule {s}: {s} ({s})\n", .{ name, if (d.run) "runs" else "is reused", d.reason });
     const e = ctx.st.data.rules.map.get(name) orelse return true;
     try w.print("  recorded: {s}, attempt {s}\n", .{ e.finished, e.attempt });

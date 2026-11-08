@@ -174,7 +174,7 @@ pub fn select(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, tar
     var stack: std.ArrayList(usize) = .empty;
     defer stack.deinit(gpa);
     for (targets) |t| {
-        const i = wf.ruleIndex(t) orelse {
+        const i = wf.findRule(t) orelse {
             unknown.* = t;
             gpa.free(mask);
             return error.UnknownTarget;
