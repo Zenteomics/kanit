@@ -13,6 +13,7 @@ const units = @import("units.zig");
 const fields = @import("fields.zig");
 const tracker = @import("tracker.zig");
 const summary = @import("summary.zig");
+const naming = @import("names.zig");
 const logging = @import("log.zig");
 const Allocator = std.mem.Allocator;
 const Tracker = tracker.Tracker;
@@ -96,7 +97,7 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         for (t.rules.items) |r| {
             if (!r.status.active()) continue;
             shown += 1;
-            try w.print("{f} {d:>3}  ", .{ units.field(r.name, 44), r.attempt });
+            try w.print("{f} {d:>3}  ", .{ units.field(r.shown, 44), r.attempt });
             try units.right(w, 8, units.duration, .{seconds(now_ns - r.started_ns)});
             try w.writeAll("  ");
             try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null);
@@ -113,13 +114,13 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
         if (failures == 0) try w.writeAll("\nFAILED\n");
         failures += 1;
         if (failures > 10) continue;
-        try w.print("{s}: {s}", .{ r.name, r.reason });
+        try w.print("{s}: {s}", .{ r.shown, r.reason });
         if (r.dir.len > 0) try w.print("  ({s}/stderr.log)", .{shownPath(a, r.dir)});
         try w.writeAll("\n");
     }
     if (failures > 10) try w.print("... and {d} more\n", .{failures - 10});
     var blocked: std.ArrayList([]const u8) = .empty;
-    for (t.rules.items) |r| if (r.status == .blocked) try blocked.append(a, r.name);
+    for (t.rules.items) |r| if (r.status == .blocked) try blocked.append(a, r.shown);
     if (blocked.items.len > 0) {
         try w.writeAll("\nBLOCKED\n");
         try writeNames(w, blocked.items, 10);
@@ -149,6 +150,10 @@ pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]con
 pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
+    var names_arena = std.heap.ArenaAllocator.init(gpa);
+    defer names_arena.deinit();
+    const shown: ?naming.Names = naming.ofLaunch(gpa, names_arena.allocator(), dir);
+    if (shown) |*n| tr.names = n;
     if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tr, interval_ms, color);
     const tty = term.isTerminal(1);
     var obuf: [16384]u8 = undefined;
@@ -170,21 +175,31 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
     }
 }
 
-pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !void {
+pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize, json: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const rec = try records.recordsDir(a, root);
     const names = try records.launchNames(gpa, a, rec);
-    try w.writeAll("LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED\n");
-    var shown: usize = 0;
+    const Row = struct {
+        launch: []const u8,
+        status: []const u8,
+        elapsed_s: ?f64 = null,
+        completed: u64 = 0,
+        reused: u64 = 0,
+        failed: u64 = 0,
+        blocked: u64 = 0,
+        cancelled: u64 = 0,
+        @"error": ?[]const u8 = null,
+    };
+    var rows: std.ArrayList(Row) = .empty;
     var i = names.len;
     const live = records.running(gpa, rec);
-    while (i > 0 and shown < n) : (shown += 1) {
+    while (i > 0 and rows.items.len < n) {
         i -= 1;
         const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
         const text = sys.readFile(gpa, path, records.launch_record_max) catch {
-            try w.print("{s:<31} {s}\n", .{ names[i], if (live and i == names.len - 1) "running" else "unfinished" });
+            try rows.append(a, .{ .launch = names[i], .status = if (live and i == names.len - 1) "running" else "unfinished" });
             continue;
         };
         defer gpa.free(text);
@@ -193,7 +208,7 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
             else => std.json.Value{ .null = {} },
         };
         if (v != .object) {
-            try w.print("{s:<31} {s}\n", .{ names[i], "unreadable" });
+            try rows.append(a, .{ .launch = names[i], .status = "unreadable" });
             continue;
         }
         const counts = if (v.object.get("counts")) |c| c else std.json.Value{ .null = {} };
@@ -202,14 +217,32 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
                 return if (c == .object) (if (c.object.get(k)) |x| (if (x == .integer and x.integer > 0) @intCast(x.integer) else 0) else 0) else 0;
             }
         }.of;
-        const done = cnt(counts, "completed") + cnt(counts, "reused");
-        const bad = cnt(counts, "failed") + cnt(counts, "blocked");
-        const other = cnt(counts, "cancelled") + cnt(counts, "not_started");
-        const elapsed = float(v, "elapsed_s") orelse 0;
-        try w.print("{s:<31} {s:<13} ", .{ names[i], str(v, "status") orelse "?" });
-        try units.right(w, 8, units.duration, .{elapsed});
-        try w.print(" {d:>5} {d:>7} {d:>10}", .{ done, bad, other });
-        if (str(v, "error")) |e| try w.print("  {s}", .{sys.utf8Prefix(e, 100)});
+        try rows.append(a, .{
+            .launch = names[i],
+            .status = try a.dupe(u8, str(v, "status") orelse "?"),
+            .elapsed_s = float(v, "elapsed_s") orelse 0,
+            .completed = cnt(counts, "completed"),
+            .reused = cnt(counts, "reused"),
+            .failed = cnt(counts, "failed"),
+            .blocked = cnt(counts, "blocked"),
+            .cancelled = cnt(counts, "cancelled") + cnt(counts, "not_started"),
+            .@"error" = if (str(v, "error")) |e| try a.dupe(u8, sys.utf8Prefix(e, 100)) else null,
+        });
+    }
+    if (json) {
+        try w.print("{f}\n", .{std.json.fmt(rows.items, .{})});
+        return;
+    }
+    try w.print("{s:<30} {s:<13} {s:>8} {s:>10} {s:>7} {s:>7} {s:>8} {s:>10}\n", .{ "LAUNCH", "STATUS", "ELAPSED", "COMPLETED", "REUSED", "FAILED", "BLOCKED", "CANCELLED" });
+    for (rows.items) |r| {
+        if (r.elapsed_s == null) {
+            try w.print("{s:<30} {s}\n", .{ r.launch, r.status });
+            continue;
+        }
+        try w.print("{s:<30} {s:<13} ", .{ r.launch, r.status });
+        try units.right(w, 8, units.duration, .{r.elapsed_s.?});
+        try w.print(" {d:>10} {d:>7} {d:>7} {d:>8} {d:>10}", .{ r.completed, r.reused, r.failed, r.blocked, r.cancelled });
+        if (r.@"error") |e| try w.print("  {s}", .{e});
         try w.writeAll("\n");
     }
 }

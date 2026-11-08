@@ -141,9 +141,10 @@ pub const commands = [_]Command{
         \\that does not match --input-manifest.
         \\'dry-run' is another name for it.
         ,
-        .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
+        .options = &([_]Opt{ .{ .flag = "--rules", .desc = "one row per rule instead of one per step" }, .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--json", .desc = "every rule's decision as JSON" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
         .examples =
         \\kanit plan workflow.toml
+        \\kanit plan workflow.toml --rules
         \\kanit plan workflow.toml --summary
         \\kanit plan workflow.toml --rerun-rule align_s1
         ,
@@ -276,13 +277,14 @@ pub const commands = [_]Command{
         .group = .watch,
         .common = .workdir,
         .about =
-        \\Prints the summary of the newest launch, or of --launch ID, once it has
-        \\ended. On a terminal the summary is a short readable report; elsewhere,
-        \\and with --json, it is the launch's summary.json. While the launch runs, it
-        \\prints a plain view, or as JSON the counts so far with status "running".
+        \\Prints the summary of the newest launch, or of --launch ID, while it runs
+        \\or after it ended: its outcome and counts, a matrix of samples by steps or
+        \\a list of steps, the failed and blocked rules, and what to type next. With
+        \\--json it prints the launch's summary.json, or while the launch runs the
+        \\counts so far with status "running".
         \\
-        \\--history counts, per launch, the rules DONE (completed or reused),
-        \\FAILED (failed or blocked) and CANCELLED (stopped or never started).
+        \\--history lists the recent launches with their rules COMPLETED, REUSED,
+        \\FAILED, BLOCKED and CANCELLED (stopped or never started).
         \\
         \\status exits 0 for any outcome it shows, and 1 when it has none to show: no
         \\launch, a summary that cannot be read, or a launch whose engine died.
@@ -290,7 +292,7 @@ pub const commands = [_]Command{
         .options = &.{
             .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default: 10)" },
             .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
-            .{ .flag = "--json", .desc = "print summary.json, also on a terminal" },
+            .{ .flag = "--json", .desc = "summary.json, or with --history the launches, as JSON" },
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
         .examples =
@@ -300,23 +302,27 @@ pub const commands = [_]Command{
     },
     .{
         .name = "logs",
-        .args = "[WORKFLOW] RULE [options]",
+        .args = "[WORKFLOW] [RULE] [options]",
         .summary = "print the output of a rule's newest attempt",
         .group = .watch,
         .common = .workdir,
         .about =
         \\Prints the standard output and error of RULE's newest attempt: in the newest
-        \\launch that ran it, else the attempt recorded for it.
+        \\launch that ran it, else the attempt recorded for it. Without RULE it prints
+        \\the failed attempts of the newest launch. Each stream opens with a line that
+        \\names the rule, the attempt, how it ended and the stream's size.
         ,
         .options = &.{
             .{ .flag = "--stdout", .desc = "standard output only" },
             .{ .flag = "--stderr", .desc = "standard error only" },
+            .{ .flag = "-n, --lines N", .desc = "only the last N lines of each stream" },
             .{ .flag = "--attempt N", .desc = "attempt N instead of the newest" },
             .{ .flag = "--launch ID", .desc = "look in this launch" },
             .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
         },
         .examples =
-        \\kanit logs align/S1
+        \\kanit logs
+        \\kanit logs align/S1 -n 20
         \\kanit logs align_s1 --stderr --follow
         \\kanit logs trim_s4 --attempt 1
         ,
@@ -356,7 +362,7 @@ pub const commands = [_]Command{
     },
     .{
         .name = "verify",
-        .args = "[WORKFLOW] [--content]",
+        .args = "[WORKFLOW] [--content] [--json]",
         .summary = "check that recorded outputs are unchanged",
         .group = .maintain,
         .about =
@@ -365,7 +371,7 @@ pub const commands = [_]Command{
         \\stored digests, and stores a digest for every output that has none. It
         \\exits 1 on a difference, or when a selected rule has no record to check.
         ,
-        .options = &.{.{ .flag = "--content", .desc = "also compare and store content digests" }},
+        .options = &.{ .{ .flag = "--content", .desc = "also compare and store content digests" }, .{ .flag = "--json", .desc = "every finding and the counts as JSON" } },
         .examples = "kanit verify workflow.toml --content",
     },
     .{
@@ -702,6 +708,7 @@ pub const Validate = struct {
 pub const Verify = struct {
     common: Common = .{},
     content: bool = false,
+    json: bool = false,
 
     pub fn parse(self: *Verify, p: Parser, args: Args) !?Exit {
         if (try p.words(args, &self.common, self)) |e| return e;
@@ -709,6 +716,10 @@ pub const Verify = struct {
     }
 
     fn option(self: *Verify, _: Parser, arg: []const u8, _: ?[]const u8) !usize {
+        if (std.mem.eql(u8, arg, "--json")) {
+            self.json = true;
+            return 1;
+        }
         if (!std.mem.eql(u8, arg, "--content")) return 0;
         self.content = true;
         return 1;
@@ -773,6 +784,8 @@ pub const Plan = struct {
     common: Common = .{},
     rerun: bool = false,
     summary: bool = false,
+    rules: bool = false,
+    json: bool = false,
     budget: bool = false,
     max_threads: ?u32 = null,
     max_memory: ?u64 = null,
@@ -797,6 +810,8 @@ pub const Plan = struct {
         }
         if (!self.budget and (self.max_threads != null or self.max_memory != null))
             return p.fail("{s} sets the budget --budget checks; give --budget too", .{if (self.max_threads != null) "--max-threads" else "--max-memory"});
+        if (self.json and (self.summary or self.budget or self.rules))
+            return p.fail("--json prints every rule's decision; leave out {s}", .{if (self.summary) "--summary" else if (self.budget) "--budget" else "--rules"});
         return p.extraArgs(&self.common);
     }
 
@@ -827,6 +842,14 @@ pub const Plan = struct {
         if (self.explain) return 0;
         if (eq(u8, arg, "--summary")) {
             self.summary = true;
+            return 1;
+        }
+        if (eq(u8, arg, "--rules")) {
+            self.rules = true;
+            return 1;
+        }
+        if (eq(u8, arg, "--json")) {
+            self.json = true;
             return 1;
         }
         if (eq(u8, arg, "--budget")) {
@@ -945,7 +968,6 @@ pub const Watch = struct {
         self.once = self.once or self.summary;
         if (try p.words(args, &self.common, self)) |e| return e;
         if (p.extraArgs(&self.common)) |e| return e;
-        if (self.history != null and self.json) return p.fail("--history prints text; --json applies to the summary", .{});
         if (self.history != null and self.launch != null) return p.fail("--history lists the recent launches; --launch names one", .{});
         return null;
     }
@@ -1072,13 +1094,15 @@ pub const Logs = struct {
         if (try p.words(args, &self.common, self)) |e| return e;
         const c = &self.common;
         switch (c.positional.items.len) {
-            0 => {
-                self.rule = c.workflow orelse return p.fail("logs needs a rule name", .{});
+            0 => if (c.workflow) |word| if (!std.mem.endsWith(u8, word, ".toml")) {
+                self.rule = word;
                 c.workflow = null;
             },
             1 => self.rule = c.positional.items[0],
             else => return p.fail("logs takes one rule name", .{}),
         }
+        if (self.rule.len == 0 and (self.opts.follow or self.opts.attempt != null))
+            return p.fail("{s} needs a rule name", .{if (self.opts.follow) "--follow" else "--attempt"});
         return null;
     }
 
@@ -1096,6 +1120,11 @@ pub const Logs = struct {
         if (eq(u8, arg, "-f") or eq(u8, arg, "--follow")) {
             self.opts.follow = true;
             return 1;
+        }
+        if (eq(u8, arg, "-n") or eq(u8, arg, "--lines")) {
+            const v = value orelse return p.missing(arg);
+            self.opts.lines = std.fmt.parseInt(usize, v, 10) catch return p.invalid(arg, v, "use a whole number of lines");
+            return 2;
         }
         if (eq(u8, arg, "--launch")) return launchValue(p, arg, value, &self.opts.launch);
         if (eq(u8, arg, "--attempt")) {

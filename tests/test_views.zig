@@ -386,9 +386,18 @@ test "[failure] - [run]: status --history keeps a row for a launch whose summary
     _ = try s.file(".workz/launches/C/summary.json", "{not json");
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.monitor.history(testing.allocator, &out.writer, s.path, 10);
-    const text = out.written();
-    try testing.expect(std.mem.indexOf(u8, text, "\nC                               unreadable\nB                               unreadable\nA                               completed") != null);
+    try workz.monitor.history(testing.allocator, &out.writer, s.path, 10, false);
+    try testing.expectEqualStrings(
+        \\LAUNCH                         STATUS         ELAPSED  COMPLETED  REUSED  FAILED  BLOCKED  CANCELLED
+        \\C                              unreadable
+        \\B                              unreadable
+        \\A                              completed        1.0 s          1       0       0        0          0
+        \\
+    , out.written());
+    var json: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer json.deinit();
+    try workz.monitor.history(testing.allocator, &json.writer, s.path, 1, true);
+    try testing.expectEqualStrings("[{\"launch\":\"C\",\"status\":\"unreadable\",\"elapsed_s\":null,\"completed\":0,\"reused\":0,\"failed\":0,\"blocked\":0,\"cancelled\":0,\"error\":null}]\n", json.written());
 }
 
 test "[edge] - [run]: program output becomes valid UTF-8 and cuts never split a character" {

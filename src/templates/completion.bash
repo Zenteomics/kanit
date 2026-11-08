@@ -50,17 +50,17 @@ _kanit() {
     local opts="-h --help -d --workdir"
     case $cmd in
         run) opts="$opts -t --target -j --jobs --max-threads --max-memory -k --keep-going -r --retry --timeout --rerun --rerun-rule --input-manifest --pass-env --threads --grace --slice --no-isolation -q --quiet -v --verbose --json --no-color" ;;
-        plan | dry-run) opts="$opts -t --target --summary --budget --max-threads --max-memory --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
+        plan | dry-run) opts="$opts -t --target --rules --summary --json --budget --max-threads --max-memory --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
         explain) opts="$opts -t --target --rerun --rerun-rule --input-manifest --pass-env --threads" ;;
         validate) opts="$opts -t --target --inputs" ;;
         graph) opts="$opts -t --target --layer --by --focus --why --users --format" ;;
         prepare) opts="-h --help -o --output --params --check" ;;
         schema | version) opts="-h --help" ;;
-        verify) opts="$opts -t --target --content" ;;
+        verify) opts="$opts -t --target --content --json" ;;
         watch) opts="$opts --once --interval --launch --no-color" ;;
         status) opts="$opts --history --json --launch --no-color" ;;
         report) opts="$opts --launch --format --json --bottlenecks --suggest --compare --methods -o --output" ;;
-        logs) opts="$opts --launch --attempt --stdout --stderr -f --follow" ;;
+        logs) opts="$opts --launch --attempt --stdout --stderr -n --lines -f --follow" ;;
         clean) opts="$opts --keep --previous --dry-run" ;;
         control) ;;
         init) opts="-h --help --template" ;;

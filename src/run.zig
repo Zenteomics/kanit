@@ -2531,7 +2531,7 @@ const Refusal = struct {
         var w: std.Io.Writer.Allocating = .init(self.gpa);
         defer w.deinit();
         try w.writer.print("{f}\n", .{std.json.fmt(summary, .{})});
-        if (self.json or !term.isTerminal(1)) try sys.writeAll(1, w.written());
+        if (self.json) try sys.writeAll(1, w.written());
         return outcome;
     }
 };
@@ -3081,11 +3081,12 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         engine.log.raw(1, text.written());
     }
     engine.endLog();
-    if (!opts.json and term.isTerminal(1)) {
+    if (!opts.json) {
+        const tty = term.isTerminal(1);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
-        if (engine.finished > 0 and !opts.quiet) try out.writer.writeAll("\n");
-        try summary_text.write(gpa, &out.writer, launch.dir, .{ .color = opts.color and term.colorOn(1, environ), .marks = logging.marksFor(environ), .cols = term.size(1).cols });
+        if (tty and engine.finished > 0 and !opts.quiet) try out.writer.writeAll("\n");
+        try summary_text.write(gpa, &out.writer, launch.dir, .{ .color = opts.color and term.colorOn(1, environ), .marks = logging.marksFor(environ), .cols = if (tty) term.size(1).cols else 0 });
         try sys.writeAll(1, out.written());
         return outcome;
     }

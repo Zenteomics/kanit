@@ -21,6 +21,12 @@ pub fn size(w: *std.Io.Writer, mib: f64) !void {
     return w.print("{d:.1} MiB", .{@max(mib, 0)});
 }
 
+pub fn bytes(w: *std.Io.Writer, n: u64) !void {
+    if (n < 1024) return w.print("{d} B", .{n});
+    if (n < 1024 * 1024) return w.print("{d:.1} KiB", .{@as(f64, @floatFromInt(n)) / 1024.0});
+    return size(w, @as(f64, @floatFromInt(n)) / 1048576.0);
+}
+
 pub fn percent(w: *std.Io.Writer, part: f64, total: f64) !void {
     const pct = if (total > 0) part / total * 100 else 0;
     if (pct > 0 and pct < 0.5) return w.writeAll("<1%");

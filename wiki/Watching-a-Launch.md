@@ -96,7 +96,7 @@ qc_S6                                          1     0.9 s   1.4 MiB   1.6 MiB  
 - `failed` names each failed rule with its reason, which quotes the last line of its error output; `blocked` names the rules a failure blocked, with the failure that blocked them.
 - `slowest` names the three slowest rules that completed; `records` says where the launch's records, text log and page are; `next` gives the commands to look further or run again.
 
-Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written. While the launch runs, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
+The summary is the same text off a terminal, without colors. With `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written instead; while the launch runs, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
 
 ```json
 {"engine":"kanit 0.7.0 sha256:...",...,"status":"running","counts":{"completed":10,...},...}
@@ -105,28 +105,32 @@ Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Re
 `kanit status --history [N]` prints one line for each of the last N launches (default 10), newest first:
 
 ```text
-LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
-20261107T061157.192-d1b5ca16    completed       1m 00s    25       0          0
-20261107T060905.136-0b96682a    completed       1m 13s    25       0          0
+LAUNCH                         STATUS         ELAPSED  COMPLETED  REUSED  FAILED  BLOCKED  CANCELLED
+20261108T095104.564-61a878f4   completed        0.5 s          2       2       0        0          0
+20261108T095104.003-b0174746   completed        0.5 s          0       4       0        0          0
+20261108T095103.427-974fae85   completed        0.5 s          4       0       0        0          0
 ```
 
-`DONE` counts completed and reused rules, `FAILED` failed and blocked ones, and `CANCELLED` the rules it stopped or never started. A launch that ended with an error shows it at the end of its line. The newest launch shows `running` while a run holds the working directory's lock; a launch whose engine ended without recording its end, as when killed, shows `unfinished`.
+Each column counts the launch's rules with that status; `CANCELLED` also counts the rules it never started. `--json` prints the same rows as a JSON array. A launch that ended with an error shows it at the end of its line. The newest launch shows `running` while a run holds the working directory's lock; a launch whose engine ended without recording its end, as when killed, shows `unfinished`.
 
 ## logs
 
-`kanit logs RULE` prints the standard output and error of the rule's newest attempt: in the newest launch that ran the rule, or else the attempt recorded for it. Here, the first attempt of a rule that failed once and then succeeded:
+`kanit logs RULE` prints the standard output and error of the rule's newest attempt: in the newest launch that ran the rule, or else the attempt recorded for it. RULE is the rule's name or its step and sample. Each stream opens with a line that names it, the rule, the attempt, how the attempt ended and the stream's size:
 
 ```sh
-kanit logs trim_S4 --attempt 1
+kanit logs align/S2
 ```
 
 ```text
-==> .../attempts/trim_S4/001/stdout.log <==
-==> .../attempts/trim_S4/001/stderr.log <==
-trim: temporary failure writing trimmed/S4.fq
+stdout  align/S2  attempt 1  failed, exit 2  (empty)
+stderr  align/S2  attempt 1  failed, exit 2  64 B
+Mapping reads
+STAR: genome index is incomplete: missing SA file
 ```
 
-- `--stderr` or `--stdout` prints one stream, without the headers.
+- `kanit logs` without a rule prints every failed attempt of the newest launch, each under its header lines.
+- `--stderr` or `--stdout` prints one stream; for one rule, without the header line.
+- `-n N` prints only the last N lines of each stream.
 - `--attempt N` picks attempt N in the newest launch that ran the rule, and `--launch ID` looks in that launch instead.
 - `--follow` (`-f`) prints the output as it grows until the attempt ends, or its launch stops running.
 

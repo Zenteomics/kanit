@@ -306,7 +306,7 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
     try w.writeAll("\n");
     if (sum) |v| if (int(v, "previous_bytes")) |b| if (b > 0 and try keepsPrevious(gpa, a, launch_dir)) {
         try label(w, style, "previous");
-        try units.size(w, @as(f64, @floatFromInt(b)) / 1048576.0);
+        try units.bytes(w, @intCast(b));
         try w.print(" of replaced outputs kept; {s}kanit clean --previous{s} removes them\n", .{ on(style, "\x1b[36m"), off(style) });
     };
 
@@ -388,6 +388,8 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
     @memset(step_running, 0);
     const step_slowest = try a.alloc(?Row, nsteps);
     @memset(step_slowest, null);
+    const step_ran = try a.alloc(u32, nsteps);
+    @memset(step_ran, 0);
     const sample_seen = try a.alloc(bool, n.samples.len);
     @memset(sample_seen, false);
     var unsampled = false;
@@ -402,6 +404,7 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
             .running, .cancelling, .retrying => step_running[st] += 1,
             else => {},
         }
+        if (r.status == .completed) step_ran[st] += 1;
         if (r.status == .completed and (step_slowest[st] == null or r.wall_s > step_slowest[st].?.wall_s)) step_slowest[st] = r;
         if (n.sample_of[k]) |sm| sample_seen[sm] = true else unsampled = true;
     }
@@ -521,11 +524,12 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
         if (step_running[st] > 0) try bw.print(", {d} running", .{step_running[st]});
         if (step_failed[st] > 0) try bw.print(", {d} failed", .{step_failed[st]});
         if (step_blocked[st] > 0) try bw.print(", {d} not run", .{step_blocked[st]});
-        try pad(w, bw.buffered(), 32);
-        if (!live) if (step_slowest[st]) |r| if (step_rules[st] > 1) {
+        const slowest: ?Row = if (!live and step_ran[st] > 1) step_slowest[st] else null;
+        if (slowest) |r| {
+            try pad(w, bw.buffered(), 32);
             try w.print("slowest {s} ", .{if (r.sample.len > 0) r.sample else r.word});
             try units.duration(w, r.wall_s);
-        };
+        } else try w.writeAll(bw.buffered());
         try w.writeAll("\n");
     }
 }

@@ -111,12 +111,13 @@ kanit plan workflow.toml
 ```
 
 ```text
-run   gc_s1  (no completed record)
-run   gc_s2  (no completed record)
-run   gc_s3  (no completed record)
-run   summary  (producer gc_s1 runs)
+STEP     RULES    RUN  REUSE  WHY
+gc           3      3      0  no completed record
+summary      1      1      0  producer gc_s1 runs
 4 to run, 0 to reuse
 ```
+
+`plan --rules` gives one row per rule instead, and `plan --json` every decision for a script.
 
 ## Run it
 
@@ -139,10 +140,15 @@ kanit 0.7.0   gc-content   launch 20261108T091235.606-0bd8dab3
 02:12:36  step       gc       3 of 3 completed in 11 ms   slowest gc_s1 4 ms
 02:12:36  started    summary  1 thread, 64 MiB
 02:12:36  completed  summary  4 ms
-{"v":1,"engine":"kanit 0.7.0 sha256:...","engine_key":4,...,"status":"completed",...}
+          completed  4 of 4 rules done in 0.5 s: 4 completed
+          steps      gc       ✓ 3 of 3 done                   slowest gc_s1 4 ms
+                     summary  ✓ 1 of 1 done
+          slowest    summary 5 ms   gc_s1 4 ms   gc_s2 4 ms
+          records    .workz/latest/   log launch.log   page report.html
+          next       kanit report --bottlenecks   what limited this launch
 ```
 
-The launch opens with its shape: four rules, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the launch summary to standard output as one line of JSON (shortened here). On a terminal the `started` lines give way to a footer of the step's progress and the running rules, and the summary is a short report.
+The launch opens with its shape: four rules, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the summary to standard output: what was done, each step's progress, the slowest rules, where the records are and what to look at next. `--json` prints the summary as JSON instead, for a script. On a terminal the `started` lines give way to a footer of the step's progress and the running rules.
 
 ```sh
 cat summary.tsv
@@ -163,14 +169,13 @@ kanit plan workflow.toml
 ```
 
 ```text
-reuse gc_s1  (unchanged)
-reuse gc_s2  (unchanged)
-reuse gc_s3  (unchanged)
-reuse summary  (unchanged)
+STEP     RULES    RUN  REUSE  WHY
+gc           3      0      3  unchanged
+summary      1      0      1  unchanged
 0 to run, 4 to reuse
 ```
 
-`kanit run workflow.toml --max-threads 2 --max-memory 1G` prints its budget, its page and its summary, with `"reused":4`, and runs nothing. A rule is reused when every part of its [key](Reuse-and-Resume.md#the-rule-key) is the same as when it last completed and its outputs are still the files it wrote.
+`kanit run workflow.toml --max-threads 2 --max-memory 1G` runs nothing, and its summary says `4 of 4 rules done in 0.5 s: 4 reused`. A rule is reused when every part of its [key](Reuse-and-Resume.md#the-rule-key) is the same as when it last completed and its outputs are still the files it wrote.
 
 ## Change one input
 
@@ -178,14 +183,15 @@ Append a read to the second sample and ask again:
 
 ```sh
 printf 'GGGGCCCCAT\n' >> reads/s2.txt
-kanit plan workflow.toml
+kanit plan workflow.toml --rules
 ```
 
 ```text
-reuse gc_s1  (unchanged)
-run   gc_s2  (inputs changed)
-reuse gc_s3  (unchanged)
-run   summary  (producer gc_s2 runs)
+RULE     DECISION  WHY
+gc_s1    reuse     unchanged
+gc_s2    run       inputs changed
+gc_s3    reuse     unchanged
+summary  run       producer gc_s2 runs
 2 to run, 2 to reuse
 ```
 
@@ -238,10 +244,10 @@ kanit status --history
 ```
 
 ```text
-LAUNCH                          STATUS         ELAPSED  DONE  FAILED  CANCELLED
-20261107T060853.403-7eac9b69    completed        18 ms     4       0          0
-20261107T060853.376-00c43849    completed         9 ms     4       0          0
-20261107T060853.332-05be5410    completed        29 ms     4       0          0
+LAUNCH                         STATUS         ELAPSED  COMPLETED  REUSED  FAILED  BLOCKED  CANCELLED
+20261108T095104.564-61a878f4   completed        0.5 s          2       2       0        0          0
+20261108T095104.003-b0174746   completed        0.5 s          0       4       0        0          0
+20261108T095103.427-974fae85   completed        0.5 s          4       0       0        0          0
 ```
 
 `kanit report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `kanit report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `kanit watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.

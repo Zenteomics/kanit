@@ -57,11 +57,13 @@ Checks the file, every key and value, and the graph ([what it checks](Workflow-R
 kanit plan [WORKFLOW] [options]
 ```
 
-Prints, for every selected rule, whether a run would run it or reuse it, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)), then `R to run, U to reuse`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, an output changed outside kanit without `--rerun`, or an input that does not match `--input-manifest`, which it names on standard error. While a launch runs in the working directory, it says so: the rules that launch has not finished show their earlier records. `dry-run` is another name for `plan`.
+Prints whether a run would run or reuse each selected rule, and why ([reasons](Reuse-and-Resume.md#plan-explain-run)): one row per step, with its tool and how many of its rules run and are reused, or with `--rules` one row per rule by step and sample; then `R to run, U to reuse`. A workflow whose rules are each their own step and have no sample gets one row per rule. `--json` prints every rule's decision as `{"v", "run", "reuse", "rules": [{"rule", "step", "sample", "run", "reason"}]}`. It exits 1 when `run` would refuse the launch: a selected rule with a missing input that no rule makes, an output changed outside kanit without `--rerun`, or an input that does not match `--input-manifest`, which it names on standard error. While a launch runs in the working directory, it says so: the rules that launch has not finished show their earlier records. `dry-run` is another name for `plan`.
 
 | Option             | Argument | Meaning                                    |
 | ------------------ | -------- | ------------------------------------------ |
+| `--rules`          |          | one row per rule instead of one per step   |
 | `--summary`        |          | count the decisions by reason instead      |
+| `--json`           |          | every rule's decision as JSON              |
 | `--budget`         |          | check every request against the budget     |
 | `--max-threads`    | N        | with `--budget`: its threads; online CPUs  |
 | `--max-memory`     | SIZE     | with `--budget`: its memory; 3/4 of memory |
@@ -109,7 +111,7 @@ Shows the selected rules and what links them, in layers: as text on a terminal, 
 kanit run [WORKFLOW] [options]
 ```
 
-Runs the selected rules that are not reusable. The run log goes to standard error and to the launch's `launch.log`, and the summary to standard output: a short report on a terminal, one line of JSON otherwise ([Running workflows](Running-Workflows.md#starting-a-launch)).
+Runs the selected rules that are not reusable. The run log goes to standard error and to the launch's `launch.log`, and the summary to standard output, as text wherever it goes and as one line of JSON with `--json` ([Running workflows](Running-Workflows.md#starting-a-launch)).
 
 | Option               | Argument   | Default           | Meaning                                    |
 | -------------------- | ---------- | ----------------- | ------------------------------------------ |
@@ -129,7 +131,7 @@ Runs the selected rules that are not reusable. The run log goes to standard erro
 | `--no-isolation`     |            | off               | no scope, cgroups or network namespace     |
 | `-q`, `--quiet`      |            | off               | no progress lines; failures still print    |
 | `-v`, `--verbose`    |            | off               | also a line for every rule that starts     |
-| `--json`             |            | off               | JSON summary, also on a terminal           |
+| `--json`             |            | off               | the summary as one line of JSON            |
 | `--no-color`         |            | off               | no colors on a terminal                    |
 
 - Sizes take `K`, `M`, `G` or `T`, from `1M` to `1024T`; a plain number is MiB. Durations take `s`, `m`, `h` and `d`; a plain number is seconds, and `--grace 0` or `--grace 0s` kills at once.
@@ -158,29 +160,30 @@ Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([key
 kanit status [WORKFLOW] [--history [N]] [--json] [--launch ID] [--no-color]
 ```
 
-Prints the summary of the newest launch, or `--launch ID`, once it has ended: on a terminal a short report of its outcome, failures and next steps, otherwise its `summary.json`. While the launch runs, it prints its plain view on a terminal, and otherwise the same JSON fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`. A launch whose engine ended without recording its end, as when it was killed, shows what it recorded with `"status": "unfinished"`, says so on standard error and exits 1.
+Prints the summary of the newest launch, or `--launch ID`, while it runs or after it ended ([status](Watching-a-Launch.md#status)): its outcome and counts, a matrix of samples by steps or a list of steps, the failed and blocked rules, and the commands to type next. `--json` prints its `summary.json` instead, and while the launch runs the same fields so far, with `"status": "running"` and counts of the rules `running`, `waiting` and `pending`. A launch whose engine ended without recording its end, as when it was killed, shows what it recorded as `unfinished` and exits 1; with `--json` it also says so on standard error.
 
 | Option       | Argument | Default | Meaning                                      |
 | ------------ | -------- | ------- | -------------------------------------------- |
 | `--history`  | [N]      | 10      | one line for each of the last N launches     |
-| `--json`     |          | off     | print `summary.json`, also on a terminal     |
+| `--json`     |          | off     | `summary.json`, or the launches, as JSON     |
 | `--launch`   | ID       | newest  | the launch to summarize                      |
 | `--no-color` |          | off     | no colors on a terminal                      |
 
-`--history` prints text, so it takes neither `--json` nor `--launch`.
+`--history` takes no `--launch`. With `--json` it prints an array of `{"launch", "status", "elapsed_s", "completed", "reused", "failed", "blocked", "cancelled", "error"}`.
 
 ## logs
 
 ```text
-kanit logs [WORKFLOW] RULE [options]
+kanit logs [WORKFLOW] [RULE] [options]
 ```
 
-Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed; `--follow` prints the streams as they grow until the attempt ends, or its launch stops running, then the diagnostics. With `--follow` and neither `--launch` nor `--attempt`, a rule that the running launch has yet to start is waited for, and its new attempt is followed; one that the launch reuses or blocks shows its newest recorded attempt.
+Prints the standard output and error of the rule's newest attempt, then, without `--stdout` or `--stderr`, the [diagnostics](Writing-Workflows.md#diagnostics) it kept if it failed. Without RULE it prints every failed attempt of the newest launch, or of `--launch ID`. Each stream opens with one line naming it, the rule, the attempt, how it ended and the stream's size, such as `stderr  align/S2  attempt 1  failed, exit 2  1.2 KiB`, or `(empty)`; one stream of one rule prints without it; `--follow` prints the streams as they grow until the attempt ends, or its launch stops running, then the diagnostics. With `--follow` and neither `--launch` nor `--attempt`, a rule that the running launch has yet to start is waited for, and its new attempt is followed; one that the launch reuses or blocks shows its newest recorded attempt.
 
 | Option             | Argument | Meaning                                         |
 | ------------------ | -------- | ----------------------------------------------- |
 | `--stdout`         |          | standard output only                            |
 | `--stderr`         |          | standard error only                             |
+| `-n`, `--lines`    | N        | only the last N lines of each stream            |
 | `--launch`         | ID       | look in this launch                             |
 | `--attempt`        | N        | this attempt instead of the newest              |
 | `-f`, `--follow`   |          | print the output as it grows, until it ends     |
@@ -221,10 +224,10 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 ## verify
 
 ```text
-kanit verify [WORKFLOW] [--content]
+kanit verify [WORKFLOW] [--content] [--json]
 ```
 
-Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
+Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, each with the rule's step and sample and the output's path, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. `--json` prints `{"v", "checked", "by_content", "digests_stored", "unrecorded", "ok", "findings": [{"rule", "step", "sample", "finding", "path"}]}` instead. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
 
 ## clean
 

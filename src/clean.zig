@@ -6,6 +6,7 @@
 //! With `--previous` it removes the earlier outputs that attempts moved
 //! into their `previous/` directories, in every launch.
 const std = @import("std");
+const units = @import("units.zig");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const records = @import("records.zig");
@@ -167,7 +168,9 @@ fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, pending: []cons
         if (dirs == 0) continue;
         result.previous += dirs;
         result.previous_bytes += bytes;
-        try w.print("{s} previous/ of {d} attempt(s) in launch {s}, {d:.1} MiB\n", .{ if (dry) "would remove" else "removed", dirs, launch, @as(f64, @floatFromInt(bytes)) / 1048576.0 });
+        try w.print("{s} previous/ of {d} {s} in launch {s}, ", .{ if (dry) "would remove" else "removed", dirs, if (dirs == 1) "attempt" else "attempts", launch });
+        try units.size(w, @as(f64, @floatFromInt(bytes)) / 1048576.0);
+        try w.writeAll("\n");
     }
 }
 

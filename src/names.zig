@@ -35,7 +35,7 @@ pub const Names = struct {
     samples: []const []const u8,
     by_word: std.StringHashMapUnmanaged(u32),
 
-    pub fn init(a: Allocator, rules: []const workflow.Rule) !Names {
+    pub fn init(a: Allocator, rules: anytype) !Names {
         const n = rules.len;
         var count: std.StringHashMapUnmanaged(u32) = .empty;
         const pair = try a.alloc(?[]const u8, n);

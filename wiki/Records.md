@@ -222,7 +222,7 @@ kanit clean --keep 1 --dry-run
 
 ```text
 would remove launch 20261107T060905.136-0b96682a
-would remove 0 container(s) and 1 launch(es), 0.2 MiB
+would remove 0 containers and 1 launch, 0.2 MiB
 ```
 
 - Without options, `kanit clean` removes only the containers earlier launches left behind.

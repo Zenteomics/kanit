@@ -298,7 +298,7 @@ pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []
     var out: std.ArrayList(usize) = .empty;
     for (t.rules.items, 0..) |r, i| {
         if (!f.keeps(r.status)) continue;
-        if (query.len > 0 and std.mem.indexOf(u8, r.name, query) == null) continue;
+        if (query.len > 0 and std.mem.indexOf(u8, r.name, query) == null and std.mem.indexOf(u8, r.shown, query) == null) continue;
         try out.append(a, i);
     }
     const Ctx = struct { t: *const Tracker, sort: Sort, now: i128 };
@@ -323,7 +323,7 @@ pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []
                     if (mx != my) return mx > my;
                 },
                 .name => {
-                    const o = std.mem.order(u8, rx.name, ry.name);
+                    const o = std.mem.order(u8, rx.shown, ry.shown);
                     if (o != .eq) return o == .lt;
                 },
             }
@@ -806,7 +806,7 @@ fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected:
     }
     if (selected) l.sgr(reverse);
     if (r.status == .pending) l.sgr(dim);
-    l.name(r.name, c.name);
+    l.name(r.shown, c.name);
     l.sgr(reset);
     l.spaces(1);
     const muted = r.status == .pending or r.status.done();
@@ -914,7 +914,7 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
             l.sgr(reset);
         } else l.text("  ");
         l.sgr(if (selected) reverse else if (r.status == .pending) dim else look(r.status).fg);
-        l.name(r.name, name_w);
+        l.name(r.shown, name_w);
         l.sgr(reset);
         l.text(" ");
         var x: usize = 0;
@@ -956,7 +956,7 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
     var b: [4][24]u8 = undefined;
     var l = f.begin();
     l.sgr(bold);
-    l.print("  {s}", .{r.name});
+    l.print("  {s}", .{r.shown});
     l.sgr(reset);
     l.text("   ");
     if (lk.badge) |badge| {
@@ -1124,7 +1124,7 @@ fn drawLog(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, 
     const stream = if (ui.stderr) "stderr" else "stdout";
     var l = f.begin();
     l.sgr(reverse ++ bold);
-    l.print(" {s} ", .{r.name});
+    l.print(" {s} ", .{r.shown});
     l.sgr(reset ++ reverse);
     l.print(" attempt {d}  {s}  {s} ", .{ r.attempt, look(r.status).label, stream });
     l.sgr(reset);

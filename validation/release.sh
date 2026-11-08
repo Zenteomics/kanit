@@ -214,9 +214,9 @@ timed "plan $rules rules" "$release" plan big.toml --summary > /dev/null
 prc=$?
 mkdir run && cd run || exit 2
 bash "$graph" "$run_rules" 100 wf.toml
-timed "run $run_rules rules" "$release" run wf.toml --no-isolation -j 4 --max-threads 4 --max-memory 2G -q > first.json
+timed "run $run_rules rules" "$release" run wf.toml --no-isolation -j 4 --max-threads 4 --max-memory 2G -q --json > first.json
 rrc=$?
-timed "resume $run_rules rules" "$release" run wf.toml --no-isolation -q > again.json
+timed "resume $run_rules rules" "$release" run wf.toml --no-isolation -q --json > again.json
 arc=$?
 check "a generated graph of $rules rules validates and plans, and $run_rules rules run and resume" '[ $vrc = 0 ] && [ $prc = 0 ] && [ $rrc = 0 ] && [ "$(jq -r .counts.completed first.json)" = "$run_rules" ] && [ $arc = 0 ] && [ "$(jq -r .counts.reused again.json)" = "$run_rules" ]'
 
@@ -229,14 +229,14 @@ engines=()
 for i in $(seq "$kills"); do
   mode=(--no-isolation)
   [ $((i % 2)) = 0 ] && mode=(--max-threads 4 --max-memory 2G)
-  "$release" run wf.toml "${mode[@]}" -j 4 -q > "kill-$i.json" 2>> kill.err &
+  "$release" run wf.toml "${mode[@]}" -j 4 -q --json > "kill-$i.json" 2>> kill.err &
   engine=$!
   engines+=("$engine")
   sleep "$((RANDOM % 3)).$((RANDOM % 10))"
   kill -KILL $engine 2> /dev/null
   wait $engine 2> /dev/null
 done
-"$release" run wf.toml --no-isolation -j 4 -q > last.json 2>> kill.err
+"$release" run wf.toml --no-isolation -j 4 -q --json > last.json 2>> kill.err
 lrc=$?
 "$release" verify wf.toml > verify.txt
 vrc=$?

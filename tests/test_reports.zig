@@ -1043,8 +1043,9 @@ test "[unit] - [report]: the html page of a failed launch names its first failur
 
     var logs: std.Io.Writer.Allocating = .init(testing.allocator);
     defer logs.deinit();
-    try workz.logs.show(testing.allocator, a, &logs.writer, try std.fs.path.join(a, &.{ s.path, "launch/attempts/align/001" }), .{});
-    try testing.expect(std.mem.indexOf(u8, logs.written(), "/diagnostics/a/s1/Log.out <==\nloaded\nFATAL ERROR: genome too large\n") != null);
+    try workz.logs.show(testing.allocator, a, &logs.writer, try std.fs.path.join(a, &.{ s.path, "launch/attempts/align/001" }), .{}, .{ .word = "align" });
+    try testing.expect(std.mem.indexOf(u8, logs.written(), "diagnostics a/s1/Log.out  align  attempt 1  failed  ") != null);
+    try testing.expect(std.mem.indexOf(u8, logs.written(), "\nloaded\nFATAL ERROR: genome too large\n") != null);
 }
 
 test "[unit] - [report]: the bottleneck report lists a service with the requests it served and the memory it held" {

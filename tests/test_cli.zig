@@ -198,7 +198,6 @@ test "[failure] - [command line]: options that cannot go together are refused be
     try expectRefused(&.{ "report", "--methods", "--format", "tsv" }, "kanit: --methods prints text, or JSON with --format json\n");
     try expectRefused(&.{ "report", "--bottlenecks", "--json" }, "kanit: --bottlenecks and --compare print text; --format applies to the attempt table and --suggest\n");
     try expectRefused(&.{ "report", "--suggest", "--format", "html" }, "kanit: --suggest prints tsv or json, not html\n");
-    try expectRefused(&.{ "status", "--history", "--json" }, "kanit: --history prints text; --json applies to the summary\n");
     try expectRefused(&.{ "status", "--history", "3", "--launch", "x" }, "kanit: --history lists the recent launches; --launch names one\n");
     try expectRefused(&.{ "plan", "--max-threads", "2" }, "kanit: --max-threads sets the budget --budget checks; give --budget too\n");
     try expectRefused(&.{ "plan", "--max-memory", "2G" }, "kanit: --max-memory sets the budget --budget checks; give --budget too\n");
@@ -225,7 +224,8 @@ test "[failure] - [command line]: each command takes the words its usage names a
     try expectRefused(&.{ "validate", "a.toml", "b.toml" }, "kanit: unexpected argument 'b.toml'; run 'kanit help validate' for the usage\n");
     try expectRefused(&.{"explain"}, "kanit: explain needs a rule name\n");
     try expectRefused(&.{ "explain", "wf.toml", "a", "b" }, "kanit: explain takes one rule name\n");
-    try expectRefused(&.{"logs"}, "kanit: logs needs a rule name\n");
+    try expectRefused(&.{ "logs", "--follow" }, "kanit: --follow needs a rule name\n");
+    try expectRefused(&.{ "logs", "--attempt", "2" }, "kanit: --attempt needs a rule name\n");
     try expectRefused(&.{ "logs", "wf.toml", "a", "b" }, "kanit: logs takes one rule name\n");
     try expectRefused(&.{ "control", "stop" }, "kanit: control needs: stop RULE, retry RULE, or cancel\n");
     try expectRefused(&.{ "control", "cancel", "a" }, "kanit: control needs: stop RULE, retry RULE, or cancel\n");

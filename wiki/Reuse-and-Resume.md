@@ -81,8 +81,9 @@ kanit plan workflow.toml
 ```
 
 ```text
-run   sort_calls  (inputs changed)
-run   report  (producer sort_calls runs; reused if its outputs repeat)
+RULE        DECISION  WHY
+sort_calls  run       inputs changed
+report      run       producer sort_calls runs; reused if its outputs repeat
 2 to run, 0 to reuse
 ```
 

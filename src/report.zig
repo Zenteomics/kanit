@@ -4,6 +4,7 @@
 const std = @import("std");
 const model = @import("model.zig");
 const units = @import("units.zig");
+const naming = @import("names.zig");
 const Allocator = std.mem.Allocator;
 const Attempt = model.Attempt;
 
@@ -412,10 +413,13 @@ fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.writeAll("\ncritical path (the longest chain of work in this launch, and when each rule waited once ready)\n");
     if (l.snapshot_problem) |why| return w.print("  none: the workflow snapshot cannot be read: {s}\n", .{why});
     if (l.path.len == 0) return w.writeAll("  none: no attempt ran\n");
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const n = try naming.Names.init(arena.allocator(), l.rules);
     for (l.path) |p| {
         try w.writeAll("  at ");
         try units.right(w, 8, units.duration, .{p.start_s});
-        try w.print("  {f} ran ", .{units.field(l.rules[p.rule].name, 40)});
+        try w.print("  {f} ran ", .{units.field(n.word[p.rule], 40)});
         try units.right(w, 8, units.duration, .{p.ran_s});
         try w.writeAll(", waited ");
         try units.right(w, 8, units.duration, .{p.waited_s});

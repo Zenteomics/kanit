@@ -298,7 +298,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
-    try (if (pa.summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
+    try (if (pa.json) plan.printJson(&w.interface, &ctx, ds, l.mask) else if (pa.summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else if (pa.rules) plan.printRules(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
     var refused: usize = 0;
     var missing: usize = 0;
     var changed: usize = 0;
@@ -375,7 +375,7 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     defer ids.deinit();
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, va.content);
+    const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, va.content, va.json);
     try w.interface.flush();
     return if (ok) .ok else .failed;
 }
@@ -555,6 +555,29 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     const rec = try workz.records.recordsDir(c.a, root);
     if (opts.launch) |id| if (!sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ rec, "launches", id }))) return failed("no launch {s} recorded in {s}", .{ id, rec });
     const named = if (opts.launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else try workz.records.latestLaunch(c.gpa, c.a, rec);
+    const heading: workz.logs.Heading = .{ .word = la.rule, .color = term.colorOn(1, c.env) };
+    if (la.rule.len == 0) {
+        const launch_dir = named orelse return failed("no launch recorded in {s}; kanit run starts one", .{rec});
+        var tr = try workz.tracker.Tracker.init(c.gpa, launch_dir);
+        defer tr.deinit();
+        _ = try tr.update();
+        const shown = workz.names.ofLaunch(c.gpa, c.a, launch_dir);
+        var buf: [65536]u8 = undefined;
+        var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
+        var any = false;
+        for (tr.rules.items) |r| {
+            if (r.status != .failed or r.dir.len == 0) continue;
+            if (any) try w.interface.writeAll("\n");
+            any = true;
+            var h = heading;
+            h.always = true;
+            h.word = if (shown) |n| (if (n.find(r.name)) |k| n.word[k] else r.name) else r.name;
+            try workz.logs.show(c.gpa, c.a, &w.interface, r.dir, opts, h);
+        }
+        try w.interface.flush();
+        if (!any) return failed("no rule failed in launch {s}; kanit logs RULE prints any rule's output", .{std.fs.path.basename(launch_dir)});
+        return .ok;
+    }
     const rule = workz.names.resolve(c.gpa, c.a, named, la.rule) orelse return failed("no rule {s} in the newest launch's workflow", .{la.rule});
     const fresh = if (opts.follow and opts.launch == null and opts.attempt == null) try workz.logs.awaitAttempt(c.gpa, c.a, root, rule) else null;
     const dir = fresh orelse (try workz.logs.find(c.gpa, c.a, root, rule, opts)) orelse {
@@ -564,7 +587,11 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     };
     var buf: [65536]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    try workz.logs.show(c.gpa, c.a, &w.interface, dir, opts);
+    var h = heading;
+    if (named) |launch_dir| if (workz.names.ofLaunch(c.gpa, c.a, launch_dir)) |n| if (n.find(rule)) |k| {
+        h.word = n.word[k];
+    };
+    try workz.logs.show(c.gpa, c.a, &w.interface, dir, opts, h);
     try w.interface.flush();
     return .ok;
 }
@@ -586,10 +613,25 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
         else => return failed("cannot clean {s}: {s}", .{ root, sys.errorText(err) }),
     };
     const verb = if (opts.dry_run) "would remove" else "removed";
-    try w.interface.print("{s} {d} container(s) and {d} launch(es), {d:.1} MiB", .{ verb, r.containers, r.launches, @as(f64, @floatFromInt(r.bytes)) / 1048576.0 });
-    if (r.kept_for_records > 0) try w.interface.print("; kept {d} older launch(es) that hold recorded attempts", .{r.kept_for_records});
+    const units = workz.units;
+    try w.interface.print("{s} ", .{verb});
+    try units.count(&w.interface, r.containers, "container", "containers");
+    try w.interface.writeAll(" and ");
+    try units.count(&w.interface, r.launches, "launch", "launches");
+    try w.interface.writeAll(", ");
+    try units.size(&w.interface, @as(f64, @floatFromInt(r.bytes)) / 1048576.0);
+    if (r.kept_for_records > 0) {
+        try w.interface.writeAll("; kept ");
+        try units.count(&w.interface, r.kept_for_records, "older launch that holds", "older launches that hold");
+        try w.interface.writeAll(" recorded attempts");
+    }
     if (r.kept_for_recovery > 0) try w.interface.print("; kept {d} that hold outputs a killed launch moved aside, which the next launch puts back", .{r.kept_for_recovery});
-    if (opts.previous) try w.interface.print("; previous/ of {d} attempt(s), {d:.1} MiB", .{ r.previous, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0 });
+    if (opts.previous) {
+        try w.interface.writeAll("; previous/ of ");
+        try units.count(&w.interface, r.previous, "attempt", "attempts");
+        try w.interface.writeAll(", ");
+        try units.size(&w.interface, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0);
+    }
     if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");
     try w.interface.flush();
@@ -614,13 +656,13 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
         if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}; kanit run starts one", .{rec});
         var buf: [16384]u8 = undefined;
         var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-        try monitor.history(c.gpa, &w.interface, root, n);
+        try monitor.history(c.gpa, &w.interface, root, n, json);
         try w.interface.flush();
         return .ok;
     }
     const dir = (try monitor.findLaunch(c.gpa, c.a, root, launch)) orelse return .failed;
     const style: workz.log.Style = .{ .color = color, .marks = workz.log.marksFor(c.env), .cols = if (term.isTerminal(1)) term.size(1).cols else 0 };
-    const ok = if (summary) try monitor.status(c.gpa, c.io, dir, !json and term.isTerminal(1), style) else try monitor.watch(c.gpa, c.io, dir, once, interval, color);
+    const ok = if (summary) try monitor.status(c.gpa, c.io, dir, !json, style) else try monitor.watch(c.gpa, c.io, dir, once, interval, color);
     return if (ok) .ok else .failed;
 }
 

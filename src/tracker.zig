@@ -2,12 +2,15 @@
 //! selected rule with its status and attempt, the shared inputs, the run
 //! samples and the waits for resource groups. The stream is read
 //! incrementally: an update parses only the complete lines appended since
-//! the previous one. The live views and the reports both build on it.
+//! the previous one. The live views and the reports both build on it. Given
+//! the launch's names (`names.zig`), each rule also carries the step and
+//! sample word the views show.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const fields = @import("fields.zig");
 const records = @import("records.zig");
+const naming = @import("names.zig");
 const event_version = records.event_version;
 const Allocator = std.mem.Allocator;
 const str = fields.str;
@@ -42,6 +45,7 @@ pub const Status = enum {
 
 pub const RuleView = struct {
     name: []const u8,
+    shown: []const u8 = "",
     status: Status = .waiting,
     attempt: u32 = 0,
     shared: []const []const u8 = &.{},
@@ -126,6 +130,7 @@ pub const Tracker = struct {
     engine_key: ?i64 = null,
     previous_bytes: u64 = 0,
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
+    names: ?*const naming.Names = null,
 
     pub fn init(gpa: Allocator, launch_dir: []const u8) !Tracker {
         var t: Tracker = .{ .arena = std.heap.ArenaAllocator.init(gpa), .gpa = gpa, .events_path = "" };
@@ -203,7 +208,8 @@ pub const Tracker = struct {
             const owned = try self.arena.allocator().dupe(u8, name);
             gop.key_ptr.* = owned;
             gop.value_ptr.* = self.rules.items.len;
-            try self.rules.append(self.arena.allocator(), .{ .name = owned });
+            const shown = if (self.names) |n| (if (n.find(owned)) |k| n.word[k] else owned) else owned;
+            try self.rules.append(self.arena.allocator(), .{ .name = owned, .shown = shown });
         }
         return &self.rules.items[gop.value_ptr.*];
     }

@@ -666,7 +666,16 @@ fn planText(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, s
     @memset(mask, true);
     const ds = try ctx.decideAll(mask);
     var w: std.Io.Writer.Allocating = .init(a);
-    try (if (summary) plan.printSummary(&w.writer, &ctx, ds, mask) else plan.printPlan(&w.writer, &ctx, ds, mask));
+    if (summary) {
+        try plan.printSummary(&w.writer, &ctx, ds, mask);
+        return w.written();
+    }
+    var runs: usize = 0;
+    for (g.order) |i| {
+        runs += @intFromBool(ds[i].run);
+        try w.writer.print("{s:<5} {s}  ({s})\n", .{ if (ds[i].run) "run" else "reuse", wf.rules[i].name, ds[i].reason });
+    }
+    try w.writer.print("{d} to run, {d} to reuse\n", .{ runs, wf.rules.len - runs });
     return w.written();
 }
 
@@ -872,13 +881,16 @@ test "[unit] - [plan]: verify matches recorded outputs and names a selected rule
     defer ids.deinit();
     var out: std.Io.Writer.Allocating = .init(a);
 
-    try testing.expect(try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false));
+    try testing.expect(try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false, false));
     try testing.expectEqualStrings("3 outputs checked: all match\n", out.written());
 
     _ = st.data.rules.map.swapRemove("c");
     out.clearRetainingCapacity();
-    try testing.expect(!try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false));
-    try testing.expectEqualStrings("unrecorded c\n2 outputs checked: all match; 1 selected rule has no record to check\n", out.written());
+    try testing.expect(!try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false, false));
+    try testing.expectEqualStrings("unrecorded  c\n2 outputs checked: all match; 1 selected rule has no record to check\n", out.written());
+    out.clearRetainingCapacity();
+    try testing.expect(!try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false, true));
+    try testing.expectEqualStrings("{\"v\":1,\"checked\":2,\"by_content\":false,\"digests_stored\":0,\"unrecorded\":1,\"ok\":false,\"findings\":[{\"rule\":\"c\",\"step\":\"c\",\"sample\":null,\"finding\":\"unrecorded\",\"path\":null}]}\n", out.written());
 }
 
 test "[unit] - [plan]: a budget names each rule that does not fit and counts them" {
@@ -1401,4 +1413,57 @@ test "[unit] - [state log]: the log is compacted once it outgrows the state" {
     try testing.expect(!st.logIsLarge());
     st.log_bytes = (8 << 20) + 1;
     try testing.expect(st.logIsLarge());
+}
+
+test "[unit] - [plan]: plan shows a row per step, --rules a row per rule by step and sample, and --json every decision" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    defer testing.allocator.free(problem.message);
+    var wf = try helpers.loadText(&s, helpers.head ++
+        "[[rules]]\nname = \"S1__trim\"\noutput = [\"t1\"]\nshell = \"true\"\nmemory = \"1M\"\ntool = \"fastp\"\n" ++
+        "[[rules]]\nname = \"S2__trim\"\noutput = [\"t2\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S1__align\"\ninput = [\"t1\"]\noutput = [\"a1\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"merge\"\ninput = [\"a1\", \"t2\"]\noutput = [\"m\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var st = try state.load(testing.allocator, s.path);
+    defer st.deinit();
+    var ids = state.Identities.init(testing.allocator);
+    defer ids.deinit();
+    var environ = std.process.Environ.Map.init(testing.allocator);
+    defer environ.deinit();
+    var ctx = try plan.Context.init(testing.allocator, a, &wf, &g, &st, &ids, env_plain, &environ);
+    ctx.extras = try container.ruleExtras(a, &wf, &no_images);
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const ds = try ctx.decideAll(mask);
+    var by_step: std.Io.Writer.Allocating = .init(a);
+    try plan.printPlan(&by_step.writer, &ctx, ds, mask);
+    try testing.expectEqualStrings(
+        \\STEP   TOOL   RULES    RUN  REUSE  WHY
+        \\trim   fastp      2      2      0  no completed record
+        \\align             1      1      0  S1: producer trim/S1 runs
+        \\merge             1      1      0  producer trim/S2 runs
+        \\4 to run, 0 to reuse
+        \\
+    , by_step.written());
+    var by_rule: std.Io.Writer.Allocating = .init(a);
+    try plan.printRules(&by_rule.writer, &ctx, ds, mask);
+    try testing.expectEqualStrings(
+        \\STEP   SAMPLE  DECISION  WHY
+        \\trim   S1      run       no completed record
+        \\trim   S2      run       no completed record
+        \\align  S1      run       producer trim/S1 runs
+        \\merge          run       producer trim/S2 runs
+        \\4 to run, 0 to reuse
+        \\
+    , by_rule.written());
+    var json: std.Io.Writer.Allocating = .init(a);
+    try plan.printJson(&json.writer, &ctx, ds, mask);
+    try testing.expect(std.mem.startsWith(u8, json.written(), "{\"v\":1,\"run\":4,\"reuse\":0,\"rules\":[{\"rule\":\"S1__trim\",\"step\":\"trim\",\"sample\":\"S1\",\"run\":true,\"reason\":\"no completed record\"}"));
 }
