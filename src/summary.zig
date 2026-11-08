@@ -61,9 +61,12 @@ fn worse(x: Cell, y: Cell) Cell {
     return if (rank(y) > rank(x)) y else x;
 }
 
+const ToolVersion = struct { tool: []const u8, command: []const u8, container: ?[]const u8 };
+
 const Snapshot = struct {
     names: names.Names,
     parents: []const []const usize,
+    tools: []const ToolVersion,
 };
 
 fn snapshot(gpa: Allocator, a: Allocator, launch_dir: []const u8, need_graph: bool) ?Snapshot {
@@ -84,7 +87,15 @@ fn snapshot(gpa: Allocator, a: Allocator, launch_dir: []const u8, need_graph: bo
         for (copy, gg.parents) |*dst, src| dst.* = a.dupe(usize, src) catch return null;
         parents = copy;
     } else |_| {};
-    return .{ .names = n, .parents = parents };
+    var tools: std.ArrayList(ToolVersion) = .empty;
+    for (wf.rules, n.tool) |r, tool| {
+        if (tool.len == 0) continue;
+        const command = r.version orelse continue;
+        for (tools.items) |t| {
+            if (std.mem.eql(u8, t.tool, tool)) break;
+        } else tools.append(a, .{ .tool = tool, .command = a.dupe(u8, command) catch return null, .container = if (r.container) |c| a.dupe(u8, c) catch return null else null }) catch return null;
+    }
+    return .{ .names = n, .parents = parents, .tools = tools.items };
 }
 
 pub fn workflowArg(gpa: Allocator, a: Allocator, launch_dir: []const u8) ?[]const u8 {
@@ -293,6 +304,9 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
             try w.writeAll("\n");
         }
     }
+
+    // --- Tools ---
+    if (snap) |sn| if (sn.tools.len > 0) try toolsLine(gpa, a, w, style, launch_dir, sn.tools);
 
     // --- Records ---
     const rec = std.fs.path.dirname(std.fs.path.dirname(launch_dir) orelse launch_dir) orelse launch_dir;
@@ -532,6 +546,41 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
         } else try w.writeAll(bw.buffered());
         try w.writeAll("\n");
     }
+}
+
+fn toolsLine(gpa: Allocator, a: Allocator, w: *Writer, style: logging.Style, launch_dir: []const u8, tools: []const ToolVersion) !void {
+    const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "versions.json" }), 1 << 20) catch return;
+    defer gpa.free(text);
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch return;
+    const list = get(v, "commands") orelse return;
+    if (list != .array) return;
+    const width = if (style.cols > 0) style.cols - 1 else 120;
+    var at: usize = 0;
+    for (tools) |t| {
+        const version = for (list.array.items) |e| {
+            if (!std.mem.eql(u8, str(e, "command") orelse "", t.command)) continue;
+            const container = str(e, "container");
+            if ((container == null) != (t.container == null)) continue;
+            if (container) |cx| if (!std.mem.eql(u8, cx, t.container.?)) continue;
+            if (int(e, "exit_code") != 0) break "";
+            var it = std.mem.tokenizeAny(u8, str(e, "output") orelse "", "\r\n");
+            break logging.versionText(t.tool, std.mem.trim(u8, it.next() orelse "", " \t"));
+        } else "";
+        if (version.len == 0) continue;
+        const item = try std.fmt.allocPrint(a, "{s} {s}", .{ t.tool, version });
+        const need = names.columns(item) + if (at > 0) @as(usize, 3) else 0;
+        if (at == 0) {
+            try label(w, style, "tools");
+            at = label_column + word_width + 2;
+        } else if (at + need > width) {
+            try w.writeAll("\n");
+            try label(w, style, "");
+            at = label_column + word_width + 2;
+        } else try w.writeAll("   ");
+        try w.writeAll(item);
+        at += need;
+    }
+    if (at > 0) try w.writeAll("\n");
 }
 
 fn mark(w: *Writer, style: logging.Style, cell: Cell) !void {

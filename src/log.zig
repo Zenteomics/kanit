@@ -55,6 +55,7 @@ pub const Word = enum {
     step,
     sample,
     shared,
+    tool,
     control,
     warning,
     progress,
@@ -68,7 +69,7 @@ pub const Word = enum {
             .blocked => "\x1b[31m",
             .cancelled => "\x1b[35m",
             .step, .sample => "\x1b[1m",
-            .shared, .control => "\x1b[36m",
+            .shared, .tool, .control => "\x1b[36m",
             .warning => "\x1b[33;1m",
         };
     }
@@ -87,6 +88,7 @@ pub const Style = struct {
     pub fn detailColumn(s: Style) usize {
         var c: usize = time_width + gap.len + word_width + gap.len + s.widths.step + gap.len;
         if (s.widths.sample > 0) c += s.widths.sample + gap.len;
+        if (s.widths.tool > 0) c += s.widths.tool + gap.len;
         return c;
     }
 
@@ -120,22 +122,35 @@ pub fn cut(text: []const u8, cols: usize) []const u8 {
     return text;
 }
 
-pub fn line(w: *Writer, s: Style, time: []const u8, word: Word, step: []const u8, sample: []const u8, detail: []const u8) !void {
+pub const Who = struct {
+    step: []const u8 = "",
+    sample: []const u8 = "",
+    tool: []const u8 = "",
+};
+
+pub fn line(w: *Writer, s: Style, time: []const u8, word: Word, who: Who, detail: []const u8) !void {
+    var buf: [8192]u8 = undefined;
+    var b: Writer = .fixed(&buf);
+    columns(&b, s, time, word, who, detail) catch return columns(w, s, time, word, who, detail);
+    try w.print("{s}\n", .{std.mem.trimEnd(u8, b.buffered(), " ")});
+}
+
+fn columns(w: *Writer, s: Style, time: []const u8, word: Word, who: Who, detail: []const u8) !void {
     try w.print("{s}{s}{s}{s}{s}", .{ s.on("\x1b[2m"), time, s.off(), gap, s.on(word.tint()) });
-    const rest = step.len > 0 or sample.len > 0 or detail.len > 0;
-    if (rest) try pad(w, @tagName(word), word_width) else try w.writeAll(@tagName(word));
-    try w.writeAll(s.off());
-    if (rest) {
+    try pad(w, @tagName(word), word_width);
+    try w.print("{s}{s}", .{ s.off(), gap });
+    try pad(w, who.step, s.widths.step);
+    try w.writeAll(gap);
+    if (s.widths.sample > 0) {
+        try pad(w, who.sample, s.widths.sample);
         try w.writeAll(gap);
-        const after_step = (s.widths.sample > 0 and sample.len > 0) or detail.len > 0;
-        if (after_step) try pad(w, step, s.widths.step) else try w.writeAll(step);
-        if (s.widths.sample > 0 and (sample.len > 0 or detail.len > 0)) {
-            try w.writeAll(gap);
-            if (detail.len > 0) try pad(w, sample, s.widths.sample) else try w.writeAll(sample);
-        }
-        if (detail.len > 0) try w.print("{s}{s}", .{ gap, detail });
     }
-    try w.writeAll("\n");
+    if (s.widths.tool > 0) {
+        if (who.tool.len > 0) try w.print("{s}{s}{s}", .{ s.on("\x1b[2m"), who.tool, s.off() });
+        try w.splatByteAll(' ', s.widths.tool -| names.columns(who.tool));
+        try w.writeAll(gap);
+    }
+    try w.writeAll(detail);
 }
 
 pub fn quote(w: *Writer, s: Style, text: []const u8) !void {
@@ -158,6 +173,34 @@ pub fn divider(w: *Writer, s: Style, c: clock.Civil) !void {
     try w.print("{s}--- {d}-{d:0>2}-{d:0>2} ---{s}\n", .{ s.on("\x1b[2m"), @as(u32, @intCast(c.year)), c.month, c.day, s.off() });
 }
 
+fn mentions(text: []const u8, word: []const u8) bool {
+    if (word.len == 0 or text.len < word.len) return false;
+    var k: usize = 0;
+    while (k + word.len <= text.len) : (k += 1) {
+        if (!std.ascii.eqlIgnoreCase(text[k .. k + word.len], word)) continue;
+        const before = k == 0 or !std.ascii.isAlphanumeric(text[k - 1]);
+        const after = k + word.len == text.len or !std.ascii.isAlphanumeric(text[k + word.len]);
+        if (before and after) return true;
+    }
+    return false;
+}
+
+pub fn versionText(tool: []const u8, printed: []const u8) []const u8 {
+    const named = tool.len > 0 and printed.len > tool.len and std.ascii.startsWithIgnoreCase(printed, tool);
+    var i: usize = 0;
+    while (i < printed.len) : (i += 1) {
+        if (!std.ascii.isDigit(printed[i]) or (i > 0 and std.ascii.isAlphanumeric(printed[i - 1]))) continue;
+        var j = i;
+        var dots: usize = 0;
+        while (j < printed.len and (std.ascii.isAlphanumeric(printed[j]) or printed[j] == '.' or printed[j] == '-' or printed[j] == '_')) : (j += 1) {
+            if (printed[j] == '.') dots += 1;
+        }
+        if (dots > 0) return std.mem.trimEnd(u8, printed[if (named or mentions(printed[0..i], tool)) i else 0..j], ".-_");
+        i = j;
+    }
+    return printed;
+}
+
 pub fn thousands(w: *Writer, n: usize) !void {
     if (n < 1000) return w.print("{d}", .{n});
     try thousands(w, n / 1000);
@@ -177,6 +220,12 @@ pub const StepLine = struct {
     rules: usize,
 };
 
+pub const ToolLine = struct {
+    name: []const u8,
+    version: []const u8 = "",
+    steps: []const u8,
+};
+
 pub const Header = struct {
     version: []const u8,
     workflow: []const u8,
@@ -184,6 +233,7 @@ pub const Header = struct {
     rules: usize,
     samples: usize,
     steps: []const StepLine,
+    tools: []const ToolLine = &.{},
     budget: []const u8,
     isolated: bool,
     records: []const u8,
@@ -226,7 +276,6 @@ pub fn header(w: *Writer, s: Style, h: Header) !void {
             var iw: Writer = .fixed(&buf);
             iw.print("{s} ", .{st.name}) catch {};
             thousands(&iw, st.rules) catch {};
-            if (st.tool) |t| iw.print(" ({s})", .{t}) catch {};
             const item = iw.buffered();
             const need = names.columns(item) + if (at > start) @as(usize, 3) else 0;
             const more: usize = if (lines == header_lines_max and k + 1 < h.steps.len) 12 else 0;
@@ -245,6 +294,25 @@ pub fn header(w: *Writer, s: Style, h: Header) !void {
             at += names.columns(item) + if (at > start) @as(usize, 3) else 0;
         }
         try w.writeAll("\n");
+    }
+    if (h.tools.len > 0) {
+        var name_w: usize = 0;
+        var version_w: usize = 0;
+        for (h.tools) |t| {
+            name_w = @max(name_w, names.columns(t.name));
+            version_w = @max(version_w, names.columns(t.version));
+        }
+        for (h.tools, 0..) |t, k| {
+            try label(w, s, if (k == 0) "tools" else "");
+            try pad(w, t.name, name_w + 3);
+            if (version_w > 0) {
+                if (t.version.len > 0) try pad(w, t.version, version_w + 3) else {
+                    try w.print("{s}{s}{s}", .{ s.on("\x1b[2m"), "-", s.off() });
+                    try w.splatByteAll(' ', version_w + 2);
+                }
+            }
+            try w.print("{s}{s}{s}\n", .{ s.on("\x1b[2m"), t.steps, s.off() });
+        }
     }
     try label(w, s, "records");
     try w.print("{s}   log launch.log", .{h.records});
@@ -521,19 +589,30 @@ pub const Use = struct {
     attempts: u32 = 1,
 };
 
+const duration_width = 6;
+const size_width = 8;
+
 pub fn usage(w: *Writer, u: Use) !void {
-    try units.duration(w, u.wall_s);
+    var buf: [256]u8 = undefined;
+    var b: Writer = .fixed(&buf);
+    try units.right(&b, duration_width, units.duration, .{u.wall_s});
+    const cpu = u.cpu_s != null and u.wall_s >= 0.1;
     if (u.memory_mib) |m| {
-        try w.writeAll("   mem ");
-        try units.size(w, m);
-        try w.writeAll(" of ");
-        try units.size(w, @floatFromInt(u.request_mib));
-    }
-    if (u.cpu_s) |c| if (u.wall_s >= 0.1) {
-        const cores = c / u.wall_s;
-        try w.print("   cpu {d:.1} of {d}", .{ cores, u.threads });
-    };
-    if (u.attempts > 1) try w.print("   after {d} attempts", .{u.attempts});
+        try b.writeAll("   mem ");
+        try units.right(&b, size_width, units.size, .{m});
+        try b.writeAll(" of ");
+        try units.right(&b, size_width, units.size, .{@as(f64, @floatFromInt(u.request_mib))});
+    } else if (cpu or u.attempts > 1) try b.splatByteAll(' ', 3 + 4 + size_width + 4 + size_width);
+    if (cpu) {
+        try b.print("   cpu {d:>4.1} of {d}", .{ u.cpu_s.? / u.wall_s, u.threads });
+    } else if (u.attempts > 1) try b.splatByteAll(' ', 14);
+    if (u.attempts > 1) try b.print("   after {d} attempts", .{u.attempts});
+    try w.writeAll(std.mem.trimEnd(u8, b.buffered(), " "));
+}
+
+pub fn request(w: *Writer, threads: u32, memory_mib: u64) !void {
+    try w.print("{d:>2} {s:<7}   ", .{ threads, if (threads == 1) "thread" else "threads" });
+    try units.right(w, size_width, units.size, .{@as(f64, @floatFromInt(memory_mib))});
 }
 
 // --- Sinks ---
@@ -607,7 +686,7 @@ pub const Log = struct {
         return out;
     }
 
-    pub fn emit(self: *Log, word: Word, step: []const u8, sample: []const u8) void {
+    pub fn emit(self: *Log, word: Word, who: Who) void {
         var t = self.now();
         const detail = self.detail.written();
         for (&self.sinks, 0..) |*slot, k| {
@@ -616,7 +695,7 @@ pub const Log = struct {
             if (!s.shows(word)) continue;
             self.showing[k] = true;
             var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &s.pending);
-            line(&aw.writer, s.style, &t, word, step, sample, detail) catch {};
+            line(&aw.writer, s.style, &t, word, who, detail) catch {};
             s.pending = aw.toArrayList();
         }
         self.footer_dirty = true;

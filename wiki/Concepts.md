@@ -47,7 +47,7 @@ A rule declares its labels with the keys `step`, `sample`, `category` and `tool`
 
 - The step is the text after the last `__` (`ctrl1__STAR_ALIGN` is `STAR_ALIGN`), else the text before the last `_` (`align_ctrl1` is `align`), else the whole name.
 - The sample is the text before the last `__` (`ctrl1`). A name without `__` has none.
-- The tool is the image's name without its registry and tag (`quay.io/biocontainers/star:2.7.11b--h5ca1c30_8` is `star`). A host rule has none.
+- The tool is the image's name without its registry and tag (`quay.io/biocontainers/star:2.7.11b--h5ca1c30_8` is `star`). A host rule takes the program its `version` command runs (`samtools` for `samtools --version | head -1`), and has none without one.
 - A rule has a category only when it declares one.
 
 > [!TIP]

@@ -132,3 +132,28 @@ test "[unit] - [names]: --rerun-rule and --target take STEP/SAMPLE for the rule 
     defer testing.allocator.free(mask);
     try testing.expectEqualSlices(bool, &.{ true, false, true, false, false, false }, mask);
 }
+
+test "[unit] - [names]: a rule without a tool label or image is named by its version command's program" {
+    for ([_]struct { command: []const u8, tool: ?[]const u8 }{
+        .{ .command = "STAR --version", .tool = "STAR" },
+        .{ .command = "bowtie2 --version | head -1", .tool = "bowtie2" },
+        .{ .command = "/opt/tools/bin/samtools --version", .tool = "samtools" },
+        .{ .command = "env LC_ALL=C sort --version", .tool = "sort" },
+        .{ .command = "JAVA_OPTS=-Xmx1g java -version", .tool = "java" },
+        .{ .command = "$(which fastp) --version", .tool = null },
+    }) |c| {
+        const got = workflow.commandTool(c.command);
+        if (c.tool) |want| try testing.expectEqualStrings(want, got.?) else try testing.expect(got == null);
+    }
+    const text = helpers.head ++
+        "[[rules]]\nname = \"a\"\noutput = [\"a\"]\nshell = \"true\"\nmemory = \"1M\"\nversion = \"STAR --version\"\n" ++
+        "[[rules]]\nname = \"b\"\noutput = [\"b\"]\nshell = \"true\"\nmemory = \"1M\"\nversion = \"STAR --version\"\ncontainer = \"quay.io/biocontainers/star:2.7.11b\"\n" ++
+        "[[rules]]\nname = \"c\"\noutput = [\"c\"]\nshell = \"true\"\nmemory = \"1M\"\nversion = \"STAR --version\"\ntool = \"star-aligner\"\n";
+    try withNames(text, struct {
+        fn check(_: *const workflow.Workflow, n: *const names.Names) !void {
+            try testing.expectEqualStrings("STAR", n.tool[0]);
+            try testing.expectEqualStrings("star", n.tool[1]);
+            try testing.expectEqualStrings("star-aligner", n.tool[2]);
+        }
+    }.check);
+}

@@ -73,6 +73,18 @@ pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
     return l;
 }
 
+pub fn commandTool(command: []const u8) ?[]const u8 {
+    var it = std.mem.tokenizeAny(u8, command, " \t\n");
+    while (it.next()) |word| {
+        if (std.mem.indexOfScalar(u8, word, '=') != null and word[0] != '-') continue;
+        if (std.mem.eql(u8, word, "env") or std.mem.eql(u8, word, "exec") or std.mem.eql(u8, word, "command")) continue;
+        const base = std.fs.path.basename(word);
+        for (base) |c| if (!(std.ascii.isAlphanumeric(c) or c == '_' or c == '-' or c == '.' or c == '+')) return null;
+        return if (base.len > 0) base else null;
+    }
+    return null;
+}
+
 fn validLabel(value: []const u8) bool {
     if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return false;
     if ((std.unicode.utf8CountCodepoints(value) catch return false) > 200) return false;
@@ -800,6 +812,9 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
             labels.sample = value;
             labels.declared.sample = true;
         }
+    };
+    if (labels.tool == null) if (version) |v| {
+        labels.tool = commandTool(v);
     };
 
     return .{

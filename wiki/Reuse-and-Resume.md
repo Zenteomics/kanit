@@ -92,12 +92,12 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.7.0   cutoff   launch 20261108T091442.816-48ad09ea
+kanit 0.7.0   cutoff   launch 20261108T101806.162-b294f2b6
           plan       2 rules
           budget     2 threads, 1.0 GiB, 2 jobs, isolated
           records    .workz/latest/   log launch.log   page report.html
-02:14:43  started    sort_calls  1 thread, 64 MiB
-02:14:43  completed  sort_calls  3 ms
+03:18:06  started    sort_calls   1 thread      64 MiB
+03:18:06  completed  sort_calls    2 ms
 ```
 
 `sort_calls` wrote the same sorted file, so `report` was reused without running. Use it on rules whose outputs often repeat byte for byte when their inputs change, such as sorting, filtering or format conversion. A file that embeds the time or the run directory never repeats, so cutoff only costs a hash there.

@@ -250,8 +250,8 @@ new container-failures
   crule slow '[]' '["s.txt"]' '"sleep 30; touch s.txt"' "" 'timeout = "1s"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -k --grace 2 -q --json > s.json 2> err.txt
-check "a container above its memory request is killed as out of memory" 'grep -qE "failed +hog +out of memory at its" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
-check "a timed-out container is stopped" 'grep -qE "failed +slow +timed out at 1.0 s" err.txt'
+check "a container above its memory request is killed as out of memory" 'grep -qE "failed +hog +(\S+ +)?out of memory at its" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "a timed-out container is stopped" 'grep -qE "failed +slow +(\S+ +)?timed out at 1.0 s" err.txt'
 check "failed containers leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && ! ls -d /sys/fs/cgroup$(jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | sed "s|^/sys/fs/cgroup||")/task-* 2> /dev/null'
 
 new container-interrupt
@@ -383,7 +383,7 @@ new service-failures
 timeout 60 "$kanit" run wf.toml "${iso[@]}" -k -q --json > s.json 2> err.txt
 rc=$?
 reason() { jq -r "select(.event == \"task_failed\") | select(.rule == \"$1\") | .reason" "$(last_launch)/events.jsonl"; }
-check "a service that fails before it is ready fails its rules, also one admitted later, with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ] && [ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ] && grep -qE "failed +b1 +shared input broken could not be loaded" err.txt && grep -qE "failed +b2 +shared input broken could not be loaded" err.txt'
+check "a service that fails before it is ready fails its rules, also one admitted later, with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ] && [ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ] && grep -qE "failed +b1 +(\S+ +)?shared input broken could not be loaded" err.txt && grep -qE "failed +b2 +(\S+ +)?shared input broken could not be loaded" err.txt'
 check "a service above its memory is reported as out of memory, and failed services leave nothing behind" 'reason f1 | grep -q "^shared input fat could not be loaded: out of memory" && [ "$(leftovers)" = 0 ] && no_cgroups'
 
 new service-dies

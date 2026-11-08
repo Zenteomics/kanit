@@ -18,28 +18,43 @@ Before a long launch, `kanit plan --budget` checks that every rule fits the budg
 `run` writes one line for every event of the launch, the same on a terminal, on standard error off a terminal and in the launch's `launch.log`:
 
 ```text
-kanit 0.7.0   rnaseq-demo   launch 20261108T085933.139-20885d0a
-          plan       10 rules in 4 steps for 3 samples
-          budget     4 threads, 2.0 GiB, 4 jobs, isolated
-          steps      trim 3 (fastp)   align 3 (STAR)   count 3   matrix 1
+kanit 0.7.0   rnaseq-mini   launch 20261108T101855.266-41e7e452
+          plan       7 rules in 4 steps for 2 samples
+          budget     4 threads, 4.0 GiB, 4 jobs, isolated
+          steps      trim 2   align 2   count 2   matrix 1
+          tools      fastp   1.4.0     trim
+                     star    2.7.11b   align
+                     awk     5.3.2     count
+                     sort    9.10      matrix
           records    .workz/latest/   log launch.log   page report.html
-01:59:33  retrying   trim    S3  exit 1 after 2 ms   attempt 1 of 2
-                                 │ fastp: temporary I/O error
-01:59:34  completed  trim    S3  0.5 s   cpu 0.0 of 1   after 2 attempts
-01:59:35  completed  trim    S2  1.5 s   cpu 0.0 of 1
-01:59:35  step       trim        3 of 3 completed in 1.5 s   slowest S2 1.5 s
-01:59:35  failed     align   S2  exit 2 after 0.5 s
-                                 │ Mapping reads
-                                 │ STAR: genome index is incomplete: missing SA file
-                                 kanit logs align/S2   .workz/latest/attempts/S2__align/001/
-01:59:35  blocked    count   S2  +1 more   after align/S2 failed
-01:59:35  sample             S2  1 of 3 steps completed, 1 failed, 1 blocked in 2.1 s
-01:59:37  sample             S1  all 3 steps completed in 3.8 s
+03:18:55  started    trim    S1  fastp   1 thread     2.4 GiB
+03:18:56  tool       trim        fastp  1.4.0
+03:18:59  completed  trim    S1  fastp   3.9 s   mem  1.0 GiB of  2.4 GiB   cpu  0.9 of 1
+03:18:59  started    trim    S2  fastp   1 thread     2.4 GiB   waited 3.9 s
+03:18:59  started    align   S1  star    2 threads    512 MiB
+03:19:00  tool       align       star   2.7.11b
+03:19:00  completed  align   S1  star    0.5 s   mem  277 MiB of  512 MiB   cpu  0.7 of 2
+03:19:00  started    count   S1  awk     1 thread     256 MiB
+03:19:00  tool       count       awk    5.3.2
+03:19:00  completed  count   S1  awk     12 ms
+03:19:00  sample             S1         all 3 steps completed   in 4.4 s
+03:19:03  completed  trim    S2  fastp   4.0 s   mem  1.0 GiB of  2.4 GiB   cpu  0.9 of 1
+03:19:03  step       trim        fastp  2 of 2 completed   in 7.9 s   slowest S2 4.0 s
+03:19:03  started    align   S2  star    2 threads    512 MiB
+03:19:04  completed  align   S2  star    0.5 s   mem  261 MiB of  512 MiB   cpu  0.8 of 2
+03:19:04  step       align       star   2 of 2 completed   in 4.5 s   slowest S1 0.5 s
+03:19:04  started    count   S2  awk     1 thread     256 MiB
+03:19:04  completed  count   S2  awk     13 ms
+03:19:04  step       count       awk    2 of 2 completed   in 4.0 s   slowest S2 13 ms
+03:19:04  sample             S2         all 3 steps completed   in 4.5 s
+03:19:04  started    matrix      sort    1 thread     256 MiB
+03:19:04  completed  matrix      sort     3 ms
+03:19:04  tool       matrix      sort   9.10
 ```
 
-- The launch opens with its shape: how many rules, steps and samples it selected, the budget, each step with its rule count and tool, and where its records are.
-- Every line has the local time, a status word, the rule's step and sample, and what happened. A rule that has a sample is named by its step and sample, and `STEP/SAMPLE` (such as `align/S2`) names it in commands; a rule without one is named by its rule name.
-- The status words are `started`, `completed`, `retrying`, `failed`, `blocked` and `cancelled` for rules, `step` and `sample` when every selected rule of a step or sample has ended, `shared` for shared inputs and services, `control` for commands and interrupts, `warning`, and `progress`.
+- The launch opens with its shape: how many rules, steps and samples it selected, the budget, each step with its rule count, each tool with the version an earlier launch recorded (`-` until one has) and the steps that use it, and where its records are.
+- Every line has the local time, a status word, the rule's step and sample, its tool, and what happened, each in its own column; the times, memory and CPU of `started` and `completed` lines sit in fixed columns too. A rule that has a sample is named by its step and sample, and `STEP/SAMPLE` (such as `align/S2`) names it in commands; a rule without one is named by its rule name.
+- The status words are `started`, `completed`, `retrying`, `failed`, `blocked` and `cancelled` for rules, `step` and `sample` when every selected rule of a step or sample has ended, `shared` for shared inputs and services, `tool` for what a tool's [version command](Writing-Workflows.md#tool-versions) printed in this launch, `control` for commands and interrupts, `warning`, and `progress`.
 - A completed rule shows its time, its memory against its request when it was measured, and the cores it used against its threads. A failure names its reason in a few words (`exit 2`, `timed out at 2h 00m`, `out of memory at its 64 MiB`, `killed by SIGSEGV`), quotes the last lines of its standard error or kept diagnostics, and names the command that shows its whole output. Rules that a failure blocks are reported once for that failure.
 - On a terminal, color marks the status words, the `started` lines are left out, and a footer below the lines shows a bar of the rules done, the counts, the elapsed time, every step's progress and the running rules. `-v` keeps the `started` lines. `--no-color` or `NO_COLOR=1` turns colors off; outside a UTF-8 locale the marks are ASCII.
 - Off a terminal, the `started` lines are kept, and a `progress` line every five minutes carries the footer's counts.
@@ -95,21 +110,21 @@ If the engine itself is killed, the process holding its network namespace detect
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-kanit 0.7.0   failures   launch 20261108T092833.628-973e323c
+kanit 0.7.0   failures   launch 20261108T101843.528-5cbfab09
           plan       5 rules
           budget     4 threads, 1.0 GiB, 4 jobs, isolated
           records    .workz/latest/   log launch.log   page report.html
-02:28:34  failed     exits      exit 2 after 3 ms
+03:18:43  failed     exits      exit 2 after 3 ms
                                 │ sort: cannot read: samples.tsv: No such file or directory
                                 kanit logs exits   .workz/latest/attempts/exits/001/
-02:28:34  failed     no_output  exited 0 without output d.txt
-02:28:34  blocked    after      after exits failed
-02:28:34  failed     too_big    out of memory at its 64 MiB
+03:18:43  failed     no_output  exited 0 without output d.txt
+03:18:44  blocked    after      after exits failed
+03:18:44  failed     too_big    out of memory at its 64 MiB
                                 raise its memory, or see kanit report --suggest
-02:28:36  failed     slow       timed out at 2.0 s
+03:18:46  failed     slow       timed out at 2.0 s
 
           failed     0 of 5 rules done in 2.5 s: 4 failed, 1 blocked
-          failed     exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
+          failed     exits      exited with status 2: sort: cannot read: samples.tsv: No such file or dire...
                      no_output  exited 0 without output d.txt
                      too_big    out of memory: could not stay within its 64 MiB request
                      slow       timed out after 2 s

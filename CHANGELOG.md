@@ -16,6 +16,7 @@ Large workflows run faster in less memory, a launch writes its resume state in s
 - Every command and option that takes a rule also takes its step and sample as `STEP/SAMPLE`, such as `kanit logs align/S2` for the rule `S2__align`; bash completion offers both.
 - Each launch keeps its run log as text in `launch.log`, and `.workz/latest` links to the newest launch, so `tail -f .workz/latest/launch.log` follows a launch.
 - `run -v` keeps a line for every rule that starts on a terminal.
+- The run log names each rule's tool in its own column. The launch's header lists each tool with the version an earlier launch recorded and the steps that use it, a `tool` line reports what each `version` command printed in this launch, and the summary ends with every tool's version. A host rule without a `tool` label takes the program its `version` command runs, also in reports.
 - `plan` prints one row per step and `plan --rules` one row per rule by step and sample; `plan --json`, `verify --json` and `status --history --json` print JSON.
 - `kanit logs` without a rule prints the newest launch's failed attempts; each stream opens with a line naming the rule, the attempt, how it ended and its size, and `-n N` prints the last N lines.
 - The summary that `run` ends with, and that `kanit status` prints on a terminal for a running or ended launch, shows a matrix of samples by steps, or each step's counts and tool, names the failure that blocked each blocked rule, and ends with the commands to type next; `launch.log` keeps it at its end.

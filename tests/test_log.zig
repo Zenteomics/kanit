@@ -23,22 +23,22 @@ fn expectText(expected: []const u8, comptime f: anytype, args: anytype) !void {
 }
 
 test "[unit] - [log]: a line puts time, status word, step, sample and details in fixed columns" {
-    try expectText("14:03:21  completed  trim    S1   1.0 s\n", log.line, .{ plain, "14:03:21", .completed, "trim", "S1", "1.0 s" });
-    try expectText("14:03:23  failed     align   S2   exit 2 after 0.5 s\n", log.line, .{ plain, "14:03:23", .failed, "align", "S2", "exit 2 after 0.5 s" });
-    try expectText("14:03:26  step       count        2 of 3 completed\n", log.line, .{ plain, "14:03:26", .step, "count", "", "2 of 3 completed" });
-    try expectText("14:03:25  sample             S1   all 3 steps completed\n", log.line, .{ plain, "14:03:25", .sample, "", "S1", "all 3 steps completed" });
+    try expectText("14:03:21  completed  trim    S1   1.0 s\n", log.line, .{ plain, "14:03:21", .completed, log.Who{ .step = "trim", .sample = "S1" }, "1.0 s" });
+    try expectText("14:03:23  failed     align   S2   exit 2 after 0.5 s\n", log.line, .{ plain, "14:03:23", .failed, log.Who{ .step = "align", .sample = "S2" }, "exit 2 after 0.5 s" });
+    try expectText("14:03:26  step       count        2 of 3 completed\n", log.line, .{ plain, "14:03:26", .step, log.Who{ .step = "count" }, "2 of 3 completed" });
+    try expectText("14:03:25  sample             S1   all 3 steps completed\n", log.line, .{ plain, "14:03:25", .sample, log.Who{ .sample = "S1" }, "all 3 steps completed" });
 }
 
 test "[unit] - [log]: a line ends at its last value, and without samples there is no sample column" {
-    try expectText("14:03:21  blocked    matrix\n", log.line, .{ plain, "14:03:21", .blocked, "matrix", "", "" });
+    try expectText("14:03:21  blocked    matrix\n", log.line, .{ plain, "14:03:21", .blocked, log.Who{ .step = "matrix" }, "" });
     const no_samples: log.Style = .{ .widths = .{ .step = 6, .sample = 0 } };
-    try expectText("14:03:21  completed  matrix  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, "matrix", "", "0.3 s" });
-    try expectText("14:03:21  completed  a_much_longer_name  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, "a_much_longer_name", "", "0.3 s" });
+    try expectText("14:03:21  completed  matrix  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, log.Who{ .step = "matrix" }, "0.3 s" });
+    try expectText("14:03:21  completed  a_much_longer_name  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, log.Who{ .step = "a_much_longer_name" }, "0.3 s" });
 }
 
 test "[unit] - [log]: color marks the time and the status word only" {
     const colored: log.Style = .{ .color = true, .widths = .{ .step = 4, .sample = 0 } };
-    try expectText("\x1b[2m14:03:21\x1b[0m  \x1b[31;1mfailed   \x1b[0m  trim  exit 1 after 0.0 s\n", log.line, .{ colored, "14:03:21", .failed, "trim", "", "exit 1 after 0.0 s" });
+    try expectText("\x1b[2m14:03:21\x1b[0m  \x1b[31;1mfailed   \x1b[0m  trim  exit 1 after 0.0 s\n", log.line, .{ colored, "14:03:21", .failed, log.Who{ .step = "trim" }, "exit 1 after 0.0 s" });
 }
 
 test "[unit] - [log]: quoted output and hints start at the detail column, and a terminal cuts quotes to its width" {
@@ -52,21 +52,36 @@ test "[unit] - [log]: quoted output and hints start at the detail column, and a 
     try expectText("                                  kanit logs align/S2   .workz/latest/attempts/S2__align/001/\n", log.hint, .{ plain, "kanit logs align/S2", ".workz/latest/attempts/S2__align/001/" });
 }
 
-test "[unit] - [log]: the header shows the launch's shape, budget and records in the status-word column" {
+test "[unit] - [log]: the header shows the launch's shape, budget, tools with their versions and records in the status-word column" {
     const steps = [_]log.StepLine{
-        .{ .name = "trim", .tool = "fastp", .rules = 3 },
-        .{ .name = "align", .tool = "STAR", .rules = 3 },
+        .{ .name = "trim", .rules = 3 },
+        .{ .name = "align", .rules = 3 },
         .{ .name = "count", .rules = 3 },
         .{ .name = "matrix", .rules = 1 },
+    };
+    const tools = [_]log.ToolLine{
+        .{ .name = "fastp", .version = "1.4.0", .steps = "trim" },
+        .{ .name = "STAR", .version = "2.7.11b", .steps = "align" },
+        .{ .name = "awk", .steps = "count, matrix" },
     };
     try expectText(
         \\kanit 0.7.0   rnaseq-demo   launch 20261108T142320.410-8c1d
         \\          plan       10 rules in 4 steps for 3 samples
         \\          budget     4 threads, 2.0 GiB, 4 jobs, isolated
-        \\          steps      trim 3 (fastp)   align 3 (STAR)   count 3   matrix 1
+        \\          steps      trim 3   align 3   count 3   matrix 1
+        \\          tools      fastp   1.4.0     trim
+        \\                     STAR    2.7.11b   align
+        \\                     awk     -         count, matrix
         \\          records    .workz/latest/   log launch.log   page report.html
         \\
-    , log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "rnaseq-demo", .launch = "20261108T142320.410-8c1d", .rules = 10, .samples = 3, .steps = &steps, .budget = "4 threads, 2.0 GiB, 4 jobs", .isolated = true, .records = ".workz/latest/", .page = true } });
+    , log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "rnaseq-demo", .launch = "20261108T142320.410-8c1d", .rules = 10, .samples = 3, .steps = &steps, .tools = &tools, .budget = "4 threads, 2.0 GiB, 4 jobs", .isolated = true, .records = ".workz/latest/", .page = true } });
+}
+
+test "[unit] - [log]: a tool column follows the sample, and lines without a tool keep the details in line" {
+    const with_tools: log.Style = .{ .widths = .{ .step = 5, .sample = 2, .tool = 5 } };
+    try expectText("03:11:44  completed  align  S1  STAR     0.5 s\n", log.line, .{ with_tools, "03:11:44", .completed, log.Who{ .step = "align", .sample = "S1", .tool = "STAR" }, "  0.5 s" });
+    try expectText("03:11:48  completed  count  S2           12 ms\n", log.line, .{ with_tools, "03:11:48", .completed, log.Who{ .step = "count", .sample = "S2" }, "  12 ms" });
+    try expectText("03:11:40  tool       trim       fastp  1.4.0\n", log.line, .{ with_tools, "03:11:40", .tool, log.Who{ .step = "trim", .tool = "fastp" }, "1.4.0" });
 }
 
 test "[unit] - [log]: a header of rules that are their own steps leaves the steps out and wraps a long step list" {
@@ -156,10 +171,23 @@ test "[unit] - [log]: a failure's details name the reason in few words and say w
     }
 }
 
-test "[unit] - [log]: resource use leaves out what was not measured" {
-    try expectText("1.0 s   mem 12 MiB of 32 MiB   cpu 0.9 of 1", log.usage, .{log.Use{ .wall_s = 1, .memory_mib = 12, .request_mib = 32, .cpu_s = 0.9, .threads = 1 }});
-    try expectText("20 ms", log.usage, .{log.Use{ .wall_s = 0.02, .request_mib = 32, .cpu_s = 0.01, .threads = 1 }});
-    try expectText("2m 05s   cpu 3.5 of 4   after 2 attempts", log.usage, .{log.Use{ .wall_s = 125, .request_mib = 32, .cpu_s = 437.5, .threads = 4, .attempts = 2 }});
+test "[unit] - [log]: resource use fills fixed columns, so time, memory and CPU line up, and leaves out what was not measured" {
+    try expectText(" 1.0 s   mem   12 MiB of   32 MiB   cpu  0.9 of 1", log.usage, .{log.Use{ .wall_s = 1, .memory_mib = 12, .request_mib = 32, .cpu_s = 0.9, .threads = 1 }});
+    try expectText("2m 05s   mem  1.0 GiB of  2.4 GiB   cpu 12.5 of 16", log.usage, .{log.Use{ .wall_s = 125, .memory_mib = 1024, .request_mib = 2500, .cpu_s = 1562.5, .threads = 16 }});
+    try expectText(" 20 ms", log.usage, .{log.Use{ .wall_s = 0.02, .request_mib = 32, .cpu_s = 0.01, .threads = 1 }});
+    try expectText("2m 05s                              cpu  3.5 of 4   after 2 attempts", log.usage, .{log.Use{ .wall_s = 125, .request_mib = 32, .cpu_s = 437.5, .threads = 4, .attempts = 2 }});
+    try expectText(" 1 thread      32 MiB", log.request, .{ 1, 32 });
+    try expectText("16 threads    2.4 GiB", log.request, .{ 16, 2500 });
+}
+
+test "[unit] - [log]: a version is the number a tool prints, or its line up to that number" {
+    try testing.expectEqualStrings("1.4.0", log.versionText("fastp", "fastp 1.4.0"));
+    try testing.expectEqualStrings("2.7.11b", log.versionText("star", "2.7.11b"));
+    try testing.expectEqualStrings("5.3.2", log.versionText("awk", "GNU Awk 5.3.2, API 4.0, PMA Avon 8-g1"));
+    try testing.expectEqualStrings("9.10", log.versionText("sort", "sort (GNU coreutils) 9.10"));
+    try testing.expectEqualStrings("3.14.0", log.versionText("python", "Python 3.14.0"));
+    try testing.expectEqualStrings("samtools 1.21", log.versionText("", "samtools 1.21"));
+    try testing.expectEqualStrings("release seven", log.versionText("tool", "release seven"));
 }
 
 test "[unit] - [log]: counts of thousands are grouped, and a UTF-8 locale chooses the Unicode marks" {

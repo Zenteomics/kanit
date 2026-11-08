@@ -17,6 +17,7 @@ const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
 const naming = @import("names.zig");
+const fields = @import("fields.zig");
 const logging = @import("log.zig");
 const clock = @import("clock.zig");
 const summary_text = @import("summary.zig");
@@ -178,6 +179,7 @@ const Version = struct {
     container: ?[]const u8,
     image: ?[]const u8,
     file: []const u8,
+    rule: usize = 0,
     pid: linux.pid_t = 0,
     started: bool = false,
     exit_code: ?u32 = null,
@@ -406,7 +408,7 @@ const Engine = struct {
     // --- The run log ---
 
     fn say(self: *Engine, word: logging.Word, i: usize) void {
-        self.log.emit(word, self.names.step[i], self.names.sample[i]);
+        self.log.emit(word, .{ .step = self.names.step[i], .sample = self.names.sample[i], .tool = self.names.tool[i] });
     }
 
     fn quoteStderr(self: *Engine, dir: []const u8, n: usize) bool {
@@ -534,7 +536,7 @@ const Engine = struct {
                         w.print("   slowest {s} ", .{if (self.names.sample[si].len > 0) self.names.sample[si] else self.names.word[si]}) catch {};
                         units.duration(w, g.slowest_s) catch {};
                     };
-                    self.log.emit(.step, self.names.steps[m.step].name, "");
+                    self.log.emit(.step, .{ .step = self.names.steps[m.step].name, .tool = self.names.steps[m.step].tool orelse "" });
                 },
                 .sample => {
                     if (g.completed + g.reused == g.selected) {
@@ -548,7 +550,7 @@ const Engine = struct {
                         w.writeAll("   in ") catch {};
                         units.duration(w, @as(f64, @floatFromInt(now - g.first_ns)) / 1e9) catch {};
                     }
-                    self.log.emit(.sample, "", self.names.samples[m.sample]);
+                    self.log.emit(.sample, .{ .sample = self.names.samples[m.sample] });
                 },
             }
         }
@@ -990,7 +992,7 @@ const Engine = struct {
         self.listActive(i);
         try self.by_pid.put(self.gpa, t.pid, i);
         if (self.guard) |gd| gd.note('+', t.pid);
-        self.queueVersion(r) catch {};
+        self.queueVersion(i) catch {};
         for (r.shared_index) |hi| self.holders[hi].served += 1;
         t.started_ns = sys.monoNs();
         t.started_real = sys.realNs();
@@ -998,8 +1000,7 @@ const Engine = struct {
         t.deadline_ns = schedule.deadline(t.started_ns, self.timeoutOf(r));
         self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = if (t.cg) |cg| cg.path else null, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
         const w = self.log.text();
-        w.print("{d} {s}, ", .{ r.threads, if (r.threads == 1) "thread" else "threads" }) catch {};
-        units.size(w, @floatFromInt(r.memory_mib)) catch {};
+        logging.request(w, r.threads, r.memory_mib) catch {};
         if (t.max_attempts > 1) w.print("   attempt {d} of {d}", .{ t.attempts, t.max_attempts }) catch {};
         if (t.queued_s >= 1) {
             w.writeAll("   waited ") catch {};
@@ -1210,7 +1211,7 @@ const Engine = struct {
         const w = self.log.text();
         w.writeAll("loading, ") catch {};
         units.size(w, @floatFromInt(h.mib)) catch {};
-        self.log.emit(.shared, s.name, "");
+        self.log.emit(.shared, .{ .step = s.name });
     }
 
     fn startService(self: *Engine, hi: usize) !void {
@@ -1284,7 +1285,7 @@ const Engine = struct {
         const w = self.log.text();
         w.writeAll("starting the service, ") catch {};
         units.size(w, @floatFromInt(h.mib)) catch {};
-        self.log.emit(.shared, s.name, "");
+        self.log.emit(.shared, .{ .step = s.name });
     }
 
     fn stopHolder(self: *Engine, h: *Holder) void {
@@ -1318,7 +1319,7 @@ const Engine = struct {
         const w = self.log.text();
         w.writeAll("ready after ") catch {};
         units.duration(w, @as(f64, @floatFromInt(sys.monoNs() - h.started_ns)) / 1e9) catch {};
-        self.log.emit(.shared, self.wf.shared[hi].name, "");
+        self.log.emit(.shared, .{ .step = self.wf.shared[hi].name });
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .staging) continue;
             if (self.sharedReady(i)) try self.start(i);
@@ -1440,7 +1441,7 @@ const Engine = struct {
             h.failed_starts += 1;
             self.events.emit("shared_retry", .{ .name = s.name, .reason = why, .next_start = h.starts + 1 });
             self.log.text().print("restarting: {s}", .{why}) catch {};
-            self.log.emit(.shared, s.name, "");
+            self.log.emit(.shared, .{ .step = s.name });
             try self.startHolderOrFail(hi);
             return;
         }
@@ -1461,7 +1462,7 @@ const Engine = struct {
         h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
         self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });
         self.log.text().print("failed: {s}", .{why}) catch {};
-        self.log.emit(.shared, s.name, "");
+        self.log.emit(.shared, .{ .step = s.name });
         const lost = try std.fmt.allocPrint(self.a, "shared service {s} failed while the rule used it: {s}", .{ s.name, why });
         for (self.tasks, 0..) |*t, i| {
             if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) == null) continue;
@@ -1805,7 +1806,7 @@ const Engine = struct {
             const end = (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse {
                 if (n < buf.len) return;
                 self.log.text().print("ignored a line of over {d} bytes", .{buf.len}) catch {};
-                self.log.emit(.control, "", "");
+                self.log.emit(.control, .{});
                 self.control_offset += n;
                 self.control_skip = true;
                 continue;
@@ -1821,7 +1822,7 @@ const Engine = struct {
                 const result = try self.control(cmd, name);
                 self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
                 self.log.text().print("{s}: {s}", .{ cmd, result }) catch {};
-                if (self.wf.findRule(name)) |ri| self.say(.control, ri) else self.log.emit(.control, name, "");
+                if (self.wf.findRule(name)) |ri| self.say(.control, ri) else self.log.emit(.control, .{ .step = name });
             }
         }
     }
@@ -2048,7 +2049,7 @@ const Engine = struct {
         const t0 = sys.monoNs();
         writePage(self.gpa, path, self.launch_dir, .{ .wf = self.wf, .g = self.g }) catch |err| {
             self.log.text().print("cannot write {s} ({s}); the page stops updating", .{ monitor.shownPath(self.a, path), sys.errorText(err) }) catch {};
-            self.log.emit(.warning, "", "");
+            self.log.emit(.warning, .{});
             self.page_path = null;
             return;
         };
@@ -2082,7 +2083,8 @@ const Engine = struct {
 
     // --- Tool versions ---
 
-    fn queueVersion(self: *Engine, r: *const workflow.Rule) !void {
+    fn queueVersion(self: *Engine, i: usize) !void {
+        const r = self.rule(i);
         const command = r.version orelse return;
         const image: ?[]const u8 = if (r.container) |img| self.images.get(img) else null;
         for (self.versions.items) |v| {
@@ -2096,6 +2098,7 @@ const Engine = struct {
             .container = r.container,
             .image = image,
             .file = try std.fmt.allocPrint(self.a, "{s}/{d}.log", .{ dir, self.versions.items.len + 1 }),
+            .rule = i,
         });
         self.startVersion();
     }
@@ -2162,7 +2165,24 @@ const Engine = struct {
         if (self.guard) |gd| gd.note('-', v.pid);
         v.exit_code = rp.exitCode() orelse if (rp.signal()) |s| 128 + @as(u32, @intCast(s)) else null;
         self.version_running = null;
+        self.logVersion(v);
         self.startVersion();
+    }
+
+    fn logVersion(self: *Engine, v: *const Version) void {
+        const i = v.rule;
+        const w = self.log.text();
+        if (v.exit_code != 0) {
+            w.print("version command failed with status {d}: {s}", .{ v.exit_code orelse 0, v.command }) catch {};
+        } else {
+            const head = sys.readHead(self.gpa, v.file, version_output_max) catch return;
+            defer self.gpa.free(head);
+            const first = firstLine(head);
+            const tool = self.names.tool[i];
+            w.writeAll(if (first.len > 0) logging.cut(logging.versionText(tool, first), 120) else "printed no version") catch {};
+        }
+        const step = self.names.steps[self.names.step_of[i]];
+        self.log.emit(.tool, .{ .step = step.name, .tool = if (self.names.tool[i].len > 0) self.names.tool[i] else step.tool orelse "" });
     }
 
     fn writeVersions(self: *Engine) !void {
@@ -2193,14 +2213,14 @@ const Engine = struct {
             n.pid = 0;
             self.events.emit("network_holder_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
             self.log.text().writeAll("the run's network holder ended; a killed engine would no longer end its tasks") catch {};
-            self.log.emit(.warning, "", "");
+            self.log.emit(.warning, .{});
             return true;
         };
         if (self.guard) |*g| if (g.pid == rp.pid) {
             g.pid = 0;
             self.events.emit("guard_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
             self.log.text().writeAll("the guard of tasks without isolation ended; a killed engine would leave its tasks running") catch {};
-            self.log.emit(.warning, "", "");
+            self.log.emit(.warning, .{});
             return true;
         };
         return false;
@@ -2296,7 +2316,7 @@ const Engine = struct {
                     .ignore => {},
                     .kill => {
                         self.log.text().writeAll("interrupted again: killing the running rules") catch {};
-                        self.log.emit(.control, "", "");
+                        self.log.emit(.control, .{});
                         for (self.tasks) |*t| if (t.status == .running) {
                             t.kill_at = now;
                         };
@@ -2309,12 +2329,12 @@ const Engine = struct {
                         self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
                         if (self.interrupted) {
                             self.log.text().writeAll("interrupted: the launch is already stopping; interrupt again to kill") catch {};
-                            self.log.emit(.control, "", "");
+                            self.log.emit(.control, .{});
                         } else {
                             self.interrupted = true;
                             self.interrupted_at = now;
                             self.log.text().writeAll("interrupted: stopping the running rules; interrupt again to kill") catch {};
-                            self.log.emit(.control, "", "");
+                            self.log.emit(.control, .{});
                             self.beginStop();
                         }
                     },
@@ -2414,6 +2434,42 @@ fn budgetReason(reason: []const u8) bool {
 }
 
 const version_output_max = 4096;
+
+fn recordedVersions(gpa: Allocator, a: Allocator, rec: []const u8, current: []const u8) !std.StringHashMapUnmanaged([]const u8) {
+    var out: std.StringHashMapUnmanaged([]const u8) = .empty;
+    const launches = try records.launchNames(gpa, a, rec);
+    var k = launches.len;
+    var read: usize = 0;
+    while (k > 0 and read < 20) {
+        k -= 1;
+        if (std.mem.eql(u8, launches[k], current)) continue;
+        const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ rec, "launches", launches[k], "versions.json" }), 1 << 20) catch continue;
+        defer gpa.free(text);
+        read += 1;
+        const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch continue;
+        const list = fields.get(v, "commands") orelse continue;
+        if (list != .array) continue;
+        for (list.array.items) |e| {
+            if (fields.int(e, "exit_code") != 0) continue;
+            const command = fields.str(e, "command") orelse continue;
+            const image = fields.str(e, "image") orelse "";
+            const line = firstLine(fields.str(e, "output") orelse "");
+            if (line.len == 0) continue;
+            const gop = try out.getOrPut(a, try std.fmt.allocPrint(a, "{s}\x00{s}", .{ command, image }));
+            if (!gop.found_existing) gop.value_ptr.* = logging.cut(line, 40);
+        }
+    }
+    return out;
+}
+
+fn firstLine(text: []const u8) []const u8 {
+    var it = std.mem.tokenizeAny(u8, text, "\r\n");
+    while (it.next()) |l| {
+        const t = std.mem.trim(u8, l, " \t");
+        if (t.len > 0) return t;
+    }
+    return "";
+}
 
 const diagnostics_max = 64 * 1024;
 
@@ -2956,6 +3012,35 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         for (engine.tally.steps, engine.names.steps) |grp, step| if (grp.selected > 0) try steps.append(a, .{ .name = step.name, .tool = step.tool, .rules = grp.selected });
         var samples: usize = 0;
         for (engine.tally.samples) |grp| samples += @intFromBool(grp.selected > 0);
+        const known = recordedVersions(gpa, a, rec, launch.id) catch std.StringHashMapUnmanaged([]const u8).empty;
+        var tools: std.ArrayList(logging.ToolLine) = .empty;
+        var tool_steps: std.ArrayList(std.ArrayList(u8)) = .empty;
+        for (wf.rules, 0..) |r, ri| if (mask[ri]) {
+            const tool = engine.names.tool[ri];
+            if (tool.len == 0) continue;
+            const step = engine.names.steps[engine.names.step_of[ri]].name;
+            const k = for (tools.items, 0..) |t, k| {
+                if (std.mem.eql(u8, t.name, tool)) break k;
+            } else blk: {
+                var seen_version: []const u8 = "";
+                if (r.version) |cmd| {
+                    const image = if (r.container) |img| engine.images.get(img) orelse "" else "";
+                    seen_version = logging.versionText(tool, known.get(try std.fmt.allocPrint(a, "{s}\x00{s}", .{ cmd, image })) orelse "");
+                }
+                try tools.append(a, .{ .name = tool, .version = seen_version, .steps = "" });
+                try tool_steps.append(a, .empty);
+                break :blk tools.items.len - 1;
+            };
+            const list = &tool_steps.items[k];
+            var seen = false;
+            var it = std.mem.splitSequence(u8, list.items, ", ");
+            while (it.next()) |x| seen = seen or std.mem.eql(u8, x, step);
+            if (!seen) {
+                if (list.items.len > 0) try list.appendSlice(a, ", ");
+                try list.appendSlice(a, step);
+            }
+        };
+        for (tools.items, tool_steps.items) |*t, list| t.steps = list.items;
         engine.latest_shown = monitor.shownPath(a, try std.fs.path.join(a, &.{ rec, "latest" }));
         engine.log.opening(.{
             .version = version,
@@ -2964,6 +3049,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             .rules = selected,
             .samples = samples,
             .steps = steps.items,
+            .tools = tools.items,
             .budget = budget.written(),
             .isolated = opts.isolation,
             .records = try std.fmt.allocPrint(a, "{s}/", .{engine.latest_shown}),

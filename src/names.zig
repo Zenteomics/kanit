@@ -3,8 +3,9 @@
 //! word STEP/SAMPLE where a single word is needed. Every other rule is shown
 //! by its name, and so are rules that share a step and sample with another.
 //! Commands that take a rule accept the same word (`find`,
-//! `Workflow.findRule`). Steps and samples are listed in the order their
-//! first rule appears, each step with the first tool its rules name.
+//! `Workflow.findRule`). Each rule also carries the tool it names, shown in
+//! its own column. Steps and samples are listed in the order their first
+//! rule appears, each step with the first tool its rules name.
 const std = @import("std");
 const workflow = @import("workflow.zig");
 const sys = @import("sys.zig");
@@ -19,16 +20,19 @@ pub const Step = struct {
 pub const Widths = struct {
     step: usize,
     sample: usize,
+    tool: usize = 0,
 };
 
 pub const step_max = 24;
 pub const sample_max = 20;
+pub const tool_max = 16;
 
 pub const Names = struct {
     rule: []const []const u8,
     step: []const []const u8,
     sample: []const []const u8,
     word: []const []const u8,
+    tool: []const []const u8,
     step_of: []const u32,
     sample_of: []const ?u32,
     steps: []const Step,
@@ -50,6 +54,7 @@ pub const Names = struct {
         const step = try a.alloc([]const u8, n);
         const sample = try a.alloc([]const u8, n);
         const word = try a.alloc([]const u8, n);
+        const tool = try a.alloc([]const u8, n);
         const step_of = try a.alloc(u32, n);
         const sample_of = try a.alloc(?u32, n);
         var steps: std.ArrayList(Step) = .empty;
@@ -64,6 +69,7 @@ pub const Names = struct {
             step[i] = rule[i];
             sample[i] = "";
             word[i] = rule[i];
+            tool[i] = if (r.labels.tool) |t| try a.dupe(u8, t) else "";
             if (pair[i]) |p| if (count.get(p).? == 1) {
                 word[i] = p;
                 step[i] = p[0..r.labels.step.len];
@@ -97,6 +103,7 @@ pub const Names = struct {
             .step = step,
             .sample = sample,
             .word = word,
+            .tool = tool,
             .step_of = step_of,
             .sample_of = sample_of,
             .steps = steps.items,
@@ -112,10 +119,11 @@ pub const Names = struct {
 
     pub fn widths(self: *const Names, mask: ?[]const bool) Widths {
         var w: Widths = .{ .step = 0, .sample = 0 };
-        for (self.step, self.sample, 0..) |st, sm, i| {
+        for (self.step, self.sample, self.tool, 0..) |st, sm, tl, i| {
             if (mask) |m| if (!m[i]) continue;
             w.step = @max(w.step, @min(columns(st), step_max));
             w.sample = @max(w.sample, @min(columns(sm), sample_max));
+            w.tool = @max(w.tool, @min(columns(tl), tool_max));
         }
         return w;
     }

@@ -82,15 +82,17 @@ kanit report --bottlenecks                                # what limited the run
 `run` opens with the launch's shape, then logs each rule by its step and sample as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
 
 ```text
-kanit 0.7.0   example   launch 20261108T091155.150-c9f10bd9
+kanit 0.7.0   example   launch 20261108T101803.377-0c88d7e1
           plan       2 rules in 2 steps for 1 sample
           budget     2 threads, 1.0 GiB, 2 jobs, isolated
           steps      count 1   report 1
+          tools      wc   count
           records    .workz/latest/   log launch.log   page report.html
-02:11:55  started    count   S1  1 thread, 256 MiB
-02:11:55  completed  count   S1  3 ms
-02:11:55  started    report      1 thread, 64 MiB
-02:11:55  completed  report      2 ms
+03:18:03  started    count   S1  wc   1 thread     256 MiB
+03:18:03  tool       count       wc  9.10
+03:18:03  completed  count   S1  wc    9 ms
+03:18:03  started    report           1 thread      64 MiB
+03:18:03  completed  report            2 ms
 ```
 
 On a terminal the `started` lines give way to a footer of each step's progress and the running rules.

@@ -126,20 +126,20 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.7.0   gc-content   launch 20261108T091235.606-0bd8dab3
+kanit 0.7.0   gc-content   launch 20261108T101803.929-e4108134
           plan       4 rules in 2 steps
           budget     2 threads, 1.0 GiB, 2 jobs, isolated
           steps      gc 3   summary 1
           records    .workz/latest/   log launch.log   page report.html
-02:12:36  started    gc_s1    1 thread, 64 MiB
-02:12:36  started    gc_s2    1 thread, 64 MiB
-02:12:36  completed  gc_s1    4 ms
-02:12:36  completed  gc_s2    4 ms
-02:12:36  started    gc_s3    1 thread, 64 MiB
-02:12:36  completed  gc_s3    3 ms
-02:12:36  step       gc       3 of 3 completed in 11 ms   slowest gc_s1 4 ms
-02:12:36  started    summary  1 thread, 64 MiB
-02:12:36  completed  summary  4 ms
+03:18:04  started    gc_s1     1 thread      64 MiB
+03:18:04  started    gc_s2     1 thread      64 MiB
+03:18:04  completed  gc_s1      3 ms
+03:18:04  completed  gc_s2      3 ms
+03:18:04  started    gc_s3     1 thread      64 MiB
+03:18:04  completed  gc_s3      3 ms
+03:18:04  step       gc       3 of 3 completed   in 10 ms   slowest gc_s1 3 ms
+03:18:04  started    summary   1 thread      64 MiB
+03:18:04  completed  summary    4 ms
           completed  4 of 4 rules done in 0.5 s: 4 completed
           steps      gc       ✓ 3 of 3 done                   slowest gc_s1 4 ms
                      summary  ✓ 1 of 1 done
@@ -223,16 +223,16 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.7.0   gc-content   launch 20261108T091422.924-ed35e951
+kanit 0.7.0   gc-content   launch 20261108T101805.029-d182efda
           plan       4 rules in 2 steps
           budget     2 threads, 1.0 GiB, 2 jobs, isolated
           steps      gc 3   summary 1
           records    .workz/latest/   log launch.log   page report.html
-02:14:23  started    gc_s2    1 thread, 64 MiB
-02:14:23  completed  gc_s2    3 ms
-02:14:23  step       gc       3 of 3 completed, 2 of them reused   in 4 ms
-02:14:23  started    summary  1 thread, 64 MiB
-02:14:23  completed  summary  4 ms
+03:18:05  started    gc_s2     1 thread      64 MiB
+03:18:05  completed  gc_s2      3 ms
+03:18:05  step       gc       3 of 3 completed, 2 of them reused   in 4 ms
+03:18:05  started    summary   1 thread      64 MiB
+03:18:05  completed  summary    4 ms
 ```
 
 ## Look at what happened
@@ -245,9 +245,9 @@ kanit status --history
 
 ```text
 LAUNCH                         STATUS         ELAPSED  COMPLETED  REUSED  FAILED  BLOCKED  CANCELLED
-20261108T095104.564-61a878f4   completed        0.5 s          2       2       0        0          0
-20261108T095104.003-b0174746   completed        0.5 s          0       4       0        0          0
-20261108T095103.427-974fae85   completed        0.5 s          4       0       0        0          0
+20261108T101805.029-d182efda   completed        0.5 s          2       2       0        0          0
+20261108T101804.486-3e95d233   completed        0.5 s          0       4       0        0          0
+20261108T101803.929-e4108134   completed        0.5 s          4       0       0        0          0
 ```
 
 `kanit report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `kanit report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `kanit watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.

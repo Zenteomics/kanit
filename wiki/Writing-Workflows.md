@@ -326,6 +326,7 @@ shell = "STAR --runThreadN 8 ..."
 - What it prints, the first 4 KiB of its standard output and error, goes to the launch's `versions.json`, with whether it completed; a command that failed records no version. Each attempt's `record.json` names its `version` command and its `image` ID.
 - A launch that reuses every rule runs none: the launch that ran them recorded their versions.
 - `version` is not part of the rule key: adding one reruns nothing, and the next launch that runs the rule records it.
+- The run log names each rule's tool in a column of its own: the rule's `tool`, else its image's name, else the program its `version` command runs (`STAR` for `STAR --version`). The launch's header lists each tool with the version an earlier launch recorded, a `tool` line gives what the command printed in this launch, cut to its version number, and the summary ends with every tool's version ([Running workflows](Running-Workflows.md#starting-a-launch)).
 - `kanit report --methods` lists each tool with its version and image ([Reports](Reports.md#methods)).
 
 ## Order, retries and time limits
