@@ -74,7 +74,7 @@ Some files are keyed on a SHA-256 digest of their bytes instead of their identit
 
 ### Cutoff
 
-`cutoff = true` on a rule hashes its outputs after it succeeds. Each consumer is keyed on the digests of the outputs it reads instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused, and when one output changes, only the rules that read it run. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order (launch ID shortened):
+`cutoff = true` on a rule hashes its outputs after it succeeds. Each consumer is keyed on the digests of the outputs it reads instead of the producer's key, so when the rule runs again and writes the same bytes, its consumers are reused, and when one output changes, only the rules that read it run. Here `sort_calls` sorts a table of calls and has `cutoff = true`; the input is rewritten with the same lines in another order:
 
 ```sh
 kanit plan workflow.toml
@@ -91,10 +91,12 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-[0/2] budget 2 threads, 1.0 GiB, 2 jobs
-[0/2] page .workz/launches/.../report.html, drawn again every 15 s while the launch runs
-[0/2] started sort_calls (attempt 1)
-[1/2] completed sort_calls (2 ms)
+kanit 0.7.0   cutoff   launch 20261108T091442.816-48ad09ea
+          plan       2 rules
+          budget     2 threads, 1.0 GiB, 2 jobs, isolated
+          records    .workz/latest/   log launch.log   page report.html
+02:14:43  started    sort_calls  1 thread, 64 MiB
+02:14:43  completed  sort_calls  3 ms
 ```
 
 `sort_calls` wrote the same sorted file, so `report` was reused without running. Use it on rules whose outputs often repeat byte for byte when their inputs change, such as sorting, filtering or format conversion. A file that embeds the time or the run directory never repeats, so cutoff only costs a hash there.

@@ -6,14 +6,17 @@ All notable changes to kanit are documented in this file. Versions up to 0.6.0 w
 
 ## [Unreleased]
 
-Large workflows run faster in less memory, and a launch writes its resume state in small appends. Nothing needs action.
+Large workflows run faster in less memory, a launch writes its resume state in small appends, and the run log shows each step and sample. One change needs action: scripts that read the progress lines of `kanit run` need the new layout, or `events.jsonl`.
 
 ### Added
 
 - Every command and option that takes a rule also takes its step and sample as `STEP/SAMPLE`, such as `kanit logs align/S2` for the rule `S2__align`; bash completion offers both.
+- Each launch keeps its run log as text in `launch.log`, and `.workz/latest` links to the newest launch, so `tail -f .workz/latest/launch.log` follows a launch.
+- `run -v` keeps a line for every rule that starts on a terminal.
 
 ### Changed
 
+- The run log is one line per event with the local time, a status word, the rule's step and sample, and what happened, the same on a terminal and off it. It opens with the launch's steps, tools and samples, says when each step and sample has ended, names each failure's reason in a few words with the command that shows its output, and reports the rules a failure blocks once. The terminal keeps a footer of each step's progress and the running rules; off a terminal a `progress` line every five minutes carries the same counts. Scripts that read the old `[N/M] verb` lines need the new layout or `events.jsonl`.
 - On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.
 - With isolation, the engine reaches each attempt's cgroup through one open directory and reads its counters with fewer system calls: on 2,000 short rules it uses about 5% less CPU and a fifth less memory. The recorded counters are unchanged.
 - A launch appends each completed rule to `.workz/state.log`, synced at most once a second, instead of rewriting `state.json`; `state.json` is rewritten when the launch ends. kanit 0.7.0 ignores the log and reruns the rules recorded only there.

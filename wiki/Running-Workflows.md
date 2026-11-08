@@ -11,17 +11,43 @@ kanit run workflow.toml --max-threads 16 --max-memory 60G
 - `--keep-going` keeps running independent rules after a failure ([Failures](#failures)).
 - `--retry N` and `--timeout DURATION` apply to rules that set no `retries` or `timeout` of their own.
 - `--threads STEP=N` gives a step's rules another thread count for this launch only ([Trying another thread count](Resources-and-Scheduling.md#trying-another-thread-count)).
-- `--quiet` drops the progress lines; failures still print.
+- `--quiet` drops the progress lines; failures, warnings and control commands still print. `--verbose` keeps a line for every rule that starts.
 
 Before a long launch, `kanit plan --budget` checks that every rule fits the budget ([Check before running](Writing-Workflows.md#check-before-running)).
 
-On a terminal, `run` prints a line for each rule that completes, retries, fails or is blocked, and keeps one status line below them: a bar of the rules done, running, failed and waiting, the counts, the elapsed time and the names of the running rules. A failure's line is followed by the last lines of the attempt's standard error. When the launch ends, a short summary follows on standard output:
+`run` writes one line for every event of the launch, the same on a terminal, on standard error off a terminal and in the launch's `launch.log`:
 
-![kanit run on a terminal: one line for each completed rule, a retry of trim_S4 after a temporary failure, and a summary naming the three slowest rules, the launch's page and the report to read next.](images/run.png)
+```text
+kanit 0.7.0   rnaseq-demo   launch 20261108T085933.139-20885d0a
+          plan       10 rules in 4 steps for 3 samples
+          budget     4 threads, 2.0 GiB, 4 jobs, isolated
+          steps      trim 3 (fastp)   align 3 (STAR)   count 3   matrix 1
+          records    .workz/latest/   log launch.log   page report.html
+01:59:33  retrying   trim    S3  exit 1 after 2 ms   attempt 1 of 2
+                                 │ fastp: temporary I/O error
+01:59:34  completed  trim    S3  0.5 s   cpu 0.0 of 1   after 2 attempts
+01:59:35  completed  trim    S2  1.5 s   cpu 0.0 of 1
+01:59:35  step       trim        3 of 3 completed in 1.5 s   slowest S2 1.5 s
+01:59:35  failed     align   S2  exit 2 after 0.5 s
+                                 │ Mapping reads
+                                 │ STAR: genome index is incomplete: missing SA file
+                                 kanit logs align/S2   .workz/latest/attempts/S2__align/001/
+01:59:35  blocked    count   S2  +1 more   need align/S2, which failed
+01:59:35  sample             S2  1 of 3 steps completed, 1 failed, 1 blocked in 2.1 s
+01:59:37  sample             S1  all 3 steps completed in 3.8 s
+```
 
-Off a terminal, such as in a script or a log file, each start, completion and failure is one plain line on standard error, prefixed with the count of finished rules, and the summary is one line of JSON on standard output, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)). `--json` prints the JSON summary on a terminal too, and `--no-color` or `NO_COLOR=1` turns colors off.
+- The launch opens with its shape: how many rules, steps and samples it selected, the budget, each step with its rule count and tool, and where its records are.
+- Every line has the local time, a status word, the rule's step and sample, and what happened. A rule that has a sample is named by its step and sample, and `STEP/SAMPLE` (such as `align/S2`) names it in commands; a rule without one is named by its rule name.
+- The status words are `started`, `completed`, `retrying`, `failed`, `blocked` and `cancelled` for rules, `step` and `sample` when every selected rule of a step or sample has ended, `shared` for shared inputs and services, `control` for commands and interrupts, `warning`, and `progress`.
+- A completed rule shows its time, its memory against its request when it was measured, and the cores it used against its threads. A failure names its reason in a few words (`exit 2`, `timed out at 2h 00m`, `out of memory at its 64 MiB`, `killed by SIGSEGV`), quotes the last lines of its standard error or kept diagnostics, and names the command that shows its whole output. Rules that a failure blocks are reported once for that failure.
+- On a terminal, color marks the status words, the `started` lines are left out, and a footer below the lines shows a bar of the rules done, the counts, the elapsed time, every step's progress and the running rules. `-v` keeps the `started` lines. `--no-color` or `NO_COLOR=1` turns colors off; outside a UTF-8 locale the marks are ASCII.
+- Off a terminal, the `started` lines are kept, and a `progress` line every five minutes carries the footer's counts.
+- `launch.log` in the launch directory keeps every line, `started` included, whole and without color, so `tail -f .workz/latest/launch.log` follows a launch from anywhere. `.workz/latest` always points to the newest launch.
 
-Every launch keeps a page of its own, `report.html` in its launch directory, which a browser can keep open to follow the launch ([The HTML report](Reports.md#the-html-report)). `run` prints its path when the launch starts, unless `--quiet` is given.
+When the launch ends, a short summary follows on standard output. Off a terminal it is one line of JSON, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)); `--json` prints it on a terminal too.
+
+Every launch keeps a page of its own, `report.html` in its launch directory, which a browser can keep open to follow the launch ([The HTML report](Reports.md#the-html-report)).
 
 Only one launch runs in a working directory at a time; a second one stops at once with `another launch is running in DIR; watch it with kanit watch, or run again after it ends`. Other commands, such as `watch`, `status` and `report`, read the records and work while it runs.
 
@@ -66,30 +92,34 @@ If the engine itself is killed, the process holding its network namespace detect
 
 ## Failures
 
-An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal (launch IDs shortened):
+An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-    0/5  budget     4 threads, 1.0 GiB, 4 jobs
-    0/5  page       .workz/launches/.../report.html, drawn again every 15 s while the launch runs
-    1/5  failed     exits: exited with status 2
-                    | sort: cannot read: samples.tsv: No such file or directory
-    2/5  failed     no_output: exited 0 without output d.txt
-    3/5  blocked    after: it needs a rule that did not complete
-    4/5  failed     too_big: out of memory: could not stay within its 64 MiB request
-    5/5  failed     slow: timed out after 2 s
+kanit 0.7.0   failures   launch 20261108T091454.543-5d92b806
+          plan       5 rules
+          budget     4 threads, 1.0 GiB, 4 jobs, isolated
+          records    .workz/latest/   log launch.log   page report.html
+02:14:55  failed     no_output  exited 0 without output d.txt
+02:14:55  failed     exits      exit 2 after 9 ms
+                                │ sort: cannot read: samples.tsv: No such file or directory
+                                kanit logs exits   .workz/latest/attempts/exits/001/
+02:14:55  blocked    after      needs exits, which failed
+02:14:55  failed     too_big    out of memory at its 64 MiB
+                                raise its memory, or see kanit report --suggest
+02:14:57  failed     slow       timed out at 2.0 s
 
-  failed   after 2.0 s: 0 completed, 0 reused, 4 failed, 1 blocked
+ failed    after 2.5 s: 0 completed, 0 reused, 4 failed, 1 blocked
  failures  exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
            no_output  exited 0 without output d.txt
            slow       timed out after 2 s
            too_big    out of memory: could not stay within its 64 MiB request
  blocked   after
- page      .workz/launches/.../report.html
+ page      .workz/launches/20261108T091454.543-5d92b806/report.html
  next      kanit logs exits   the output of the failed attempt
            run the same command again: rules that completed are reused
 ```
 
-The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. Off a terminal, each failure line ends with the path of the attempt's standard error instead, such as `(see .../attempts/exits/001/stderr.log)`, and of its kept [diagnostics](Writing-Workflows.md#diagnostics) when it has some.
+The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. A failure whose standard error or kept [diagnostics](Writing-Workflows.md#diagnostics) has lines quotes the last three and names the `kanit logs` command that shows them whole, with the attempt's directory: under `.workz/latest/` on a terminal, and under the launch's own directory off a terminal and in `launch.log`, where the path must stay true after later launches.
 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.
@@ -114,7 +144,7 @@ kanit control retry align_s3    # run a failed or cancelled rule again, with its
 kanit control cancel            # stop the launch, like an interrupt
 ```
 
-Each command prints `sent: ...`, and the launch reports what it did on its standard error, for example `control stop align_s3: stopping`, or `cancelled before it started` for a rule that had not started, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
+Each command prints `sent: ...`, and the launch reports what it did in a `control` line of its log, for example `stop: stopping` for `align_s3`, or `stop: cancelled before it started` for a rule that had not started, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
 
 Commands go through the `control` file in the launch directory, which the engine watches; every one is recorded as a `control` event.
 

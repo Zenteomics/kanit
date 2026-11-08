@@ -99,7 +99,17 @@ pub fn newLaunch(gpa: Allocator, a: Allocator, records: []const u8) !struct { id
     const id = try std.fmt.allocPrint(a, "{s}-{s}", .{ compact, &std.fmt.bytesToHex(rnd, .lower) });
     const dir = try std.fs.path.join(a, &.{ records, "launches", id });
     try sys.mkdirAll(gpa, dir);
+    linkLatest(a, records, id) catch {};
     return .{ .id = id, .dir = dir };
+}
+
+pub fn linkLatest(a: Allocator, records: []const u8, id: []const u8) !void {
+    const target = try std.fmt.allocPrintSentinel(a, "launches/{s}", .{id}, 0);
+    const tmp = try std.fmt.allocPrintSentinel(a, "{s}/latest.{s}", .{ records, id }, 0);
+    const final = try std.fmt.allocPrintSentinel(a, "{s}/latest", .{records}, 0);
+    _ = try sys.check(linux.symlinkat(target, linux.AT.FDCWD, tmp));
+    errdefer _ = linux.unlinkat(linux.AT.FDCWD, tmp, 0);
+    _ = try sys.check(linux.renameat(linux.AT.FDCWD, tmp, linux.AT.FDCWD, final));
 }
 
 pub fn launchNames(gpa: Allocator, a: Allocator, records: []const u8) ![]const []const u8 {

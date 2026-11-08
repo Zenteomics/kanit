@@ -8,11 +8,13 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
   state.json                        resume state: the record of every completed rule
   state.log                         rules completed since state.json was written
   journal                           rules started and completed, for crash recovery
+  latest                            a link to the newest launch directory
   launches/
     20261107T060905.136-0b96682a/   one directory per launch
       workflow                      the workflow file as it was read
       launch.json                   options and budget
       events.jsonl                  the event stream
+      launch.log                    the run log as text, every line kanit run printed and its started lines
       control                       commands from kanit control
       summary.json                  the result, written at the end
       report.html                   the launch as one page, drawn again while it runs
@@ -31,7 +33,9 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
             diagnostics/            tails of the rule's diagnostics files, kept when it failed
 ```
 
-A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs.
+A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs, and `latest` is replaced to point at it when it is made.
+
+`launch.log` is the [run log](Running-Workflows.md#starting-a-launch) of the launch: the lines `kanit run` prints, with the `started` lines and the `progress` heartbeat, whole and without color. Its times are local wall-clock times. Programs read `events.jsonl` instead; the text of `launch.log` is for people and may change between versions.
 
 ## state.json
 

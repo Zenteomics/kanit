@@ -109,7 +109,7 @@ Shows the selected rules and what links them, in layers: as text on a terminal, 
 kanit run [WORKFLOW] [options]
 ```
 
-Runs the selected rules that are not reusable. Progress goes to standard error and the summary to standard output: a short report on a terminal, one line of JSON otherwise ([Running workflows](Running-Workflows.md)).
+Runs the selected rules that are not reusable. The run log goes to standard error and to the launch's `launch.log`, and the summary to standard output: a short report on a terminal, one line of JSON otherwise ([Running workflows](Running-Workflows.md#starting-a-launch)).
 
 | Option               | Argument   | Default           | Meaning                                    |
 | -------------------- | ---------- | ----------------- | ------------------------------------------ |
@@ -128,6 +128,7 @@ Runs the selected rules that are not reusable. Progress goes to standard error a
 | `--slice`            | NAME.slice |                   | put the run's scope in this systemd slice  |
 | `--no-isolation`     |            | off               | no scope, cgroups or network namespace     |
 | `-q`, `--quiet`      |            | off               | no progress lines; failures still print    |
+| `-v`, `--verbose`    |            | off               | also a line for every rule that starts     |
 | `--json`             |            | off               | JSON summary, also on a terminal           |
 | `--no-color`         |            | off               | no colors on a terminal                    |
 

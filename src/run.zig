@@ -16,6 +16,9 @@ const state = @import("state.zig");
 const records = @import("records.zig");
 const process = @import("process.zig");
 const cgroup = @import("cgroup.zig");
+const naming = @import("names.zig");
+const logging = @import("log.zig");
+const clock = @import("clock.zig");
 const container = @import("container.zig");
 const plan = @import("plan.zig");
 const model = @import("model.zig");
@@ -44,6 +47,7 @@ pub const Options = struct {
     thread_overrides: []const []const u8 = &.{},
     grace_s: u64 = 10,
     quiet: bool = false,
+    verbose: bool = false,
     json: bool = false,
     color: bool = true,
     slice: ?[]const u8 = null,
@@ -59,12 +63,76 @@ pub const Outcome = enum(u8) { ok = 0, failed = 1, invalid = 2, interrupted = 13
 
 const Status = schedule.Status;
 
-const Console = struct {
-    on: bool = false,
-    color: bool = false,
-    shown: bool = false,
-    next_ns: i128 = 0,
+const after_failure = "cancelled: the launch stopped after a failure";
+const after_interrupt = "cancelled: the launch was interrupted";
+
+const Mile = union(enum) { step: u32, sample: u32 };
+
+const Group = struct {
+    selected: u32 = 0,
+    completed: u32 = 0,
+    reused: u32 = 0,
+    failed: u32 = 0,
+    blocked: u32 = 0,
+    cancelled: u32 = 0,
+    not_started: u32 = 0,
+    running: u32 = 0,
+    started: u32 = 0,
+    first_ns: i128 = 0,
+    slowest_s: f64 = 0,
+    slowest: ?usize = null,
+    announced: bool = false,
+
+    fn ended(g: Group) u32 {
+        return g.completed + g.reused + g.failed + g.blocked + g.cancelled + g.not_started;
+    }
+
+    fn slot(g: *Group, s: Status) ?*u32 {
+        return switch (s) {
+            .completed => &g.completed,
+            .reused => &g.reused,
+            .failed => &g.failed,
+            .blocked => &g.blocked,
+            .cancelled => &g.cancelled,
+            .not_started => &g.not_started,
+            .running, .staging => &g.running,
+            else => null,
+        };
+    }
 };
+
+const Tally = struct {
+    status: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0),
+    steps: []Group = &.{},
+    samples: []Group = &.{},
+    steps_ok: usize = 0,
+    pending: std.ArrayList(Mile) = .empty,
+    gpa: Allocator,
+
+    fn move(self: *Tally, g: *Group, old: Status, new: Status, now: i128, mile: Mile) void {
+        const was_ended = g.ended() == g.selected;
+        const was_ok = g.completed + g.reused == g.selected;
+        if (g.slot(old)) |c| c.* -= 1;
+        if (g.slot(new)) |c| c.* += 1;
+        if (new == .running and old != .running) {
+            g.started += 1;
+            if (g.first_ns == 0) g.first_ns = now;
+        }
+        const is_ended = g.ended() == g.selected;
+        const is_ok = g.completed + g.reused == g.selected;
+        if (mile == .step and was_ok != is_ok) {
+            if (is_ok) self.steps_ok += 1 else self.steps_ok -= 1;
+        }
+        if (is_ended and !was_ended) self.pending.append(self.gpa, mile) catch {};
+        if (!is_ended and was_ended) g.announced = false;
+    }
+};
+
+fn endings(w: *std.Io.Writer, g: *const Group) void {
+    if (g.failed > 0) w.print(", {d} failed", .{g.failed}) catch {};
+    if (g.blocked > 0) w.print(", {d} blocked", .{g.blocked}) catch {};
+    if (g.cancelled + g.not_started > 0) w.print(", {d} cancelled", .{g.cancelled + g.not_started}) catch {};
+}
 
 const Task = struct {
     status: Status = .pending,
@@ -321,167 +389,193 @@ const Engine = struct {
     previous_bytes: u64 = 0,
     versions: std.ArrayList(Version) = .empty,
     version_running: ?usize = null,
-    console: Console = .{},
     start_mono: i128 = 0,
+    names: naming.Names,
+    log: logging.Log,
+    tally: Tally,
+    blocked_by: []usize,
+    stop_cause: ?usize = null,
+    next_beat_ns: i128 = 0,
+    view_steps: std.ArrayList(logging.StepProgress) = .empty,
+    view_running: std.ArrayList(logging.Running) = .empty,
+    footer_text: std.Io.Writer.Allocating,
+    ended_log: bool = false,
+    latest_shown: []const u8 = "",
 
-    fn progress(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
-        if (self.opts.quiet) return;
-        self.event(verb, fmt, args);
+    // --- The run log ---
+
+    fn say(self: *Engine, word: logging.Word, i: usize) void {
+        self.log.emit(word, self.names.step[i], self.names.sample[i]);
     }
 
-    fn alert(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
-        self.event(verb, fmt, args);
+    fn quoteStderr(self: *Engine, dir: []const u8, n: usize) bool {
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        const lines = monitor.lastLines(self.gpa, sa, std.fs.path.join(sa, &.{ dir, "stderr.log" }) catch return false, n, 1000);
+        for (lines) |l| self.log.quoteLine(l);
+        return lines.len > 0;
     }
 
-    fn event(self: *Engine, comptime verb: []const u8, comptime fmt: []const u8, args: anytype) void {
-        if (!self.console.on) {
-            std.debug.print("[{d}/{d}] " ++ verb ++ " " ++ fmt ++ "\n", .{ self.finished, self.selected } ++ args);
-            return;
+    fn quoteDiagnostics(self: *Engine, dir: []const u8, kept: []const []const u8) bool {
+        var scratch: std.heap.ArenaAllocator = .init(self.gpa);
+        defer scratch.deinit();
+        const sa = scratch.allocator();
+        var any = false;
+        for (kept) |d| {
+            const lines = monitor.lastLines(self.gpa, sa, std.fs.path.join(sa, &.{ dir, "diagnostics", d }) catch continue, 3, 1000);
+            if (lines.len == 0) continue;
+            self.log.quoteLine(std.fmt.allocPrint(sa, "{s}:", .{d}) catch continue);
+            for (lines) |l| self.log.quoteLine(l);
+            any = true;
         }
-        if (comptime std.mem.eql(u8, verb, "started")) return self.drawStatus(true);
-        const s: term.Style = .{ .on = self.console.color };
-        const tint = comptime if (std.mem.eql(u8, verb, "completed"))
-            "\x1b[32m"
-        else if (std.mem.eql(u8, verb, "failed"))
-            "\x1b[31;1m"
-        else if (std.mem.eql(u8, verb, "blocked"))
-            "\x1b[31m"
-        else if (std.mem.eql(u8, verb, "cancelled"))
-            "\x1b[35m"
-        else if (std.mem.eql(u8, verb, "retrying") or std.mem.eql(u8, verb, "restarting"))
-            "\x1b[33m"
-        else
-            "\x1b[36m";
-        self.clearStatus();
-        std.debug.print("{s}{d:>5}/{d}{s}  {s}{s:<10}{s} " ++ fmt ++ "\n", .{ s.dim(), self.finished, self.selected, s.reset(), if (s.on) tint else "", verb, s.reset() } ++ args);
-        self.drawStatus(true);
+        return any;
     }
 
-    fn showTail(self: *Engine, dir: []const u8, n: usize) void {
-        const path = std.fmt.allocPrint(self.a, "{s}/stderr.log", .{dir}) catch return;
-        self.showLines(path, n, null);
+    fn hintLogs(self: *Engine, i: usize, dir: []const u8) void {
+        var buf: [256]u8 = undefined;
+        const command = std.fmt.bufPrint(&buf, "kanit logs {s}", .{self.names.word[i]}) catch return;
+        var where: [4096]u8 = undefined;
+        var latest: [4096]u8 = undefined;
+        const real = std.fmt.bufPrint(&where, "{s}/", .{monitor.shownPath(self.a, dir)}) catch "";
+        const short = std.fmt.bufPrint(&latest, "{s}{s}/", .{ self.latest_shown, dir[self.launch_dir.len..] }) catch real;
+        self.log.hintLine(command, real, short);
     }
 
-    fn showLines(self: *Engine, path: []const u8, n: usize, title: ?[]const u8) void {
-        if (!self.console.on) return;
-        var digits: usize = 1;
-        var v = self.selected;
-        while (v >= 10) : (v /= 10) digits += 1;
-        const indent = 19 + digits;
-        const lines = monitor.lastLines(self.gpa, self.a, path, n, term.size(2).cols -| (indent + 3));
-        if (lines.len == 0) return;
-        const s: term.Style = .{ .on = self.console.color };
-        self.clearStatus();
-        if (title) |t| {
-            for (0..indent) |_| std.debug.print(" ", .{});
-            std.debug.print("{s}{s}:{s}\n", .{ s.dim(), t, s.reset() });
-        }
-        for (lines) |line| {
-            for (0..indent) |_| std.debug.print(" ", .{});
-            std.debug.print("{s}| {s}{s}\n", .{ s.dim(), line, s.reset() });
-        }
-        self.drawStatus(true);
-    }
-
-    fn showBlocked(self: *Engine, names: []const []const u8, count: usize) void {
-        if (!self.console.on or count == 0) return;
-        var buf: [512]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&buf);
-        for (names, 0..) |name, k| w.print("{s}{s}", .{ if (k == 0) "" else ", ", name }) catch {};
-        if (count > names.len) w.print(" and {d} more", .{count - names.len}) catch {};
-        w.print(": {s} a rule that did not complete", .{if (count == 1) "it needs" else "they need"}) catch {};
-        self.event("blocked", "{s}", .{w.buffered()});
-    }
-
-    fn note(self: *Engine, text: []const u8) void {
-        self.clearStatus();
-        std.debug.print("{s}\n", .{text});
-        self.drawStatus(true);
-    }
-
-    fn clearStatus(self: *Engine) void {
-        if (!self.console.shown) return;
-        std.debug.print("\r\x1b[K", .{});
-        self.console.shown = false;
-    }
-
-    fn drawStatus(self: *Engine, force: bool) void {
-        if (!self.console.on) return;
-        const now = sys.monoNs();
-        if (!force and now < self.console.next_ns) return;
-        self.console.next_ns = now + std.time.ns_per_s;
-        var done: usize = 0;
-        var active: usize = 0;
-        var waiting: usize = 0;
-        var failed: usize = 0;
-        var blocked: usize = 0;
-        for (self.tasks, 0..) |t, i| {
-            if (!self.mask[i]) continue;
-            switch (t.status) {
-                .completed, .reused => done += 1,
-                .running, .staging => active += 1,
-                .ready => waiting += 1,
-                .failed => failed += 1,
-                .blocked => blocked += 1,
-                else => {},
-            }
-        }
-        const cols = term.size(2).cols -| 1;
-        const s: term.Style = .{ .on = self.console.color };
-        var buf: [2048]u8 = undefined;
-        var w: std.Io.Writer = .fixed(&buf);
-        var used: usize = 0;
-        const width: usize = if (cols >= 80) 24 else 12;
-        const total = @max(self.selected, 1);
-        const parts = [_]struct { n: usize, bg: []const u8, ch: u8 }{
-            .{ .n = done, .bg = "\x1b[42m", .ch = '#' },
-            .{ .n = active, .bg = "\x1b[46m", .ch = '>' },
-            .{ .n = failed + blocked, .bg = "\x1b[41m", .ch = '!' },
-            .{ .n = waiting, .bg = "\x1b[43m", .ch = '~' },
+    fn rootOf(self: *Engine, i: usize) ?usize {
+        var fallback: ?usize = null;
+        for (self.g.parents[i]) |p| switch (self.tasks[p].status) {
+            .failed, .cancelled, .not_started => return p,
+            .blocked => if (fallback == null) {
+                fallback = self.blocked_by[p];
+            },
+            else => {},
         };
-        if (!s.on) w.writeAll("[") catch {};
-        var filled: usize = 0;
-        for (parts) |p| {
-            var n = p.n * width / total;
-            if (n == 0 and p.n > 0) n = 1;
-            n = @min(n, width - filled);
-            if (n == 0) continue;
-            if (s.on) w.writeAll(p.bg) catch {};
-            for (0..n) |_| w.writeByte(if (s.on) ' ' else p.ch) catch {};
-            if (s.on) w.writeAll("\x1b[0m") catch {};
-            filled += n;
+        return fallback;
+    }
+
+    fn rootText(self: *Engine, root: usize) []const u8 {
+        return switch (self.tasks[root].status) {
+            .failed => "which failed",
+            .cancelled => "which was cancelled",
+            else => "which did not start",
+        };
+    }
+
+    fn setStatus(self: *Engine, i: usize, new: Status) void {
+        const t = &self.tasks[i];
+        const old = t.status;
+        t.status = new;
+        if (old == new or !self.mask[i]) return;
+        self.tally.status[@intFromEnum(old)] -= 1;
+        self.tally.status[@intFromEnum(new)] += 1;
+        const now = sys.monoNs();
+        self.tally.move(&self.tally.steps[self.names.step_of[i]], old, new, now, .{ .step = self.names.step_of[i] });
+        if (self.names.sample_of[i]) |k| self.tally.move(&self.tally.samples[k], old, new, now, .{ .sample = k });
+        self.log.footer_dirty = true;
+    }
+
+    fn progressNow(self: *Engine) logging.Progress {
+        const c = &self.tally.status;
+        self.view_steps.clearRetainingCapacity();
+        self.view_steps.ensureTotalCapacity(self.gpa, self.tally.steps.len) catch {};
+        for (self.tally.steps, self.names.steps) |g, st| {
+            if (g.selected == 0) continue;
+            self.view_steps.appendAssumeCapacity(.{ .name = st.name, .selected = g.selected, .done = g.completed + g.reused, .failed = g.failed, .blocked = g.blocked + g.cancelled + g.not_started, .running = g.running, .ended = g.ended() == g.selected });
         }
-        if (s.on) w.writeAll("\x1b[100m") catch {};
-        for (0..width - filled) |_| w.writeByte(if (s.on) ' ' else '.') catch {};
-        w.writeAll(if (s.on) "\x1b[0m" else "]") catch {};
-        used += width + @as(usize, if (s.on) 0 else 2);
-        var text: [160]u8 = undefined;
-        var tw: std.Io.Writer = .fixed(&text);
-        tw.print(" {d}/{d}  {d} running  {d} waiting  {d} failed", .{ done, self.selected, active, waiting, failed }) catch {};
-        if (blocked > 0) tw.print("  {d} blocked", .{blocked}) catch {};
-        tw.writeAll("  ") catch {};
-        units.duration(&tw, @as(f64, @floatFromInt(now - self.start_mono)) / 1e9) catch {};
-        const counts = tw.buffered();
-        const shown = counts[0..@min(counts.len, cols -| used)];
-        w.print("{s}{s}{s}", .{ s.bold(), shown, s.reset() }) catch {};
-        used += shown.len;
-        var first = true;
-        var left: usize = 0;
-        for (self.tasks, 0..) |t, i| {
+        self.view_running.clearRetainingCapacity();
+        const now = sys.monoNs();
+        for (self.active.items) |i| {
+            const t = self.tasks[i];
             if (t.status != .running) continue;
-            const name = self.rule(i).name;
-            const sep: []const u8 = if (first) "  " else ", ";
-            if (used + sep.len + name.len + 8 > cols) {
-                left += 1;
-                continue;
-            }
-            w.print("{s}{s}{s}{s}", .{ sep, s.cyan(), name, s.reset() }) catch {};
-            used += sep.len + name.len;
-            first = false;
+            self.view_running.append(self.gpa, .{ .word = self.names.word[i], .seconds = @as(f64, @floatFromInt(now - t.started_ns)) / 1e9 }) catch {};
         }
-        if (left > 0 and used + 8 <= cols) w.print(" +{d}", .{left}) catch {};
-        std.debug.print("\r{s}\x1b[K", .{w.buffered()});
-        self.console.shown = true;
+        std.mem.sort(logging.Running, self.view_running.items, {}, struct {
+            fn longer(_: void, x: logging.Running, y: logging.Running) bool {
+                return x.seconds > y.seconds;
+            }
+        }.longer);
+        return .{
+            .selected = self.selected,
+            .done = c[@intFromEnum(Status.completed)] + c[@intFromEnum(Status.reused)],
+            .running = c[@intFromEnum(Status.running)] + c[@intFromEnum(Status.staging)],
+            .failed = c[@intFromEnum(Status.failed)],
+            .blocked = c[@intFromEnum(Status.blocked)],
+            .cancelled = c[@intFromEnum(Status.cancelled)] + c[@intFromEnum(Status.not_started)],
+            .elapsed_s = @as(f64, @floatFromInt(now - self.start_mono)) / 1e9,
+            .steps = self.view_steps.items,
+            .steps_ok = self.tally.steps_ok,
+            .grouped = self.view_steps.items.len < self.selected or self.names.samples.len > 0,
+            .running_list = self.view_running.items,
+        };
+    }
+
+    fn milestones(self: *Engine) void {
+        const now = sys.monoNs();
+        for (self.tally.pending.items) |m| {
+            const g = switch (m) {
+                .step => |k| &self.tally.steps[k],
+                .sample => |k| &self.tally.samples[k],
+            };
+            if (g.announced or g.ended() != g.selected or g.selected < 2 or (g.started == 0 and g.failed + g.blocked + g.cancelled + g.not_started == 0)) continue;
+            g.announced = true;
+            const w = self.log.text();
+            switch (m) {
+                .step => {
+                    w.print("{d} of {d} completed", .{ g.completed + g.reused, g.selected }) catch {};
+                    if (g.reused > 0) w.print(", {d} of them reused", .{g.reused}) catch {};
+                    endings(w, g);
+                    if (g.started > 0) {
+                        w.writeAll("   in ") catch {};
+                        units.duration(w, @as(f64, @floatFromInt(now - g.first_ns)) / 1e9) catch {};
+                    }
+                    if (g.slowest) |si| if (g.completed > 1) {
+                        w.print("   slowest {s} ", .{if (self.names.sample[si].len > 0) self.names.sample[si] else self.names.word[si]}) catch {};
+                        units.duration(w, g.slowest_s) catch {};
+                    };
+                    self.log.emit(.step, self.names.steps[m.step].name, "");
+                },
+                .sample => {
+                    if (g.completed + g.reused == g.selected) {
+                        w.print("all {d} {s} completed", .{ g.selected, if (g.selected == 1) "step" else "steps" }) catch {};
+                    } else {
+                        w.print("{d} of {d} steps completed", .{ g.completed + g.reused, g.selected }) catch {};
+                        endings(w, g);
+                    }
+                    if (g.reused > 0) w.print(", {d} reused", .{g.reused}) catch {};
+                    if (g.started > 0) {
+                        w.writeAll("   in ") catch {};
+                        units.duration(w, @as(f64, @floatFromInt(now - g.first_ns)) / 1e9) catch {};
+                    }
+                    self.log.emit(.sample, "", self.names.samples[m.sample]);
+                },
+            }
+        }
+        self.tally.pending.clearRetainingCapacity();
+    }
+
+    fn tick(self: *Engine, force: bool) void {
+        self.milestones();
+        const now = sys.monoNs();
+        if (self.log.terminal() == null and now >= self.next_beat_ns) {
+            self.next_beat_ns = now + logging.heartbeat_ns;
+            self.log.beat(self.progressNow());
+        }
+        var footer: ?[]const u8 = null;
+        var lines: usize = 0;
+        if (self.log.terminal()) |s| if (!self.ended_log and (force or self.log.footerDue(now) or s.pending.items.len > 0)) {
+            s.style.cols = term.size(2).cols;
+            self.footer_text.clearRetainingCapacity();
+            lines = logging.footer(&self.footer_text.writer, s.style, self.progressNow()) catch 0;
+            footer = self.footer_text.written();
+        };
+        self.log.flush(now, force, footer, lines);
+    }
+
+    fn endLog(self: *Engine) void {
+        self.milestones();
+        self.ended_log = true;
+        self.log.flush(sys.monoNs(), true, null, 0);
     }
 
     fn rule(self: *Engine, i: usize) *const workflow.Rule {
@@ -530,26 +624,42 @@ const Engine = struct {
     }
 
     fn updateReadiness(self: *Engine) !void {
-        var names: [3][]const u8 = undefined;
-        var newly_blocked: usize = 0;
-        defer self.showBlocked(names[0..@min(newly_blocked, names.len)], newly_blocked);
+        const Cause = struct { root: ?usize, first: usize, count: usize };
+        var causes: std.ArrayList(Cause) = .empty;
+        defer causes.deinit(self.gpa);
         while (self.wake.pop()) |i| {
             self.listed[i].woken = false;
             const t = &self.tasks[i];
             if (t.status != .pending) continue;
             switch (schedule.parents(self.tasks, self.g.parents[i])) {
                 .blocked => {
-                    t.status = .blocked;
+                    const root = self.rootOf(i);
+                    self.blocked_by[i] = root orelse i;
+                    self.setStatus(i, .blocked);
                     t.reason = "it needs a rule that did not complete";
                     self.finished += 1;
                     self.settled(i);
                     self.events.emit("task_blocked", .{ .rule = self.rule(i).name });
-                    if (newly_blocked < names.len) names[newly_blocked] = self.rule(i).name;
-                    newly_blocked += 1;
+                    for (causes.items) |*c| {
+                        if (c.root == root) {
+                            c.count += 1;
+                            break;
+                        }
+                    } else try causes.append(self.gpa, .{ .root = root, .first = i, .count = 1 });
                 },
                 .waiting => {},
                 .ready => if (!self.stopping) try self.makeReady(i),
             }
+        }
+        for (causes.items) |c| {
+            const w = self.log.text();
+            if (c.count > 1) {
+                w.writeAll("+") catch {};
+                logging.thousands(w, c.count - 1) catch {};
+                w.writeAll(" more   ") catch {};
+            }
+            if (c.root) |r| w.print("{s} {s}, {s}", .{ if (c.count > 1) "need" else "needs", self.names.word[r], self.rootText(r) }) catch {} else w.writeAll("needs a rule that did not complete") catch {};
+            self.say(.blocked, c.first);
         }
     }
 
@@ -566,13 +676,15 @@ const Engine = struct {
             else => return err,
         };
         if (key == null) {
-            t.status = .failed;
+            self.setStatus(i, .failed);
             t.reason = if (unreadable) self.ids.problem else try std.fmt.allocPrint(self.a, "missing input {s}", .{missing.?});
             self.finished += 1;
             self.settled(i);
             self.events.emit("task_failed", .{ .rule = r.name, .attempt = @as(?u32, null), .reason = t.reason });
-            self.alert("failed", "{s}: {s}", .{ r.name, t.reason });
-            if (!self.opts.keep_going) self.beginStop();
+            const w = self.log.text();
+            if (unreadable) w.writeAll(t.reason) catch {} else w.print("missing input {s}", .{monitor.shownPath(self.a, missing.?)}) catch {};
+            self.say(.failed, i);
+            self.stopAfter(i);
             return;
         }
         t.key = key.?;
@@ -584,14 +696,14 @@ const Engine = struct {
                     try self.pending_envs.append(self.gpa, e.env);
                     self.dirty = true;
                 }
-                t.status = .reused;
+                self.setStatus(i, .reused);
                 self.finished += 1;
                 self.settled(i);
                 self.events.emit("task_reused", .{ .rule = r.name });
                 return;
             }
         };
-        t.status = .ready;
+        self.setStatus(i, .ready);
         self.listReady(i);
         self.ready_counter += 1;
         self.ready_seq[i] = self.ready_counter;
@@ -694,7 +806,7 @@ const Engine = struct {
                 continue;
             }
             self.reserve(i, true);
-            self.tasks[i].status = .staging;
+            self.setStatus(i, .staging);
             self.listStaged(i);
             const r = self.rule(i);
             var waiting = false;
@@ -873,7 +985,7 @@ const Engine = struct {
             return self.failToStart(i, try std.fmt.allocPrint(self.a, "cannot start: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
         };
         t.spawned = true;
-        t.status = .running;
+        self.setStatus(i, .running);
         self.listActive(i);
         try self.by_pid.put(self.gpa, t.pid, i);
         if (self.guard) |gd| gd.note('+', t.pid);
@@ -884,7 +996,15 @@ const Engine = struct {
         t.engine_rss_kib = engineMaxRssKib();
         t.deadline_ns = schedule.deadline(t.started_ns, self.timeoutOf(r));
         self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = if (t.cg) |cg| cg.path else null, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
-        self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
+        const w = self.log.text();
+        w.print("{d} {s}, ", .{ r.threads, if (r.threads == 1) "thread" else "threads" }) catch {};
+        units.size(w, @floatFromInt(r.memory_mib)) catch {};
+        if (t.max_attempts > 1) w.print("   attempt {d} of {d}", .{ t.attempts, t.max_attempts }) catch {};
+        if (t.queued_s >= 1) {
+            w.writeAll("   waited ") catch {};
+            units.duration(w, t.queued_s) catch {};
+        }
+        self.say(.started, i);
     }
 
     fn timeoutOf(self: *Engine, r: *const workflow.Rule) ?u64 {
@@ -900,7 +1020,7 @@ const Engine = struct {
             if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
             t.cg = null;
             self.reserve(i, false);
-            t.status = .ready;
+            self.setStatus(i, .ready);
             self.listReady(i);
             self.releaseShared(i);
             self.ready_counter += 1;
@@ -910,7 +1030,8 @@ const Engine = struct {
             t.wait_reason = null;
             self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "failed", .reason = reason });
             self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
-            self.alert("retrying", "{s}: {s}", .{ r.name, reason });
+            self.log.text().print("{s}   attempt {d} of {d}", .{ reason, t.attempts, t.max_attempts }) catch {};
+            self.say(.retrying, i);
             return;
         }
         self.endUnstarted(i, true, t.attempts, .failed, reason);
@@ -978,16 +1099,21 @@ const Engine = struct {
             self.reserve(i, false);
             self.releaseShared(i);
         }
-        t.status = status;
+        self.setStatus(i, status);
         t.reason = reason;
         self.finished += 1;
         self.settled(i);
         if (attempt) |n| self.writeUnstartedRecord(i, n, status, reason);
         if (status == .failed) {
             self.events.emit("task_failed", .{ .rule = r.name, .attempt = attempt, .reason = reason });
-            self.alert("failed", "{s}: {s}", .{ r.name, reason });
-            if (!self.opts.keep_going) self.beginStop();
-        } else self.events.emit("task_finished", .{ .rule = r.name, .attempt = attempt, .status = "cancelled", .reason = reason });
+            self.log.text().writeAll(reason) catch {};
+            self.say(.failed, i);
+            self.stopAfter(i);
+        } else {
+            self.events.emit("task_finished", .{ .rule = r.name, .attempt = attempt, .status = "cancelled", .reason = reason });
+            self.stopDetail(self.log.text(), reason);
+            self.say(.cancelled, i);
+        }
     }
 
     fn prepareWorkdir(self: *Engine, r: *const workflow.Rule, dir: []const u8) !?[]const u8 {
@@ -1080,7 +1206,10 @@ const Engine = struct {
         h.pipe = pipe[0];
         h.st = .loading;
         self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = if (h.cg) |cg| cg.path else null });
-        self.progress("loading", "shared input {s} ({d} MiB)", .{ s.name, h.mib });
+        const w = self.log.text();
+        w.writeAll("loading, ") catch {};
+        units.size(w, @floatFromInt(h.mib)) catch {};
+        self.log.emit(.shared, s.name, "");
     }
 
     fn startService(self: *Engine, hi: usize) !void {
@@ -1151,7 +1280,10 @@ const Engine = struct {
         h.timed_out = false;
         h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
         self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .reserved_mib = h.reserve_mib, .pid = h.pid, .cgroup = if (h.cg) |cg| cg.path else null });
-        self.progress("starting", "shared service {s} ({d} MiB)", .{ s.name, h.mib });
+        const w = self.log.text();
+        w.writeAll("starting the service, ") catch {};
+        units.size(w, @floatFromInt(h.mib)) catch {};
+        self.log.emit(.shared, s.name, "");
     }
 
     fn stopHolder(self: *Engine, h: *Holder) void {
@@ -1182,6 +1314,10 @@ const Engine = struct {
         h.st = .ready;
         const file = if (h.cg) |cg| cg.stat("file") else null;
         self.events.emit("shared_loaded", .{ .name = self.wf.shared[hi].name, .bytes = h.bytes, .holder_file_bytes = file });
+        const w = self.log.text();
+        w.writeAll("ready after ") catch {};
+        units.duration(w, @as(f64, @floatFromInt(sys.monoNs() - h.started_ns)) / 1e9) catch {};
+        self.log.emit(.shared, self.wf.shared[hi].name, "");
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .staging) continue;
             if (self.sharedReady(i)) try self.start(i);
@@ -1302,7 +1438,8 @@ const Engine = struct {
         if (was != .ready and h.failed_starts < s.retries and h.users > 0 and !self.stopping) {
             h.failed_starts += 1;
             self.events.emit("shared_retry", .{ .name = s.name, .reason = why, .next_start = h.starts + 1 });
-            self.alert("restarting", "shared service {s}: {s}", .{ s.name, why });
+            self.log.text().print("restarting: {s}", .{why}) catch {};
+            self.log.emit(.shared, s.name, "");
             try self.startHolderOrFail(hi);
             return;
         }
@@ -1322,6 +1459,8 @@ const Engine = struct {
         h.st = .failed;
         h.failure = try std.fmt.allocPrint(self.a, "shared input {s} could not be loaded: {s}", .{ s.name, why });
         self.events.emit("shared_failed", .{ .name = s.name, .reason = why, .memory_peak = peak });
+        self.log.text().print("failed: {s}", .{why}) catch {};
+        self.log.emit(.shared, s.name, "");
         const lost = try std.fmt.allocPrint(self.a, "shared service {s} failed while the rule used it: {s}", .{ s.name, why });
         for (self.tasks, 0..) |*t, i| {
             if (std.mem.indexOfScalar(usize, self.rule(i).shared_index, hi) == null) continue;
@@ -1356,7 +1495,7 @@ const Engine = struct {
         self.reserve(i, false);
         var released = false;
         errdefer if (!released) {
-            t.status = .failed;
+            self.setStatus(i, .failed);
             t.reason = "the engine could not record the attempt";
             self.releaseShared(i);
             self.finished += 1;
@@ -1370,7 +1509,7 @@ const Engine = struct {
         const code = reaped.exitCode();
         const sig = reaped.signal();
         const container_failed = r.container != null and code != null and code.? != 0;
-        if (try schedule.failure(self.a, .{
+        const end: schedule.End = .{
             .lost_service = t.lost_service,
             .cancelled = t.cancelled,
             .stop_why = t.stop_why,
@@ -1382,7 +1521,8 @@ const Engine = struct {
             .signal = sig,
             .container = r.container != null,
             .last_line = if (container_failed) try self.lastLine(t.dir) else "",
-        })) |f| {
+        };
+        if (try schedule.failure(self.a, end)) |f| {
             reason = f.reason;
             if (f.quote_stderr) {
                 said = try self.errorLine(t.dir);
@@ -1458,7 +1598,7 @@ const Engine = struct {
         });
 
         if (ok) {
-            t.status = .completed;
+            self.setStatus(i, .completed);
             self.settled(i);
             self.releaseShared(i);
             released = true;
@@ -1492,20 +1632,26 @@ const Engine = struct {
             try self.pending_done.append(self.gpa, r.name);
             self.finished += 1;
             self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = "completed", .wall_s = wall_s, .cpu_s = taskCpu(counters, reaped), .maxrss_kib = reaped.usage.maxrss, .memory_peak = if (counters) |c| c.memory_peak else null });
-            var took: [32]u8 = undefined;
-            var tw: std.Io.Writer = .fixed(&took);
-            units.duration(&tw, wall_s) catch {};
-            self.progress("completed", "{s} ({s})", .{ r.name, tw.buffered() });
+            const g = &self.tally.steps[self.names.step_of[i]];
+            if (wall_s > g.slowest_s) {
+                g.slowest_s = wall_s;
+                g.slowest = i;
+            }
+            logging.usage(self.log.text(), .{ .wall_s = wall_s, .memory_mib = usedMib(r, t, counters, reaped), .request_mib = r.memory_mib, .cpu_s = taskCpu(counters, reaped), .threads = r.threads, .attempts = t.attempts }) catch {};
+            self.say(.completed, i);
             return;
         }
         t.reason = reason;
         self.events.emit("task_finished", .{ .rule = r.name, .attempt = t.attempts, .status = status, .reason = reason, .exit_code = code, .signal = sig, .wall_s = wall_s });
         self.restorePrevious(i) catch |err| switch (err) {
             error.OutOfMemory => return err,
-            else => self.alert("warning", "{s}: cannot put its earlier outputs back from {s}/previous: {s}", .{ r.name, monitor.shownPath(self.a, t.dir), sys.errorText(err) }),
+            else => {
+                self.log.text().print("cannot put its earlier outputs back from {s}/previous: {s}", .{ monitor.shownPath(self.a, t.dir), sys.errorText(err) }) catch {};
+                self.say(.warning, i);
+            },
         };
         if (schedule.retried(t.attempts, t.max_attempts, t.cancelled, self.stopping, t.lost_service != null)) {
-            t.status = .ready;
+            self.setStatus(i, .ready);
             self.listReady(i);
             self.releaseShared(i);
             released = true;
@@ -1515,32 +1661,35 @@ const Engine = struct {
             t.waits = .empty;
             t.wait_reason = null;
             self.events.emit("task_retry", .{ .rule = r.name, .next_attempt = t.attempts + 1 });
-            self.alert("retrying", "{s}: {s}", .{ r.name, brief });
-            self.showTail(t.dir, 1);
+            const w = self.log.text();
+            const block = logging.ending(w, end, wall_s) catch .none;
+            if (self.log.detail.written().len == 0) w.writeAll(brief) catch {};
+            w.print("   attempt {d} of {d}", .{ t.attempts, t.max_attempts }) catch {};
+            self.say(.retrying, i);
+            if (block == .stderr) _ = self.quoteStderr(t.dir, 1);
             return;
         }
-        t.status = if (t.cancelled) .cancelled else .failed;
+        self.setStatus(i, if (t.cancelled) .cancelled else .failed);
         self.releaseShared(i);
         released = true;
         self.finished += 1;
         self.settled(i);
-        if (self.console.on) {
-            if (t.cancelled) self.alert("cancelled", "{s}: {s}", .{ r.name, brief }) else {
-                self.alert("failed", "{s}: {s}", .{ r.name, brief });
-                self.showTail(t.dir, 3);
-                for (t.diagnostics) |d|
-                    self.showLines(try std.fs.path.join(self.a, &.{ t.dir, "diagnostics", d }), 3, d);
-            }
-        } else {
-            const log = monitor.shownPath(self.a, t.dir);
-            if (t.cancelled)
-                self.alert("cancelled", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log })
-            else if (t.diagnostics.len > 0)
-                self.alert("failed", "{s}: {s} (see {s}/stderr.log and {s}/diagnostics)", .{ r.name, reason, log, log })
-            else
-                self.alert("failed", "{s}: {s} (see {s}/stderr.log)", .{ r.name, reason, log });
+        if (t.cancelled) {
+            self.stopDetail(self.log.text(), t.stop_why);
+            self.say(.cancelled, i);
+            return;
         }
-        if (!t.cancelled and !self.opts.keep_going) self.beginStop();
+        const w = self.log.text();
+        const block = logging.ending(w, end, wall_s) catch .none;
+        if (self.log.detail.written().len == 0) w.writeAll(brief) catch {};
+        if (t.attempts > 1) w.print("   attempt {d} of {d}", .{ t.attempts, t.max_attempts }) catch {};
+        self.say(.failed, i);
+        var quoted = false;
+        if (block == .stderr) quoted = self.quoteStderr(t.dir, 3);
+        if (self.quoteDiagnostics(t.dir, t.diagnostics)) quoted = true;
+        if (block == .memory) self.log.hintLine("raise its memory, or see kanit report --suggest", "", "");
+        if (quoted) self.hintLogs(i, t.dir);
+        self.stopAfter(i);
     }
 
     fn writeSideFiles(self: *Engine, r: *const workflow.Rule, t: *const Task, ok: bool, wall_s: f64, reaped: process.Reaped, counters: ?cgroup.Counters) !void {
@@ -1654,7 +1803,8 @@ const Engine = struct {
             }
             const end = (std.mem.lastIndexOfScalar(u8, buf[0..n], '\n') orelse {
                 if (n < buf.len) return;
-                self.alert("control", "ignored a line of over {d} bytes", .{buf.len});
+                self.log.text().print("ignored a line of over {d} bytes", .{buf.len}) catch {};
+                self.log.emit(.control, "", "");
                 self.control_offset += n;
                 self.control_skip = true;
                 continue;
@@ -1669,9 +1819,8 @@ const Engine = struct {
                 const name = words.next() orelse "";
                 const result = try self.control(cmd, name);
                 self.events.emit("control", .{ .command = cmd, .rule = name, .result = result });
-                if (name.len == 0) {
-                    self.alert("control", "{s}: {s}", .{ cmd, result });
-                } else self.alert("control", "{s} {s}: {s}", .{ cmd, name, result });
+                self.log.text().print("{s}: {s}", .{ cmd, result }) catch {};
+                if (self.wf.findRule(name)) |ri| self.say(.control, ri) else self.log.emit(.control, name, "");
             }
         }
     }
@@ -1707,7 +1856,7 @@ const Engine = struct {
         if (eql(u8, cmd, "retry")) {
             if (self.stopping) return "the launch is stopping";
             if (t.status != .failed and t.status != .cancelled) return "not failed";
-            t.status = .pending;
+            self.setStatus(i, .pending);
             t.reason = "";
             t.cancelled = false;
             t.max_attempts = t.attempts + 1;
@@ -1717,7 +1866,7 @@ const Engine = struct {
             defer queue.deinit(self.gpa);
             try queue.append(self.gpa, i);
             while (queue.pop()) |q| for (self.g.children[q]) |c| if (self.tasks[c].status == .blocked) {
-                self.tasks[c].status = .pending;
+                self.setStatus(c, .pending);
                 self.tasks[c].reason = "";
                 self.finished -= 1;
                 self.wakeTask(c);
@@ -1736,11 +1885,25 @@ const Engine = struct {
         self.events.emit("launch_ending", .{});
     }
 
+    fn stopDetail(self: *Engine, w: *std.Io.Writer, reason: []const u8) void {
+        if (std.mem.eql(u8, reason, after_failure)) {
+            if (self.stop_cause) |c| w.print("stopped after {s} failed", .{self.names.word[c]}) catch {} else w.writeAll("stopped after a failure") catch {};
+        } else if (std.mem.eql(u8, reason, after_interrupt)) {
+            w.writeAll("stopped by an interrupt") catch {};
+        } else w.writeAll(reason) catch {};
+    }
+
+    fn stopAfter(self: *Engine, i: usize) void {
+        if (self.opts.keep_going) return;
+        if (self.stop_cause == null) self.stop_cause = i;
+        self.beginStop();
+    }
+
     fn beginStop(self: *Engine) void {
         if (self.stopping) return;
         self.stopping = true;
         const grace = @as(i128, self.opts.grace_s) * std.time.ns_per_s;
-        const why = if (self.interrupted) "cancelled: the launch was interrupted" else "cancelled: the launch stopped after a failure";
+        const why = if (self.interrupted) after_interrupt else after_failure;
         for (self.tasks, 0..) |*t, i| switch (t.status) {
             .running => {
                 t.cancelled = true;
@@ -1834,7 +1997,9 @@ const Engine = struct {
         }
         best = if (best) |b| @min(b, self.next_sample_ns) else self.next_sample_ns;
         if (self.page_path != null) best = @min(best.?, self.next_page_ns);
-        if (self.console.on) best = @min(best.?, self.console.next_ns);
+        if (self.log.deadline()) |d| best = @min(best.?, d);
+        if (self.log.terminal() != null) best = @min(best.?, self.log.footer_ns + std.time.ns_per_s);
+        if (self.log.terminal() == null) best = @min(best.?, self.next_beat_ns);
         return best;
     }
 
@@ -1881,7 +2046,8 @@ const Engine = struct {
         const path = self.page_path orelse return;
         const t0 = sys.monoNs();
         writePage(self.gpa, path, self.launch_dir, .{ .wf = self.wf, .g = self.g }) catch |err| {
-            std.debug.print("kanit: cannot write {s} ({s}); the page stops updating\n", .{ path, sys.errorText(err) });
+            self.log.text().print("cannot write {s} ({s}); the page stops updating", .{ monitor.shownPath(self.a, path), sys.errorText(err) }) catch {};
+            self.log.emit(.warning, "", "");
             self.page_path = null;
             return;
         };
@@ -2025,13 +2191,15 @@ const Engine = struct {
         if (self.network) |*n| if (n.pid == rp.pid) {
             n.pid = 0;
             self.events.emit("network_holder_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
-            self.alert("warning", "the run's network holder ended; a killed engine would no longer end its tasks", .{});
+            self.log.text().writeAll("the run's network holder ended; a killed engine would no longer end its tasks") catch {};
+            self.log.emit(.warning, "", "");
             return true;
         };
         if (self.guard) |*g| if (g.pid == rp.pid) {
             g.pid = 0;
             self.events.emit("guard_ended", .{ .exit_code = rp.exitCode(), .signal = rp.signal() });
-            self.alert("warning", "the guard of tasks without isolation ended; a killed engine would leave its tasks running", .{});
+            self.log.text().writeAll("the guard of tasks without isolation ended; a killed engine would leave its tasks running") catch {};
+            self.log.emit(.warning, "", "");
             return true;
         };
         return false;
@@ -2126,7 +2294,8 @@ const Engine = struct {
                 switch (schedule.interrupt(self.signalled_at, now)) {
                     .ignore => {},
                     .kill => {
-                        if (!self.opts.quiet) self.note("kanit: interrupted again; killing running tasks");
+                        self.log.text().writeAll("interrupted again: killing the running rules") catch {};
+                        self.log.emit(.control, "", "");
                         for (self.tasks) |*t| if (t.status == .running) {
                             t.kill_at = now;
                         };
@@ -2138,11 +2307,13 @@ const Engine = struct {
                         self.signalled_at = now;
                         self.events.emit("cancel_requested", .{ .signal = if (process.has(seen, .INT)) "SIGINT" else if (process.has(seen, .TERM)) "SIGTERM" else "SIGHUP" });
                         if (self.interrupted) {
-                            if (!self.opts.quiet) self.note("kanit: interrupted; the launch is already stopping (interrupt again to kill)");
+                            self.log.text().writeAll("interrupted: the launch is already stopping; interrupt again to kill") catch {};
+                            self.log.emit(.control, "", "");
                         } else {
                             self.interrupted = true;
                             self.interrupted_at = now;
-                            if (!self.opts.quiet) self.note("kanit: interrupted; stopping running tasks (interrupt again to kill)");
+                            self.log.text().writeAll("interrupted: stopping the running rules; interrupt again to kill") catch {};
+                            self.log.emit(.control, "", "");
                             self.beginStop();
                         }
                     },
@@ -2157,7 +2328,7 @@ const Engine = struct {
             try self.finishEnded();
             self.sample();
             if (self.page_path != null and sys.monoNs() >= self.next_page_ns) self.drawPage();
-            self.drawStatus(false);
+            self.tick(false);
         }
     }
 };
@@ -2259,6 +2430,15 @@ fn protectScope(gpa: Allocator, a: Allocator, tree: cgroup.Tree, mib: u64, path_
     var status: u32 = 0;
     _ = process.capture(gpa, a, &.{ systemctl, "--user", "set-property", "--runtime", unit, prop }, envp, devnull, &status) catch return false;
     return true;
+}
+
+fn usedMib(r: *const workflow.Rule, t: *const Task, counters: ?cgroup.Counters, reaped: process.Reaped) ?f64 {
+    if (r.shared.len > 0 or r.container != null) if (counters) |c| if (c.memory_peak) |p| return @as(f64, @floatFromInt(p)) / 1048576.0;
+    const rss = @as(f64, @floatFromInt(reaped.usage.maxrss)) / 1024.0;
+    const anon = if (t.anon_peak) |b| @as(f64, @floatFromInt(b)) / 1048576.0 else 0;
+    if (anon > rss) return anon;
+    if (reaped.usage.maxrss > t.engine_rss_kib) return rss;
+    return null;
 }
 
 fn taskCpu(counters: ?cgroup.Counters, reaped: process.Reaped) f64 {
@@ -2670,7 +2850,21 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .network = null,
         .sigfd = sigfd,
         .selected = selected,
+        .names = try naming.Names.init(a, wf.rules),
+        .log = logging.Log.init(gpa, clock.Zone.load(gpa, a, environ.get("TZ"))),
+        .tally = .{ .gpa = gpa },
+        .blocked_by = blk: {
+            const roots = try a.alloc(usize, wf.rules.len);
+            @memset(roots, 0);
+            break :blk roots;
+        },
+        .footer_text = .init(gpa),
     };
+    defer engine.log.deinit();
+    defer engine.footer_text.deinit();
+    defer engine.view_steps.deinit(gpa);
+    defer engine.view_running.deinit(gpa);
+    defer engine.tally.pending.deinit(gpa);
     if (tree != null) {
         engine.network = Network.start(gpa, a, &engine.envp, tree.?.root) catch |err|
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the run's network namespace: {s} ({s})", .{ sys.errorText(err), sys.errnoName() }));
@@ -2691,6 +2885,15 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         if (!mask[i]) t.status = .excluded;
         t.max_attempts = 1 + (wf.rules[i].retries orelse opts.retry);
     }
+    engine.tally.steps = try a.alloc(Group, engine.names.steps.len);
+    @memset(engine.tally.steps, .{});
+    engine.tally.samples = try a.alloc(Group, engine.names.samples.len);
+    @memset(engine.tally.samples, .{});
+    for (mask, 0..) |on, i| if (on) {
+        engine.tally.status[@intFromEnum(Status.pending)] += 1;
+        engine.tally.steps[engine.names.step_of[i]].selected += 1;
+        if (engine.names.sample_of[i]) |k| engine.tally.samples[k].selected += 1;
+    };
     engine.wake = .initContext(engine.topo_pos);
     defer engine.wake.deinit(gpa);
     defer engine.by_pid.deinit(gpa);
@@ -2726,7 +2929,16 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.next_sample_ns = engine.last_save_ns + sample_interval_ns;
     engine.last_sample_ns = engine.last_save_ns;
     if (engine.tree) |run_tree| engine.last_cpu_us = cgroup.cpuUsage(gpa, run_tree.root);
-    engine.console = .{ .on = !opts.quiet and term.isTerminal(2), .color = opts.color and term.colorOn(2, environ) };
+    {
+        const marks = logging.marksFor(environ);
+        const widths = engine.names.widths(mask);
+        const tty = term.isTerminal(2);
+        const level: logging.Level = if (opts.quiet) .quiet else if (opts.verbose) .verbose else .normal;
+        engine.log.sinks[0] = .{ .fd = 2, .style = .{ .color = opts.color and term.colorOn(2, environ), .marks = marks, .widths = widths, .cols = if (tty) term.size(2).cols else 0 }, .level = level, .terminal = tty and level != .quiet };
+        if (sys.openWrite(gpa, try std.fs.path.join(a, &.{ launch.dir, "launch.log" }), .append)) |fd| {
+            engine.log.sinks[1] = .{ .fd = fd, .owned = true, .style = .{ .marks = marks, .widths = widths }, .level = .verbose, .terminal = false };
+        } else |err| std.debug.print("kanit: cannot create {s}/launch.log ({s}); the launch keeps no text log\n", .{ launch.dir, sys.errorText(err) });
+    }
     engine.start_mono = t_open;
     const t0 = t_open;
     var selected_names: std.ArrayList([]const u8) = .empty;
@@ -2734,13 +2946,32 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     events.emit("launch_started", .{ .launch = launch.id, .selected = selected, .rules = selected_names.items, .max_threads = max_threads, .max_memory_mib = max_memory, .jobs = max_jobs, .isolation = opts.isolation, .cgroup = if (tree) |t| t.root else null, .shared = shared_info, .checks_s = @as(f64, @floatFromInt(sys.monoNs() - t_open)) / 1e9 });
     engine.page_path = try std.fs.path.join(a, &.{ launch.dir, "report.html" });
     {
-        var mem: std.Io.Writer.Allocating = .init(a);
-        try units.size(&mem.writer, @floatFromInt(max_memory));
-        const defaults = opts.max_threads == null and opts.max_memory_mib == null;
-        engine.progress("budget", "{d} threads, {s}, {d} jobs{s}", .{ max_threads, mem.written(), max_jobs, if (defaults) " (the defaults: every CPU and 3/4 of the memory; set --max-threads and --max-memory to share the machine)" else "" });
+        var budget: std.Io.Writer.Allocating = .init(a);
+        try budget.writer.print("{d} threads, ", .{max_threads});
+        try units.size(&budget.writer, @floatFromInt(max_memory));
+        try budget.writer.print(", {d} jobs", .{max_jobs});
+        if (opts.max_threads == null and opts.max_memory_mib == null) try budget.writer.writeAll(" (the defaults)");
+        var steps: std.ArrayList(logging.StepLine) = .empty;
+        for (engine.tally.steps, engine.names.steps) |grp, step| if (grp.selected > 0) try steps.append(a, .{ .name = step.name, .tool = step.tool, .rules = grp.selected });
+        var samples: usize = 0;
+        for (engine.tally.samples) |grp| samples += @intFromBool(grp.selected > 0);
+        engine.latest_shown = monitor.shownPath(a, try std.fs.path.join(a, &.{ rec, "latest" }));
+        engine.log.opening(.{
+            .version = version,
+            .workflow = wf.name,
+            .launch = launch.id,
+            .rules = selected,
+            .samples = samples,
+            .steps = steps.items,
+            .budget = budget.written(),
+            .isolated = opts.isolation,
+            .records = try std.fmt.allocPrint(a, "{s}/", .{engine.latest_shown}),
+            .page = engine.page_path != null,
+        });
+        engine.next_beat_ns = sys.monoNs() + logging.heartbeat_ns;
     }
     engine.drawPage();
-    if (engine.page_path) |p| engine.progress("page", "{s}, drawn again every {d} s while the launch runs", .{ monitor.shownPath(a, p), html.REFRESH_SECONDS });
+    engine.tick(true);
 
     engine.loop() catch |err| {
         engine.fatal = sys.errorText(err);
@@ -2779,7 +3010,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         };
         if (again == null or !std.mem.eql(u8, again.?.inputs, k.inputs)) {
             engine.fatal = try std.fmt.allocPrint(a, "inputs of rule {s} changed during the run", .{r.name});
-            t.status = .failed;
+            engine.setStatus(i, .failed);
             t.reason = "its inputs changed while the launch ran; run it again";
             engine.events.emit("task_failed", .{ .rule = r.name, .attempt = t.attempts, .reason = t.reason });
             _ = engine.st.data.rules.map.swapRemove(r.name);
@@ -2787,8 +3018,8 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         }
     };
 
-    for (engine.tasks) |*t| if (t.status == .pending or t.status == .ready) {
-        t.status = if (engine.interrupted) .cancelled else .not_started;
+    for (engine.tasks, 0..) |t, i| if (t.status == .pending or t.status == .ready) {
+        engine.setStatus(i, if (engine.interrupted) .cancelled else .not_started);
     };
     engine.dirty = true;
     try engine.saveState(true);
@@ -2840,7 +3071,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     try writeSummary(gpa, a, &events, summary);
     engine.drawPage();
-    engine.clearStatus();
+    engine.endLog();
     if (!opts.json and term.isTerminal(1)) {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();

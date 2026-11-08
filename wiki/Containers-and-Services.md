@@ -113,14 +113,21 @@ kanit run workflow.toml --max-threads 4 --max-memory 4G
 ```
 
 ```text
-[0/2] budget 4 threads, 4.0 GiB, 4 jobs
-[0/2] page .workz/launches/.../report.html, drawn again every 15 s while the launch runs
-[0/2] starting shared service genome (1024 MiB)
-[0/2] started align_s1 (attempt 1)
-[0/2] started align_s2 (attempt 1)
-[1/2] completed align_s2 (0.5 s)
-[2/2] completed align_s1 (0.5 s)
+kanit 0.7.0   star-shared   launch 20261108T091331.547-4ce05531
+          plan       2 rules in 1 step
+          budget     4 threads, 4.0 GiB, 4 jobs, isolated
+          steps      align 2 (star)
+          records    .workz/latest/   log launch.log   page report.html
+02:13:32  shared     genome    starting the service, 1.0 GiB
+02:13:32  shared     genome    ready after 0.2 s
+02:13:32  started    align_s1  2 threads, 512 MiB
+02:13:32  started    align_s2  2 threads, 512 MiB
+02:13:32  completed  align_s2  0.5 s   mem 261 MiB of 512 MiB   cpu 0.7 of 2
+02:13:32  completed  align_s1  0.5 s   mem 261 MiB of 512 MiB   cpu 0.7 of 2
+02:13:32  step       align     2 of 2 completed in 0.5 s   slowest align_s1 0.5 s
 ```
+
+The step's tool, `star`, comes from the image's name.
 
 Both alignments report `Found genome in shared memory` in their STAR logs. The genome here is a small test genome; with a human genome the service holds about 30 GB once, instead of once per alignment.
 

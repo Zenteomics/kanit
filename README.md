@@ -79,16 +79,21 @@ cat out/report.txt                                        # lines: 1000
 kanit report --bottlenecks                                # what limited the run
 ```
 
-`run` prints each rule as it starts and ends (launch ID shortened):
+`run` opens with the launch's shape, then logs each rule by its step and sample as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
 
 ```text
-[0/2] budget 2 threads, 1.0 GiB, 2 jobs
-[0/2] page .workz/launches/.../report.html, drawn again every 15 s while the launch runs
-[0/2] started S1__count (attempt 1)
-[1/2] completed S1__count (3 ms)
-[1/2] started report (attempt 1)
-[2/2] completed report (2 ms)
+kanit 0.7.0   example   launch 20261108T091155.150-c9f10bd9
+          plan       2 rules in 2 steps for 1 sample
+          budget     2 threads, 1.0 GiB, 2 jobs, isolated
+          steps      count 1   report 1
+          records    .workz/latest/   log launch.log   page report.html
+02:11:55  started    count   S1  1 thread, 256 MiB
+02:11:55  completed  count   S1  3 ms
+02:11:55  started    report      1 thread, 64 MiB
+02:11:55  completed  report      2 ms
 ```
+
+On a terminal the `started` lines give way to a footer of each step's progress and the running rules.
 
 Run `kanit plan workflow.toml` again and both rules are reused, since nothing they depend on changed. [Getting started](https://github.com/zenteomics/kanit/wiki/Getting-Started) goes further step by step, the [report tour](examples/report-tour/README.md) shows a failed rerun keeping the last good output, and [Heyer 2019 fusion calls](examples/heyer2019-fdz/README.md) prepares a real pipeline over four samples.
 

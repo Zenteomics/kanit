@@ -125,20 +125,24 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-[0/4] budget 2 threads, 1.0 GiB, 2 jobs
-[0/4] page .../20261107T060853.332-05be5410/report.html, drawn again every 15 s while the launch runs
-[0/4] started gc_s1 (attempt 1)
-[0/4] started gc_s2 (attempt 1)
-[1/4] completed gc_s1 (3 ms)
-[1/4] started gc_s3 (attempt 1)
-[2/4] completed gc_s2 (4 ms)
-[3/4] completed gc_s3 (3 ms)
-[3/4] started summary (attempt 1)
-[4/4] completed summary (4 ms)
+kanit 0.7.0   gc-content   launch 20261108T091235.606-0bd8dab3
+          plan       4 rules in 2 steps
+          budget     2 threads, 1.0 GiB, 2 jobs, isolated
+          steps      gc 3   summary 1
+          records    .workz/latest/   log launch.log   page report.html
+02:12:36  started    gc_s1    1 thread, 64 MiB
+02:12:36  started    gc_s2    1 thread, 64 MiB
+02:12:36  completed  gc_s1    4 ms
+02:12:36  completed  gc_s2    4 ms
+02:12:36  started    gc_s3    1 thread, 64 MiB
+02:12:36  completed  gc_s3    3 ms
+02:12:36  step       gc       3 of 3 completed in 11 ms   slowest gc_s1 4 ms
+02:12:36  started    summary  1 thread, 64 MiB
+02:12:36  completed  summary  4 ms
 {"v":1,"engine":"kanit 0.7.0 sha256:...","engine_key":4,...,"status":"completed",...}
 ```
 
-The first line gives the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. The second line names the launch's page, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. Progress goes to standard error and the launch summary to standard output as one line of JSON (the page's path under `.workz/launches/` and the JSON summary are shortened here).
+The launch opens with its shape: four rules, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the launch summary to standard output as one line of JSON (shortened here). On a terminal the `started` lines give way to a footer of the step's progress and the running rules, and the summary is a short report.
 
 ```sh
 cat summary.tsv
@@ -206,19 +210,23 @@ rule gc_s2: runs (inputs changed)
     now 46503978:44:1794031733387039562:1794031733387039562
 ```
 
-The `was` and `now` lines are the file's [identity](Reuse-and-Resume.md#file-identity): inode, size, and modification and change times. kanit notices a change without reading the file. Run again, and only the two rules run (the page's path shortened):
+The `was` and `now` lines are the file's [identity](Reuse-and-Resume.md#file-identity): inode, size, and modification and change times. kanit notices a change without reading the file. Run again, and only the two rules run:
 
 ```sh
 kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-[0/4] budget 2 threads, 1.0 GiB, 2 jobs
-[0/4] page .../20261107T060853.403-7eac9b69/report.html, drawn again every 15 s while the launch runs
-[2/4] started gc_s2 (attempt 1)
-[3/4] completed gc_s2 (3 ms)
-[3/4] started summary (attempt 1)
-[4/4] completed summary (4 ms)
+kanit 0.7.0   gc-content   launch 20261108T091422.924-ed35e951
+          plan       4 rules in 2 steps
+          budget     2 threads, 1.0 GiB, 2 jobs, isolated
+          steps      gc 3   summary 1
+          records    .workz/latest/   log launch.log   page report.html
+02:14:23  started    gc_s2    1 thread, 64 MiB
+02:14:23  completed  gc_s2    3 ms
+02:14:23  step       gc       3 of 3 completed, 2 of them reused   in 4 ms
+02:14:23  started    summary  1 thread, 64 MiB
+02:14:23  completed  summary  4 ms
 ```
 
 ## Look at what happened

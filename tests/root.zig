@@ -36,6 +36,8 @@ test {
     testing.refAllDecls(workz.cli);
     testing.refAllDecls(workz.schedule);
     testing.refAllDecls(workz.names);
+    testing.refAllDecls(workz.clock);
+    testing.refAllDecls(workz.log);
     _ = @import("test_workflow.zig");
     _ = @import("test_reuse.zig");
     _ = @import("test_engine.zig");
@@ -44,6 +46,7 @@ test {
     _ = @import("test_cli.zig");
     _ = @import("test_schedule.zig");
     _ = @import("test_names.zig");
+    _ = @import("test_log.zig");
 }
 
 test "the version is a semantic version" {

@@ -217,6 +217,7 @@ pub const commands = [_]Command{
             .{ .flag = "--slice NAME.slice", .desc = "place the run's scope in this systemd slice" },
             .{ .flag = "--no-isolation", .desc = "no scope, cgroups or network namespace" },
             .{ .flag = "-q, --quiet", .desc = "no progress lines; failures still print" },
+            .{ .flag = "-v, --verbose", .desc = "also a line for every rule that starts" },
             .{ .flag = "--json", .desc = "print the summary as JSON, also on a terminal" },
             .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
         },
@@ -881,6 +882,10 @@ pub const Run = struct {
         }
         if (eq(u8, arg, "-q") or eq(u8, arg, "--quiet")) {
             o.quiet = true;
+            return 1;
+        }
+        if (eq(u8, arg, "-v") or eq(u8, arg, "--verbose")) {
+            o.verbose = true;
             return 1;
         }
         if (eq(u8, arg, "--json")) {
