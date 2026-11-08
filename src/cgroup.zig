@@ -4,7 +4,9 @@
 //! pids controllers for the scope, and gives each task attempt and each shared
 //! input holder its own child group. Task groups get `memory.max` equal to the
 //! request, no swap, whole-group OOM kills, and a CPU quota equal to the
-//! requested threads.
+//! requested threads. The engine holds each group's directory open while the
+//! group lives and reaches its files relative to it, which saves a path walk
+//! per file on every attempt.
 const std = @import("std");
 const sys = @import("sys.zig");
 const linux = std.os.linux;
@@ -56,32 +58,103 @@ pub const Limits = struct {
     oom_group: bool = false,
 };
 
-pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits: Limits) ![]const u8 {
+pub const Group = struct {
+    path: []const u8,
+    dir: sys.Fd,
+
+    pub fn openProcs(g: Group) !sys.Fd {
+        return @intCast(try sys.check(linux.openat(g.dir, "cgroup.procs", .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0)));
+    }
+
+    pub fn counters(g: Group) Counters {
+        var buf: [1 << 16]u8 = undefined;
+        var c: Counters = .{};
+        c.memory_peak = number(readAt(g.dir, "memory.peak", &buf));
+        c.memory_current = number(readAt(g.dir, "memory.current", &buf));
+        if (readAt(g.dir, "memory.events", &buf)) |kv| {
+            c.oom = field(kv, "oom") orelse 0;
+            c.oom_kill = field(kv, "oom_kill") orelse 0;
+            c.memory_max_events = field(kv, "max") orelse 0;
+        }
+        if (readAt(g.dir, "cpu.stat", &buf)) |kv| c.cpu_usage_usec = field(kv, "usage_usec");
+        if (readAt(g.dir, "cpu.pressure", &buf)) |kv| c.cpu_some_us = pressureTotal(kv, "some");
+        if (readAt(g.dir, "memory.pressure", &buf)) |kv| {
+            c.memory_some_us = pressureTotal(kv, "some");
+            c.memory_full_us = pressureTotal(kv, "full");
+        }
+        if (readAt(g.dir, "io.pressure", &buf)) |kv| {
+            c.io_some_us = pressureTotal(kv, "some");
+            c.io_full_us = pressureTotal(kv, "full");
+        }
+        if (readAt(g.dir, "memory.stat", &buf)) |kv| c.file = field(kv, "file");
+        return c;
+    }
+
+    pub fn stat(g: Group, name: []const u8) ?u64 {
+        var buf: [1 << 16]u8 = undefined;
+        return field(readAt(g.dir, "memory.stat", &buf) orelse return null, name);
+    }
+
+    pub fn populated(g: Group) bool {
+        var buf: [256]u8 = undefined;
+        return (field(readAt(g.dir, "cgroup.events", &buf) orelse return true, "populated") orelse 0) != 0;
+    }
+
+    pub fn kill(g: Group) void {
+        setAt(g.dir, "cgroup.kill", "1") catch {};
+    }
+};
+
+pub fn open(gpa: Allocator, path: []const u8) !Group {
+    return .{ .path = path, .dir = try sys.openDir(gpa, path) };
+}
+
+pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits: Limits) !Group {
     const path = try std.fs.path.join(a, &.{ tree.root, name });
     try sys.mkdir(gpa, path);
-    errdefer remove(gpa, path) catch {};
+    errdefer removePath(gpa, path) catch {};
+    const g = try open(gpa, path);
+    errdefer sys.close(g.dir);
     if (limits.memory_bytes) |m| {
         var buf: [32]u8 = undefined;
-        try set(gpa, path, "memory.max", try std.fmt.bufPrint(&buf, "{d}", .{m}));
+        try setAt(g.dir, "memory.max", try std.fmt.bufPrint(&buf, "{d}", .{m}));
     }
-    if (limits.oom_group) try set(gpa, path, "memory.oom.group", "1");
+    if (limits.oom_group) try setAt(g.dir, "memory.oom.group", "1");
     if (limits.threads) |t| {
         var buf: [48]u8 = undefined;
-        try set(gpa, path, "cpu.max", try std.fmt.bufPrint(&buf, "{d} 100000", .{@as(u64, t) * 100000}));
+        try setAt(g.dir, "cpu.max", try std.fmt.bufPrint(&buf, "{d} 100000", .{@as(u64, t) * 100000}));
     }
-    return path;
+    return g;
 }
 
-fn set(gpa: Allocator, dir: []const u8, file: []const u8, value: []const u8) !void {
-    const p = try std.fs.path.join(gpa, &.{ dir, file });
-    defer gpa.free(p);
-    try writeText(gpa, p, value);
+pub fn remove(gpa: Allocator, g: Group) !void {
+    defer sys.close(g.dir);
+    removePath(gpa, g.path) catch |err| {
+        g.kill();
+        return err;
+    };
 }
 
-pub fn openProcs(gpa: Allocator, path: []const u8) !sys.Fd {
-    const p = try std.fs.path.join(gpa, &.{ path, "cgroup.procs" });
-    defer gpa.free(p);
-    return sys.openWrite(gpa, p, .append);
+fn setAt(dir: sys.Fd, name: [*:0]const u8, value: []const u8) !void {
+    const fd: sys.Fd = @intCast(try sys.check(linux.openat(dir, name, .{ .ACCMODE = .WRONLY, .CLOEXEC = true }, 0)));
+    defer sys.close(fd);
+    try sys.writeAll(fd, value);
+}
+
+fn readAt(dir: sys.Fd, name: [*:0]const u8, buf: []u8) ?[]const u8 {
+    const fd: sys.Fd = @intCast(sys.check(linux.openat(dir, name, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)) catch return null);
+    defer sys.close(fd);
+    var n: usize = 0;
+    while (n < buf.len) {
+        const k = sys.read(fd, buf[n..]) catch return null;
+        if (k == 0) return buf[0..n];
+        n += k;
+    }
+    return null;
+}
+
+fn number(text: ?[]const u8) ?u64 {
+    return std.fmt.parseInt(u64, std.mem.trim(u8, text orelse return null, " \n"), 10) catch null;
 }
 
 pub const Counters = struct {
@@ -101,56 +174,23 @@ pub const Counters = struct {
 };
 
 pub fn read(gpa: Allocator, path: []const u8) Counters {
-    var c: Counters = .{};
-    c.memory_peak = readNumber(gpa, path, "memory.peak");
-    c.memory_current = readNumber(gpa, path, "memory.current");
-    if (readKeyed(gpa, path, "memory.events")) |kv| {
-        defer gpa.free(kv);
-        c.oom = field(kv, "oom") orelse 0;
-        c.oom_kill = field(kv, "oom_kill") orelse 0;
-        c.memory_max_events = field(kv, "max") orelse 0;
-    }
-    if (readKeyed(gpa, path, "cpu.stat")) |kv| {
-        defer gpa.free(kv);
-        c.cpu_usage_usec = field(kv, "usage_usec");
-    }
-    if (readKeyed(gpa, path, "cpu.pressure")) |kv| {
-        defer gpa.free(kv);
-        c.cpu_some_us = pressureTotal(kv, "some");
-    }
-    if (readKeyed(gpa, path, "memory.pressure")) |kv| {
-        defer gpa.free(kv);
-        c.memory_some_us = pressureTotal(kv, "some");
-        c.memory_full_us = pressureTotal(kv, "full");
-    }
-    if (readKeyed(gpa, path, "io.pressure")) |kv| {
-        defer gpa.free(kv);
-        c.io_some_us = pressureTotal(kv, "some");
-        c.io_full_us = pressureTotal(kv, "full");
-    }
-    if (readKeyed(gpa, path, "memory.stat")) |kv| {
-        defer gpa.free(kv);
-        c.file = field(kv, "file");
-    }
-    return c;
+    const g = open(gpa, path) catch return .{};
+    defer sys.close(g.dir);
+    return g.counters();
 }
 
-pub fn anon(gpa: Allocator, path: []const u8) ?u64 {
-    const kv = readKeyed(gpa, path, "memory.stat") orelse return null;
-    defer gpa.free(kv);
-    return field(kv, "anon");
+pub fn readNumber(gpa: Allocator, path: []const u8, file: [*:0]const u8) ?u64 {
+    const dir = sys.openDir(gpa, path) catch return null;
+    defer sys.close(dir);
+    var buf: [64]u8 = undefined;
+    return number(readAt(dir, file, &buf));
 }
 
-pub fn readNumber(gpa: Allocator, dir: []const u8, file: []const u8) ?u64 {
-    const text = readKeyed(gpa, dir, file) orelse return null;
-    defer gpa.free(text);
-    return std.fmt.parseInt(u64, std.mem.trim(u8, text, " \n"), 10) catch null;
-}
-
-fn readKeyed(gpa: Allocator, dir: []const u8, file: []const u8) ?[]u8 {
-    const p = std.fs.path.join(gpa, &.{ dir, file }) catch return null;
-    defer gpa.free(p);
-    return sys.readFile(gpa, p, 1 << 16) catch null;
+pub fn cpuUsage(gpa: Allocator, path: []const u8) ?u64 {
+    const dir = sys.openDir(gpa, path) catch return null;
+    defer sys.close(dir);
+    var buf: [1024]u8 = undefined;
+    return field(readAt(dir, "cpu.stat", &buf) orelse return null, "usage_usec");
 }
 
 fn field(text: []const u8, name: []const u8) ?u64 {
@@ -174,23 +214,7 @@ pub fn pressureTotal(text: []const u8, kind: []const u8) ?u64 {
     return null;
 }
 
-pub fn cpuUsage(gpa: Allocator, path: []const u8) ?u64 {
-    const kv = readKeyed(gpa, path, "cpu.stat") orelse return null;
-    defer gpa.free(kv);
-    return field(kv, "usage_usec");
-}
-
-pub fn populated(gpa: Allocator, path: []const u8) bool {
-    const kv = readKeyed(gpa, path, "cgroup.events") orelse return true;
-    defer gpa.free(kv);
-    return (field(kv, "populated") orelse 0) != 0;
-}
-
-pub fn kill(gpa: Allocator, path: []const u8) void {
-    set(gpa, path, "cgroup.kill", "1") catch {};
-}
-
-pub fn remove(gpa: Allocator, path: []const u8) !void {
+pub fn removePath(gpa: Allocator, path: []const u8) !void {
     sys.rmdir(gpa, path) catch |err| switch (err) {
         error.Busy => {
             try removeChildren(gpa, path, 0);
@@ -202,9 +226,7 @@ pub fn remove(gpa: Allocator, path: []const u8) !void {
 
 fn removeChildren(gpa: Allocator, path: []const u8, depth: usize) !void {
     if (depth > 16) return error.Busy;
-    const p = try sys.z(gpa, path);
-    defer gpa.free(p);
-    const fd: sys.Fd = @intCast(try sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
+    const fd = try sys.openDir(gpa, path);
     defer sys.close(fd);
     var entries: sys.DirEntries = .{ .fd = fd };
     while (try entries.next()) |e| {

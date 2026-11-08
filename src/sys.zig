@@ -238,10 +238,14 @@ pub fn writeFile(gpa: Allocator, path: []const u8, bytes: []const u8) !void {
     try writeAll(fd, bytes);
 }
 
-pub fn fsyncDir(gpa: Allocator, path: []const u8) !void {
+pub fn openDir(gpa: Allocator, path: []const u8) !Fd {
     const p = try z(gpa, path);
     defer gpa.free(p);
-    const fd: Fd = @intCast(try check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
+    return @intCast(try check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .CLOEXEC = true }, 0)));
+}
+
+pub fn fsyncDir(gpa: Allocator, path: []const u8) !void {
+    const fd = try openDir(gpa, path);
     defer close(fd);
     try fsync(fd);
 }

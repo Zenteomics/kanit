@@ -11,6 +11,7 @@ Large workflows run faster in less memory, and a launch writes its resume state 
 ### Changed
 
 - On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.
+- With isolation, the engine reaches each attempt's cgroup through one open directory and reads its counters with fewer system calls: on 2,000 short rules it uses about 5% less CPU and a fifth less memory. The recorded counters are unchanged.
 - A launch appends each completed rule to `.workz/state.log`, synced at most once a second, instead of rewriting `state.json`; `state.json` is rewritten when the launch ends. kanit 0.7.0 ignores the log and reruns the rules recorded only there.
 
 ### Fixed

@@ -72,7 +72,7 @@ const Task = struct {
     max_attempts: u32 = 1,
     key: ?state.Key = null,
     pid: linux.pid_t = 0,
-    cg: ?[]const u8 = null,
+    cg: ?cgroup.Group = null,
     anon_peak: ?u64 = null,
     stop_why: []const u8 = "cancelled",
     dir: []const u8 = "",
@@ -215,7 +215,7 @@ const Holder = struct {
     st: HolderState = .idle,
     pid: linux.pid_t = 0,
     pipe: sys.Fd = -1,
-    cg: ?[]const u8 = null,
+    cg: ?cgroup.Group = null,
     container_name: ?[]const u8 = null,
     stop_fd: sys.Fd = -1,
     starts: u32 = 0,
@@ -292,7 +292,7 @@ const Engine = struct {
     control_offset: u64 = 0,
     control_skip: bool = false,
     podman: ?[]const u8 = null,
-    containers_cg: ?[]const u8 = null,
+    containers_cg: ?cgroup.Group = null,
     images: std.StringHashMapUnmanaged([]const u8) = .empty,
     extras: []const []const u8 = &.{},
     sigfd: sys.Fd,
@@ -818,7 +818,7 @@ const Engine = struct {
         if (self.tree) |tree| {
             const name = try std.fmt.allocPrint(sa, "task-{d}-{d}", .{ i, t.attempts });
             t.cg = try cgroup.create(self.gpa, self.a, tree, name, .{ .memory_bytes = r.memory_mib * 1024 * 1024, .threads = r.threads, .oom_group = true });
-            procs = try cgroup.openProcs(self.gpa, if (r.container != null) self.containers_cg.? else t.cg.?);
+            procs = try (if (r.container != null) self.containers_cg.? else t.cg.?).openProcs();
         }
         defer if (procs >= 0) sys.close(procs);
 
@@ -834,7 +834,7 @@ const Engine = struct {
                 .image_id = self.images.get(img).?,
                 .root = self.wf.root,
                 .launch = self.launch_id,
-                .cgroup_parent = if (t.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
+                .cgroup_parent = if (t.cg) |cg| cg.path["/sys/fs/cgroup".len..] else null,
                 .mounts = try container.mounts(sa, self.wf.root, r, extra_ro.items),
                 .env = try self.containerEnv(sa, &try ruleVars(sa, r, t.dir)),
                 .ipc_service = self.serviceOf(r),
@@ -883,7 +883,7 @@ const Engine = struct {
         t.started_real = sys.realNs();
         t.engine_rss_kib = engineMaxRssKib();
         t.deadline_ns = schedule.deadline(t.started_ns, self.timeoutOf(r));
-        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = t.cg, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
+        self.events.emit("task_started", .{ .rule = r.name, .attempt = t.attempts, .pid = t.pid, .cgroup = if (t.cg) |cg| cg.path else null, .directory = t.dir, .threads = r.threads, .memory_mib = r.memory_mib, .waited_s = t.queued_s, .shared = r.shared });
         self.progress("started", "{s} (attempt {d})", .{ r.name, t.attempts });
     }
 
@@ -897,7 +897,7 @@ const Engine = struct {
         if (schedule.retried(t.attempts, t.max_attempts, false, self.stopping, false)) {
             const r = self.rule(i);
             self.writeUnstartedRecord(i, t.attempts, .failed, reason);
-            if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
             t.cg = null;
             self.reserve(i, false);
             t.status = .ready;
@@ -972,7 +972,7 @@ const Engine = struct {
     fn endUnstarted(self: *Engine, i: usize, admitted: bool, attempt: ?u32, status: Status, reason: []const u8) void {
         const t = &self.tasks[i];
         const r = self.rule(i);
-        if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+        if (t.cg) |cg| cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
         t.cg = null;
         if (admitted) {
             self.reserve(i, false);
@@ -1057,12 +1057,12 @@ const Engine = struct {
         errdefer sys.close(pipe[0]);
         var procs: sys.Fd = -1;
         errdefer if (h.cg) |cg| {
-            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
             h.cg = null;
         };
         if (self.tree) |tree| {
             h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{});
-            procs = try cgroup.openProcs(self.gpa, h.cg.?);
+            procs = try h.cg.?.openProcs();
         }
         defer if (procs >= 0) sys.close(procs);
         const spec: process.Spec = .{
@@ -1079,7 +1079,7 @@ const Engine = struct {
         if (self.guard) |gd| gd.note('+', h.pid);
         h.pipe = pipe[0];
         h.st = .loading;
-        self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = h.cg });
+        self.events.emit("shared_loading", .{ .name = s.name, .path = s.path, .bytes = h.bytes, .pid = h.pid, .cgroup = if (h.cg) |cg| cg.path else null });
         self.progress("loading", "shared input {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
@@ -1098,12 +1098,12 @@ const Engine = struct {
 
         var procs: sys.Fd = -1;
         errdefer if (h.cg) |cg| {
-            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
             h.cg = null;
         };
         if (self.tree) |tree| {
             h.cg = try cgroup.create(self.gpa, self.a, tree, try std.fmt.allocPrint(self.a, "shared-{s}-{d}", .{ s.name, h.starts }), .{ .memory_bytes = h.mib * 1024 * 1024, .oom_group = true });
-            procs = try cgroup.openProcs(self.gpa, self.containers_cg.?);
+            procs = try self.containers_cg.?.openProcs();
         }
         defer if (procs >= 0) sys.close(procs);
         const name = try std.fmt.allocPrint(self.a, "workz-{s}-shared-{s}-{d}", .{ self.launch_id, s.name, h.starts });
@@ -1116,7 +1116,7 @@ const Engine = struct {
             .image_id = self.images.get(s.container.?).?,
             .root = self.wf.root,
             .launch = self.launch_id,
-            .cgroup_parent = if (h.cg) |cg| cg["/sys/fs/cgroup".len..] else null,
+            .cgroup_parent = if (h.cg) |cg| cg.path["/sys/fs/cgroup".len..] else null,
             .mounts = ro.items,
             .env = try self.containerEnv(self.a, &.{
                 try std.fmt.allocPrint(self.a, "WORKZ_SHARED={s}", .{s.name}),
@@ -1150,7 +1150,7 @@ const Engine = struct {
         h.st = .loading;
         h.timed_out = false;
         h.ready_deadline = if (s.timeout_s) |t| sys.monoNs() + @as(i128, t) * std.time.ns_per_s else null;
-        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .reserved_mib = h.reserve_mib, .pid = h.pid, .cgroup = h.cg });
+        self.events.emit("shared_loading", .{ .name = s.name, .container = name, .memory_mib = h.mib, .reserved_mib = h.reserve_mib, .pid = h.pid, .cgroup = if (h.cg) |cg| cg.path else null });
         self.progress("starting", "shared service {s} ({d} MiB)", .{ s.name, h.mib });
     }
 
@@ -1180,7 +1180,7 @@ const Engine = struct {
             return;
         }
         h.st = .ready;
-        const file = if (h.cg) |cg| cgroup.read(self.gpa, cg).file else null;
+        const file = if (h.cg) |cg| cg.stat("file") else null;
         self.events.emit("shared_loaded", .{ .name = self.wf.shared[hi].name, .bytes = h.bytes, .holder_file_bytes = file });
         for (self.tasks, 0..) |*t, i| {
             if (t.status != .staging) continue;
@@ -1262,9 +1262,8 @@ const Engine = struct {
         };
         var counters: ?cgroup.Counters = null;
         if (h.cg) |cg| {
-            counters = cgroup.read(self.gpa, cg);
-            cgroup.kill(self.gpa, cg);
-            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            counters = cg.counters();
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
             h.cg = null;
         }
         const code = reaped.exitCode();
@@ -1349,10 +1348,10 @@ const Engine = struct {
         const wall_s = @as(f64, @floatFromInt(sys.monoNs() - t.started_ns)) / 1e9;
         var counters: ?cgroup.Counters = null;
         if (t.cg) |cg| {
-            counters = cgroup.read(self.gpa, cg);
+            counters = cg.counters();
             counters.?.anon_peak = t.anon_peak;
-            if (cgroup.populated(self.gpa, cg)) cgroup.kill(self.gpa, cg);
-            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg) catch {};
+            cgroup.remove(self.gpa, cg) catch self.leftover_cgroups.append(self.gpa, cg.path) catch {};
+            t.cg = null;
         } else process.signalGroup(t.pid, .KILL);
         self.reserve(i, false);
         var released = false;
@@ -1778,7 +1777,7 @@ const Engine = struct {
         };
         for (self.holders) |*h| if (h.kill_at) |k| if (now >= k) {
             process.signalPid(h.pid, .KILL);
-            if (h.cg) |cg| cgroup.kill(self.gpa, cg);
+            if (h.cg) |cg| cg.kill();
             h.kill_at = null;
         };
         for (self.active.items) |i| {
@@ -1788,7 +1787,7 @@ const Engine = struct {
                 .none => {},
                 .kill => {
                     process.signalGroup(t.pid, .KILL);
-                    if (t.cg) |cg| cgroup.kill(self.gpa, cg);
+                    if (t.cg) |cg| cg.kill();
                     t.kill_at = null;
                 },
                 .terminate => {
@@ -1800,8 +1799,8 @@ const Engine = struct {
         }
     }
 
-    fn stillRuns(self: *Engine, t: *const Task) bool {
-        if (t.cg) |cg| return cgroup.populated(self.gpa, cg);
+    fn stillRuns(t: *const Task) bool {
+        if (t.cg) |cg| return cg.populated();
         return process.groupAlive(t.pid);
     }
 
@@ -1810,7 +1809,7 @@ const Engine = struct {
             const t = &self.tasks[i];
             if (t.status != .running) continue;
             const rp = t.ended orelse continue;
-            if (t.kill_at != null and self.stillRuns(t)) continue;
+            if (t.kill_at != null and stillRuns(t)) continue;
             t.ended = null;
             try self.finish(i, rp);
         }
@@ -1853,7 +1852,7 @@ const Engine = struct {
         var cpu_cores: ?f64 = null;
         if (self.tree) |tree| {
             memory_current = cgroup.readNumber(self.gpa, tree.root, "memory.current");
-            for (self.tasks) |*t| if (t.status == .running) if (t.cg) |cg| if (cgroup.anon(self.gpa, cg)) |b| {
+            for (self.tasks) |*t| if (t.status == .running) if (t.cg) |cg| if (cg.stat("anon")) |b| {
                 t.anon_peak = @max(t.anon_peak orelse 0, b);
             };
             const cpu = cgroup.cpuUsage(self.gpa, tree.root);
@@ -2069,7 +2068,7 @@ const Engine = struct {
                 const i = kv.value;
                 const t = &self.tasks[i];
                 if (t.status == .running and t.ended == null and t.pid == rp.pid) {
-                    if (t.kill_at != null and self.stillRuns(t)) t.ended = rp else try self.finish(i, rp);
+                    if (t.kill_at != null and stillRuns(t)) t.ended = rp else try self.finish(i, rp);
                     continue;
                 }
             }
@@ -2581,7 +2580,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
             events.emit("memory_protected", .{ .memory_low_mib = shared_mib, .ok = ok });
         }
     }
-    var containers_cg: ?[]const u8 = null;
+    var containers_cg: ?cgroup.Group = null;
     if (podman != null) if (tree) |t| {
         containers_cg = cgroup.create(gpa, a, t, "containers", .{}) catch |err|
             return refusal.refuse(.invalid, try std.fmt.allocPrint(a, "cannot create the cgroup for container clients: {s}", .{sys.errorText(err)}));
@@ -2794,7 +2793,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     engine.dirty = true;
     try engine.saveState(true);
     try records.Journal.reset(gpa, rec);
-    for (engine.leftover_cgroups.items) |cg| cgroup.remove(gpa, cg) catch {};
+    for (engine.leftover_cgroups.items) |path| cgroup.removePath(gpa, path) catch {};
     if (engine.control_watch >= 0) engine.readControl() catch {};
 
     var counts: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0);

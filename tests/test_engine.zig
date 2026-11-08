@@ -327,10 +327,12 @@ test "[failure] - [cgroup]: a group whose events cannot be read counts as still 
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("cgroup.events", "populated 0\nfrozen 0\n");
-    try testing.expect(!workz.cgroup.populated(testing.allocator, s.path));
-    const gone = try std.fs.path.join(testing.allocator, &.{ s.path, "gone" });
-    defer testing.allocator.free(gone);
-    try testing.expect(workz.cgroup.populated(testing.allocator, gone));
+    const empty = try workz.cgroup.open(testing.allocator, s.path);
+    defer sys.close(empty.dir);
+    try testing.expect(!empty.populated());
+    const unreadable = try workz.cgroup.open(testing.allocator, try s.dir("unreadable"));
+    defer sys.close(unreadable.dir);
+    try testing.expect(unreadable.populated());
 }
 
 fn cleanScratch(s: *Scratch, a: std.mem.Allocator, opts: workz.clean.Options, out: *std.Io.Writer) !workz.clean.Result {
