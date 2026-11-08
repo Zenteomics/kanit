@@ -21,6 +21,12 @@ pub const Widths = struct {
     step: usize,
     sample: usize,
     tool: usize = 0,
+
+    /// The widths held to the limits a terminal row allows; longer names
+    /// are cut to fit.
+    pub fn capped(w: Widths) Widths {
+        return .{ .step = @min(w.step, step_max), .sample = @min(w.sample, sample_max), .tool = @min(w.tool, tool_max) };
+    }
 };
 
 pub const step_max = 24;
@@ -121,16 +127,46 @@ pub const Names = struct {
         var w: Widths = .{ .step = 0, .sample = 0 };
         for (self.step, self.sample, self.tool, 0..) |st, sm, tl, i| {
             if (mask) |m| if (!m[i]) continue;
-            w.step = @max(w.step, @min(columns(st), step_max));
-            w.sample = @max(w.sample, @min(columns(sm), sample_max));
-            w.tool = @max(w.tool, @min(columns(tl), tool_max));
+            w.step = @max(w.step, columns(st));
+            w.sample = @max(w.sample, columns(sm));
+            w.tool = @max(w.tool, columns(tl));
         }
         return w;
     }
 };
 
+/// The columns `text` takes on a terminal.
 pub fn columns(text: []const u8) usize {
-    return std.unicode.utf8CountCodepoints(text) catch text.len;
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        const c = codepoint(text, i);
+        n += width(c.value);
+        i += c.len;
+    }
+    return n;
+}
+
+pub const Codepoint = struct { value: u21, len: usize };
+
+/// The code point at byte `i`, or the byte itself when it starts no valid
+/// UTF-8 sequence.
+pub fn codepoint(text: []const u8, i: usize) Codepoint {
+    const len = std.unicode.utf8ByteSequenceLength(text[i]) catch return .{ .value = text[i], .len = 1 };
+    if (i + len > text.len) return .{ .value = text[i], .len = 1 };
+    const value = std.unicode.utf8Decode(text[i .. i + len]) catch return .{ .value = text[i], .len = 1 };
+    return .{ .value = value, .len = len };
+}
+
+/// The columns a code point takes: none for combining marks and zero-width
+/// characters, two for East Asian wide characters and emoji, else one.
+pub fn width(c: u21) usize {
+    const zero = [_][2]u21{ .{ 0x0300, 0x036F }, .{ 0x1AB0, 0x1AFF }, .{ 0x1DC0, 0x1DFF }, .{ 0x200B, 0x200F }, .{ 0x20D0, 0x20FF }, .{ 0xFE00, 0xFE0F }, .{ 0xFE20, 0xFE2F } };
+    const wide = [_][2]u21{ .{ 0x1100, 0x115F }, .{ 0x2E80, 0x303E }, .{ 0x3041, 0x33FF }, .{ 0x3400, 0x4DBF }, .{ 0x4E00, 0x9FFF }, .{ 0xA000, 0xA4CF }, .{ 0xAC00, 0xD7A3 }, .{ 0xF900, 0xFAFF }, .{ 0xFE30, 0xFE4F }, .{ 0xFF00, 0xFF60 }, .{ 0xFFE0, 0xFFE6 }, .{ 0x1F300, 0x1F64F }, .{ 0x1F900, 0x1F9FF }, .{ 0x20000, 0x3FFFD } };
+    if (c < 0x300) return 1;
+    for (zero) |r| if (c >= r[0] and c <= r[1]) return 0;
+    for (wide) |r| if (c >= r[0] and c <= r[1]) return 2;
+    return 1;
 }
 
 pub fn ofLaunch(gpa: Allocator, a: Allocator, launch_dir: []const u8) ?Names {

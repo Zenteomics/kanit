@@ -97,9 +97,9 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 The run log names a failure's reason in a few words, quotes the last lines of its standard error, and names the `kanit logs` command that prints its output; the attempt's record, `kanit status` and the summary keep the reasons below. `kanit logs NAME` or `kanit logs STEP/SAMPLE` prints the attempt's output, and `kanit status` lists every failed rule of the newest launch.
 
-- `exited with status N: LINE` (in the log, `exit N after TIME`): The command failed, and LINE is the last line of its standard error, which usually says why; `kanit logs NAME` prints the rest. A tool that writes its errors to a log of its own, such as STAR's `Log.out`, can name that log in `diagnostics` ([Writing workflows](Writing-Workflows.md#diagnostics)); then its last line is quoted when standard error is empty, and its tail is kept with the attempt.
+- `exited with status N: LINE` (in the log, `exit N`, with the time under `TOOK`): The command failed, and LINE is the last line of its standard error, which usually says why; `kanit logs NAME` prints the rest. A tool that writes its errors to a log of its own, such as STAR's `Log.out`, can name that log in `diagnostics` ([Writing workflows](Writing-Workflows.md#diagnostics)); then its last line is quoted when standard error is empty, and its tail is kept with the attempt.
 
-- `out of memory: could not stay within its N MiB request` (in the log, `out of memory at its N MiB`): The attempt needed more memory than it requested, and the kernel killed all of its processes. Raise `memory`, guided by `kanit report --suggest` on attempts that completed.
+- `out of memory: could not stay within its N MiB request` (in the log, `out of memory`, with the peak and the request under `MEMORY`): The attempt needed more memory than it requested, and the kernel killed all of its processes. Raise `memory`, guided by `kanit report --suggest` on attempts that completed.
 
 - `timed out after N s` (in the log, `timed out at TIME`): The attempt ran longer than its `timeout` or `--timeout`. Raise the limit, or find out why the command hangs.
 

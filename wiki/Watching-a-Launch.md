@@ -75,24 +75,24 @@ qc_S6                                          1     0.9 s   1.4 MiB   1.6 MiB  
 `kanit status` prints the summary of the newest launch, or with `--launch ID` an earlier one's, while it runs or after it ended. On a terminal it is the same report `kanit run` ends with:
 
 ```text
-          failed     7 of 10 rules done in 4.3 s: 7 completed, 1 failed, 2 blocked
-          samples    trim  align  count  matrix
-          S1         ✓     ✓      ✓
-          S2         ✓     ✗      ·
-          S3         ✓     ✓      ✓
-          all                            ·
-                     ✓ done   ✗ failed   · not run
-          failed     align   S2  exited with status 2: STAR: genome index is incomplete: missing SA file
-          blocked    count   S2  after align/S2 failed
-                     matrix      after align/S2 failed
-          slowest    align/S1 2.0 s   trim/S2 1.5 s   trim/S1 1.0 s
-          records    .workz/latest/   log launch.log   page report.html
-          next       kanit logs align/S2   the output of the failed attempt
-                     kanit run             run again; the 7 completed rules are reused
+          failed       7 of 10 rules done in 4.3 s: 1 failed, 2 blocked
+          samples      trim  align  count  matrix
+          S1           ✓     ✓      ✓
+          S2           ✓     ✗      ·
+          S3           ✓     ✓      ✓
+          all                              ·
+                       ✓ done   ✗ failed   · blocked or stopped
+          failed       align   S2  exited with status 2: STAR: genome index is incomplete: missing SA file
+          blocked      count   S2  after align/S2 failed
+                       matrix      after align/S2 failed
+          slowest      align/S1 2.0 s   trim/S2 1.5 s   trim/S1 1.0 s
+          records      .workz/latest/   log launch.log   page report.html
+          next         kanit logs align/S2   the output of the failed attempt
+                       kanit run             run again; 7 rules are reused
 ```
 
 - The first line is the outcome and the count of each status. While the launch runs it reads `running`, with the rules running and waiting so far.
-- A launch of at least two samples shows a matrix of samples by steps: `✓` for a rule done (dim when reused), `✗` failed, `·` not run, `~` running. Rules without a sample form the `all` row. A launch without samples, or with a matrix too wide for the window, lists its steps instead, each with its tool, its counts and its slowest sample.
+- A launch of at least two samples shows a matrix of samples by steps: `✓` for a rule done (dim when reused), `✗` failed, `·` blocked or stopped, `~` running. Rules without a sample form the `all` row. A launch without samples, or with a matrix too wide for the window, lists its steps instead, each with its tool, its counts and its slowest sample.
 - `failed` names each failed rule with its reason, which quotes the last line of its error output; `blocked` names the rules a failure blocked, with the failure that blocked them.
 - `slowest` names the three slowest rules that completed; `records` says where the launch's records, text log and page are; `next` gives the commands to look further or run again.
 

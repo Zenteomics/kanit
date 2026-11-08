@@ -82,4 +82,4 @@ EOF
 kanit run workflow.toml
 ```
 
-On a terminal the run ends with a short summary that starts with `completed` and names the launch's page; off a terminal its last progress line is `[1/1] completed hello (1 ms)`, followed by a one-line JSON summary with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.
+The run log's last row is `1/1  DONE    hello`, and the summary on standard output starts with `completed    1 of 1 rule done`; with `--json` the summary is one line of JSON with `"status":"completed"`. If it stops with an error instead, [Troubleshooting](Troubleshooting.md#starting-a-run) explains each one.

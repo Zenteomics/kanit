@@ -93,15 +93,17 @@ test "[unit] - [names]: a rule is found by its name or by STEP/SAMPLE, by the na
     }.check);
 }
 
-test "[unit] - [names]: column widths cover the selected rules only, within their limits" {
+test "[unit] - [names]: column widths cover the selected rules only, and capped() holds them to a terminal's limits" {
     const long = helpers.head ++
         "[[rules]]\nname = \"S1__trim\"\noutput = [\"t1\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"a_very_long_sample_name_beyond_twenty__an_even_longer_step_name_beyond_24\"\noutput = [\"t2\"]\nshell = \"true\"\nmemory = \"1M\"\n";
     try withNames(long, struct {
         fn check(_: *const workflow.Workflow, n: *const names.Names) !void {
             const all = n.widths(null);
-            try testing.expectEqual(@as(usize, names.step_max), all.step);
-            try testing.expectEqual(@as(usize, names.sample_max), all.sample);
+            try testing.expectEqual(@as(usize, 34), all.step);
+            try testing.expectEqual(@as(usize, 37), all.sample);
+            try testing.expectEqual(@as(usize, names.step_max), all.capped().step);
+            try testing.expectEqual(@as(usize, names.sample_max), all.capped().sample);
             const first = n.widths(&.{ true, false });
             try testing.expectEqual(@as(usize, 4), first.step);
             try testing.expectEqual(@as(usize, 2), first.sample);

@@ -350,19 +350,19 @@ test "[unit] - [summary]: an ended launch shows its counts, a sample matrix, its
     defer out.deinit();
     try workz.summary.write(testing.allocator, &out.writer, launch, .{});
     try testing.expectEqualStrings(
-        \\          failed     3 of 5 rules done in 6.0 s: 2 completed, 1 reused, 1 failed, 1 blocked
-        \\          samples    trim  align  merge
-        \\          S1         +     +
-        \\          S2         +     x
-        \\          all                     .
-        \\                     + done   x failed   . not run
-        \\          failed     align  S2  exited with status 2: index is incomplete
-        \\          blocked    merge      after align/S2 failed
-        \\          slowest    align/S1 3.0 s   trim/S1 1.0 s
+        \\          failed       3 of 5 rules done in 6.0 s: 1 reused, 1 failed, 1 blocked
+        \\          samples      trim  align  merge
+        \\          S1           +     +
+        \\          S2           +     x
+        \\          all                       .
+        \\                       + done   x failed   . blocked or stopped
+        \\          failed       align  S2  exited with status 2: index is incomplete
+        \\          blocked      merge      after align/S2 failed
+        \\          slowest      align/S1 3.0 s   trim/S1 1.0 s
         \\
     , out.written()[0..std.mem.indexOf(u8, out.written(), "          records").?]);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "          next       kanit logs align/S2 ") != null);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "run again; the 3 completed rules are reused\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "          next         kanit logs align/S2 ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "run again; 3 rules are reused\n") != null);
 }
 
 test "[unit] - [summary]: a launch whose engine ended without recording its end reads as unfinished" {
@@ -373,8 +373,8 @@ test "[unit] - [summary]: a launch whose engine ended without recording its end 
     defer out.deinit();
     try workz.summary.write(testing.allocator, &out.writer, launch, .{});
     const text = out.written();
-    try testing.expect(std.mem.startsWith(u8, text, "          unfinished 3 of 5 rules done in 5.0 s: 2 completed, 1 reused, 1 failed, 1 blocked\n"));
-    try testing.expect(std.mem.indexOf(u8, text, "          next       kanit logs align/S2") != null);
+    try testing.expect(std.mem.startsWith(u8, text, "          unfinished   3 of 5 rules done in 5.0 s: 1 reused, 1 failed, 1 blocked\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "          next         kanit logs align/S2") != null);
 }
 
 test "[failure] - [run]: status --history keeps a row for a launch whose summary cannot be read" {

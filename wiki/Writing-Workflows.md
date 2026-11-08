@@ -322,11 +322,10 @@ version = "STAR --version"
 shell = "STAR --runThreadN 8 ..."
 ```
 
-- The command runs once per launch for each image and command, when the first rule that names it starts: in the rule's image, with no network and nothing of the working directory mounted, or on the host for a host rule. Version commands run one at a time beside the rules, outside the budget, so keep them short; when the rules have ended, kanit waits at most 10 s for those still queued or running, and stops the rest.
+- The command runs once per launch for each image and command, before the first rule starts: in the rule's image, with no network and nothing of the working directory mounted, or on the host for a host rule. Version commands run at most four at a time, outside the budget, so keep them short. kanit waits at most 5 s for them before it starts the rules; slower ones go on beside the rules, and when the rules have ended, kanit waits at most 10 s for those still running and stops the rest. A container's command that an earlier launch answered for the same image ID is not run again: the image's tools cannot have changed, and the launch records the same answer.
 - What it prints, the first 4 KiB of its standard output and error, goes to the launch's `versions.json`, with whether it completed; a command that failed records no version. Each attempt's `record.json` names its `version` command and its `image` ID.
-- A launch that reuses every rule runs none: the launch that ran them recorded their versions.
 - `version` is not part of the rule key: adding one reruns nothing, and the next launch that runs the rule records it.
-- The run log names each rule's tool in a column of its own: the rule's `tool`, else its image's name, else the program its `version` command runs (`STAR` for `STAR --version`). The launch's header lists each tool with the version an earlier launch recorded, a `tool` line gives what the command printed in this launch, cut to its version number, and the summary ends with every tool's version ([Running workflows](Running-Workflows.md#starting-a-launch)).
+- The run log names each rule's tool in a column of its own: the rule's `tool`, else its image's name, else the program its `version` command runs (`STAR` for `STAR --version`). The launch's header names each step's tool and version, cut to the version number the command printed, and the summary lists every tool's version ([Running workflows](Running-Workflows.md#starting-a-launch)).
 - `kanit report --methods` lists each tool with its version and image ([Reports](Reports.md#methods)).
 
 ## Order, retries and time limits

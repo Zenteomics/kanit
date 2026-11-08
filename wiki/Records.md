@@ -14,7 +14,7 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
       workflow                      the workflow file as it was read
       launch.json                   options and budget
       events.jsonl                  the event stream
-      launch.log                    the run log as text, every line kanit run printed and its started lines
+      launch.log                    the run log as text, every row kanit run printed and its START rows
       control                       commands from kanit control
       summary.json                  the result, written at the end
       report.html                   the launch as one page, drawn again while it runs
@@ -35,7 +35,7 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
 
 A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs, and `latest` is replaced to point at it when it is made.
 
-`launch.log` is the [run log](Running-Workflows.md#starting-a-launch) of the launch: the lines `kanit run` prints, with the `started` lines and the `progress` heartbeat, whole and without color. Its times are local wall-clock times. Programs read `events.jsonl` instead; the text of `launch.log` is for people and may change between versions.
+`launch.log` is the [run log](Running-Workflows.md#starting-a-launch) of the launch: the lines `kanit run` prints, with the `START` rows and the `INFO` rows of the five-minute heartbeat, whole and without color. Its times are local wall-clock times. Programs read `events.jsonl` instead; the text of `launch.log` is for people and may change between versions.
 
 ## state.json
 

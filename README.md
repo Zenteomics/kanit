@@ -79,23 +79,26 @@ cat out/report.txt                                        # lines: 1000
 kanit report --bottlenecks                                # what limited the run
 ```
 
-`run` opens with the launch's shape, then logs each rule by its step and sample as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
+`run` opens with the launch's shape and a table of its steps, tools and versions, then logs a row for each rule, by its step and sample, as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
 
 ```text
-kanit 0.7.0   example   launch 20261108T101803.377-0c88d7e1
-          plan       2 rules in 2 steps for 1 sample
-          budget     2 threads, 1.0 GiB, 2 jobs, isolated
-          steps      count 1   report 1
-          tools      wc   count
-          records    .workz/latest/   log launch.log   page report.html
-03:18:03  started    count   S1  wc   1 thread     256 MiB
-03:18:03  tool       count       wc  9.10
-03:18:03  completed  count   S1  wc    9 ms
-03:18:03  started    report           1 thread      64 MiB
-03:18:03  completed  report            2 ms
+kanit 0.7.0   example   launch 20261108T121723.759-3460c6e8
+          plan         2 rules: 2 steps for 1 sample
+          budget       2 threads, 1.0 GiB, 2 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
+
+          TOOL  VERSION  STEP    RULES
+          wc    9.10     count       1
+          -     -        report      1
+
+TIME      RULES  STATUS  TOOL  STEP    SAMPLE     TOOK             MEMORY      CPU  NOTE
+05:17:24    0/2  START   wc    count   S1                     - / 256 MiB    - / 1
+05:17:24    1/2  DONE    wc    count   S1         3 ms        - / 256 MiB    - / 1
+05:17:24    1/2  START         report                         - /  64 MiB    - / 1
+05:17:24    2/2  DONE          report             3 ms        - /  64 MiB    - / 1
 ```
 
-On a terminal the `started` lines give way to a footer of each step's progress and the running rules.
+On a terminal the `START` rows give way to a footer of each step's progress and the running rules.
 
 Run `kanit plan workflow.toml` again and both rules are reused, since nothing they depend on changed. [Getting started](https://github.com/zenteomics/kanit/wiki/Getting-Started) goes further step by step, the [report tour](examples/report-tour/README.md) shows a failed rerun keeping the last good output, and [Heyer 2019 fusion calls](examples/heyer2019-fdz/README.md) prepares a real pipeline over four samples.
 

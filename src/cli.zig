@@ -198,9 +198,9 @@ pub const commands = [_]Command{
         .about =
         \\Runs the selected rules that are not reusable, within a budget of threads,
         \\memory and jobs, each attempt in its own cgroup inside a systemd user scope.
-        \\Progress goes to standard error and the summary to standard output, as text
-        \\on a terminal and as JSON otherwise. Every attempt is recorded in .workz/ in
-        \\the working directory.
+        \\The run log goes to standard error and the summary to standard output, as
+        \\text, or as one line of JSON with --json. Every attempt is recorded in
+        \\.workz/ in the working directory.
         ,
         .options = &.{
             .{ .flag = "--max-threads N", .desc = "CPU budget in threads (default: every online CPU)" },

@@ -113,19 +113,21 @@ kanit run workflow.toml --max-threads 4 --max-memory 4G
 ```
 
 ```text
-kanit 0.7.0   star-shared   launch 20261108T101806.722-c2e416ad
-          plan       2 rules in 1 step
-          budget     4 threads, 4.0 GiB, 4 jobs, isolated
-          steps      align 2
-          tools      star   align
-          records    .workz/latest/   log launch.log   page report.html
-03:18:07  shared     genome          starting the service, 1.0 GiB
-03:18:07  shared     genome          ready after 0.3 s
-03:18:07  started    align_s1  star   2 threads    512 MiB
-03:18:07  started    align_s2  star   2 threads    512 MiB
-03:18:07  completed  align_s2  star   0.5 s   mem  265 MiB of  512 MiB   cpu  0.7 of 2
-03:18:08  completed  align_s1  star   0.5 s   mem  265 MiB of  512 MiB   cpu  0.7 of 2
-03:18:08  step       align     star  2 of 2 completed   in 0.5 s   slowest align_s1 0.5 s
+kanit 0.7.0   star-shared   launch 20261108T121727.146-6881d0a6
+          plan         2 rules: 1 step
+          budget       4 threads, 4.0 GiB, 4 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
+
+          TOOL  STEP   RULES
+          star  align      2
+
+TIME      RULES  STATUS  TOOL  STEP         TOOK               MEMORY      CPU  NOTE
+05:17:27    0/2  INFO          genome                    - /  1.0 GiB           starting the service
+05:17:27    0/2  INFO          genome      0.3 s                                ready
+05:17:27    0/2  START   star  align_s1                  - /  512 MiB    - / 2
+05:17:27    0/2  START   star  align_s2                  - /  512 MiB    - / 2
+05:17:28    1/2  DONE    star  align_s2    0.5 s   265 MiB /  512 MiB  0.7 / 2
+05:17:28    2/2  DONE    star  align_s1    0.5 s   265 MiB /  512 MiB  0.7 / 2
 ```
 
 The step's tool, `star`, comes from the image's name.

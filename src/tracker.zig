@@ -57,6 +57,9 @@ pub const RuleView = struct {
     reason: []const u8 = "",
     memory_peak: ?u64 = null,
     cpu_s: ?f64 = null,
+    /// The ended attempt's time from its start to its exit, as the run log
+    /// shows it; the event times around it also cover setup and records.
+    wall_s: ?f64 = null,
     threads: u32 = 0,
     memory_mib: u64 = 0,
     live_memory: ?u64 = null,
@@ -319,6 +322,7 @@ pub const Tracker = struct {
                 r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
+                r.wall_s = null;
                 if (v.object.get("shared")) |list| if (list == .array) {
                     var names: std.ArrayList([]const u8) = .empty;
                     for (list.array.items) |item| if (item == .string) {
@@ -340,6 +344,7 @@ pub const Tracker = struct {
                 r.finished_ns = at;
                 if (int(v, "memory_peak")) |m| r.memory_peak = @intCast(m);
                 r.cpu_s = float(v, "cpu_s");
+                r.wall_s = float(v, "wall_s");
             } else if (eql(u8, ev, "task_retry")) {
                 r.status = .retrying;
             } else if (eql(u8, ev, "task_reused")) {

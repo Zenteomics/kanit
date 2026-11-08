@@ -147,6 +147,7 @@ fn start(gpa: Allocator, path: []const u8, lines: ?usize) !u64 {
     const fd = sys.openRead(gpa, path) catch return 0;
     defer sys.close(fd);
     const size = (try sys.statFd(fd)).size;
+    if (n == 0) return size;
     var end = size;
     var seen: usize = 0;
     var buf: [65536]u8 = undefined;

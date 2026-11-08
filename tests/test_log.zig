@@ -7,7 +7,8 @@ const workz = @import("workz");
 const log = workz.log;
 const clock = workz.clock;
 
-const plain: log.Style = .{ .widths = .{ .step = 6, .sample = 3 } };
+const table = log.Table.of(10, .{ .step = 5, .sample = 2, .tool = 5 }, &.{ 2500, 512, 256 }, 2);
+const plain: log.Style = .{ .table = table };
 
 fn render(comptime f: anytype, args: anytype) ![]u8 {
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -22,95 +23,186 @@ fn expectText(expected: []const u8, comptime f: anytype, args: anytype) !void {
     try testing.expectEqualStrings(expected, got);
 }
 
-test "[unit] - [log]: a line puts time, status word, step, sample and details in fixed columns" {
-    try expectText("14:03:21  completed  trim    S1   1.0 s\n", log.line, .{ plain, "14:03:21", .completed, log.Who{ .step = "trim", .sample = "S1" }, "1.0 s" });
-    try expectText("14:03:23  failed     align   S2   exit 2 after 0.5 s\n", log.line, .{ plain, "14:03:23", .failed, log.Who{ .step = "align", .sample = "S2" }, "exit 2 after 0.5 s" });
-    try expectText("14:03:26  step       count        2 of 3 completed\n", log.line, .{ plain, "14:03:26", .step, log.Who{ .step = "count" }, "2 of 3 completed" });
-    try expectText("14:03:25  sample             S1   all 3 steps completed\n", log.line, .{ plain, "14:03:25", .sample, log.Who{ .sample = "S1" }, "all 3 steps completed" });
+test "[unit] - [log]: the column header names every column at the width its values take" {
+    try expectText("TIME      RULES  STATUS  TOOL   STEP   SAMPLE     TOOK               MEMORY      CPU  NOTE\n", log.columnHeader, .{plain});
 }
 
-test "[unit] - [log]: a line ends at its last value, and without samples there is no sample column" {
-    try expectText("14:03:21  blocked    matrix\n", log.line, .{ plain, "14:03:21", .blocked, log.Who{ .step = "matrix" }, "" });
-    const no_samples: log.Style = .{ .widths = .{ .step = 6, .sample = 0 } };
-    try expectText("14:03:21  completed  matrix  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, log.Who{ .step = "matrix" }, "0.3 s" });
-    try expectText("14:03:21  completed  a_much_longer_name  0.3 s\n", log.line, .{ no_samples, "14:03:21", .completed, log.Who{ .step = "a_much_longer_name" }, "0.3 s" });
+test "[unit] - [log]: a rule's event is one row of the table: a status tag, its tool, step and sample, and figures right-aligned under their headers" {
+    try expectText("03:18:55   0/10  START   fastp  trim   S1                      - /  2.4 GiB    - / 1\n", log.line, .{ plain, "03:18:55", 0, .started, log.Who{ .step = "trim", .sample = "S1", .tool = "fastp" }, log.Figures{ .request_mib = 2500, .threads = 1 }, "" });
+    try expectText("03:18:59   1/10  DONE    fastp  trim   S1        3.9 s   1.0 GiB /  2.4 GiB  0.9 / 1\n", log.line, .{ plain, "03:18:59", 1, .completed, log.Who{ .step = "trim", .sample = "S1", .tool = "fastp" }, log.Figures{ .took_s = 3.9, .used_mib = 1024, .request_mib = 2500, .cores = 0.9, .threads = 1 }, "" });
+    try expectText("03:19:00   3/10  DONE    awk    count  S1        12 ms         - /  256 MiB    - / 1\n", log.line, .{ plain, "03:19:00", 3, .completed, log.Who{ .step = "count", .sample = "S1", .tool = "awk" }, log.Figures{ .took_s = 0.012, .request_mib = 256, .threads = 1 }, "" });
+    try expectText("03:19:04   4/10  FAIL    star   align  S2        0.5 s   261 MiB /  512 MiB  0.8 / 2  exit 2\n", log.line, .{ plain, "03:19:04", 4, .failed, log.Who{ .step = "align", .sample = "S2", .tool = "star" }, log.Figures{ .took_s = 0.5, .used_mib = 261, .request_mib = 512, .cores = 0.8, .threads = 2 }, "exit 2" });
 }
 
-test "[unit] - [log]: color marks the time and the status word only" {
-    const colored: log.Style = .{ .color = true, .widths = .{ .step = 4, .sample = 0 } };
-    try expectText("\x1b[2m14:03:21\x1b[0m  \x1b[31;1mfailed   \x1b[0m  trim  exit 1 after 0.0 s\n", log.line, .{ colored, "14:03:21", .failed, log.Who{ .step = "trim" }, "exit 1 after 0.0 s" });
+test "[unit] - [log]: a blocked rule leaves the figures blank and keeps the note in its column" {
+    try expectText("03:19:04   5/10  BLOCK          count  S2                                             after align/S2 failed\n", log.line, .{ plain, "03:19:04", 5, .blocked, log.Who{ .step = "count", .sample = "S2" }, log.Figures{}, "after align/S2 failed" });
+    try expectText("03:19:04   6/10  STOP    star   align  S1                                             stopped by an interrupt\n", log.line, .{ plain, "03:19:04", 6, .cancelled, log.Who{ .step = "align", .sample = "S1", .tool = "star" }, log.Figures{}, "stopped by an interrupt" });
 }
 
-test "[unit] - [log]: quoted output and hints start at the detail column, and a terminal cuts quotes to its width" {
-    try expectText("                                  | STAR: genome index is incomplete\n", log.quote, .{ plain, "STAR: genome index is incomplete" });
+test "[unit] - [log]: shared inputs, control commands and warnings are rows tagged INFO and WARN" {
+    try expectText("03:19:03   0/10  INFO           genome                          - /  1.0 GiB           starting the service\n", log.line, .{ stepped, "03:19:03", 0, .shared, log.Who{ .step = "genome" }, log.Figures{ .request_mib = 1024 }, "starting the service" });
+    try expectText("03:19:04   0/10  INFO           genome            0.3 s                                ready\n", log.line, .{ stepped, "03:19:04", 0, .shared, log.Who{ .step = "genome" }, log.Figures{ .took_s = 0.3 }, "ready" });
+    try expectText("03:19:05   3/10  INFO    star   align   S2                                             control stop: stopping\n", log.line, .{ stepped, "03:19:05", 3, .control, log.Who{ .step = "align", .sample = "S2", .tool = "star" }, log.Figures{}, "control stop: stopping" });
+    try expectText("03:19:06   3/10  WARN                                                                  cannot write report.html\n", log.line, .{ stepped, "03:19:06", 3, .warning, log.Who{}, log.Figures{}, "cannot write report.html" });
+}
+
+test "[unit] - [log]: without samples, tools or figures the table drops their columns" {
+    var t = log.Table.of(4, .{ .step = 9, .sample = 0 }, &.{64}, 1);
+    try expectText("TIME      RULES  STATUS  STEP          TOOK             MEMORY      CPU  NOTE\n", log.columnHeader, .{log.Style{ .table = t }});
+    try expectText("03:37:59    1/4  FAIL    exits         4 ms        - /  64 MiB    - / 1  exit 2\n", log.line, .{ log.Style{ .table = t }, "03:37:59", 1, .failed, log.Who{ .step = "exits" }, log.Figures{ .took_s = 0.004, .request_mib = 64, .threads = 1 }, "exit 2" });
+    t.figures = false;
+    try expectText("03:37:59    1/4  FAIL    exits         4 ms  exit 2\n", log.line, .{ log.Style{ .table = t }, "03:37:59", 1, .failed, log.Who{ .step = "exits" }, log.Figures{ .took_s = 0.004, .request_mib = 64, .threads = 1 }, "exit 2" });
+}
+
+test "[unit] - [log]: a name longer than its column is cut with a mark, and the columns after it stay in place" {
+    const t = log.Table.of(4, .{ .step = 5, .sample = 6, .tool = 4 }, &.{64}, 1);
+    var nofig = t;
+    nofig.figures = false;
+    const long: log.Who = .{ .step = "dedupe_umi", .sample = "patient_07", .tool = "picard" };
+    try expectText("03:37:59    1/4  DONE    sort  trim   S1         4 ms\n", log.line, .{ log.Style{ .table = nofig }, "03:37:59", 1, .completed, log.Who{ .step = "trim", .sample = "S1", .tool = "sort" }, log.Figures{ .took_s = 0.004 }, "" });
+    try expectText("03:37:59    2/4  DONE    pic~  dedu~  patie~     4 ms\n", log.line, .{ log.Style{ .table = nofig }, "03:37:59", 2, .completed, long, log.Figures{ .took_s = 0.004 }, "" });
+    try expectText("03:37:59    2/4  DONE    pic…  dedu…  patie…     4 ms\n", log.line, .{ log.Style{ .table = nofig, .marks = &log.unicode }, "03:37:59", 2, .completed, long, log.Figures{ .took_s = 0.004 }, "" });
+}
+
+test "[unit] - [log]: ten minutes or more, a peak of 1000 MiB to 99.9 GiB and cores past the threads keep the note in its column" {
+    const t = log.Table.of(2, .{ .step = 4, .sample = 0 }, &.{2500}, 1).unbounded();
+    const s: log.Style = .{ .table = t };
+    const small = try render(log.line, .{ s, "05:00:00", 1, .completed, log.Who{ .step = "a" }, log.Figures{ .took_s = 0.004, .used_mib = 12, .request_mib = 64, .cores = 0.5, .threads = 1 }, "note" });
+    defer testing.allocator.free(small);
+    const wide = try render(log.line, .{ s, "05:12:05", 2, .completed, log.Who{ .step = "b" }, log.Figures{ .took_s = 36000 + 725, .used_mib = 1010, .request_mib = 2500, .cores = 12.3, .threads = 1 }, "note" });
+    defer testing.allocator.free(wide);
+    try testing.expect(std.mem.indexOf(u8, wide, "10h 12m") != null and std.mem.indexOf(u8, wide, "1010 MiB") != null and std.mem.indexOf(u8, wide, "12.3 / 1") != null);
+    try testing.expectEqual(std.mem.indexOf(u8, small, "note").?, std.mem.indexOf(u8, wide, "note").?);
+}
+
+test "[unit] - [log]: a terminal narrows the name columns to fit, and cuts a row that is still too long with a mark" {
+    var t = log.Table.of(2, .{ .step = 30, .sample = 20 }, &.{64}, 1);
+    t.figures = false;
+    const f = t.fitted(60);
+    try testing.expect(f.width() + 1 <= 60);
+    try testing.expect(f.step >= 8 and f.sample >= 8);
+    const s: log.Style = .{ .table = f, .cols = 60 };
+    const got = try render(log.line, .{ s, "05:00:00", 1, .failed, log.Who{ .step = "align_reads_with_star", .sample = "patient_07_tumor" }, log.Figures{}, "exited with status 2 after a long time of trying" });
+    defer testing.allocator.free(got);
+    try testing.expectEqual(@as(usize, 59), workz.names.columns(got) - 1);
+    try testing.expect(std.mem.endsWith(u8, got, "~\n"));
+}
+
+test "[unit] - [log]: wide characters take two columns and combining marks none, so names cut and pad to their column" {
+    try testing.expectEqual(@as(usize, 4), workz.names.columns("患者"));
+    try testing.expectEqual(@as(usize, 1), workz.names.columns("e\u{301}"));
+    try testing.expectEqualStrings("患", log.cut("患者A", 3));
+    var t = log.Table.of(2, .{ .step = 5, .sample = 6 }, &.{64}, 1);
+    t.figures = false;
+    const s: log.Style = .{ .table = t };
+    const plain_row = try render(log.line, .{ s, "05:00:00", 1, .completed, log.Who{ .step = "trim", .sample = "S1" }, log.Figures{}, "note" });
+    defer testing.allocator.free(plain_row);
+    const wide_row = try render(log.line, .{ s, "05:00:00", 1, .completed, log.Who{ .step = "trim", .sample = "患者番号七" }, log.Figures{}, "note" });
+    defer testing.allocator.free(wide_row);
+    try testing.expect(std.mem.indexOf(u8, wide_row, "患者~ ") != null);
+    try testing.expectEqual(workz.names.columns(plain_row), workz.names.columns(wide_row));
+}
+
+test "[unit] - [log]: a terminal under six rows keeps only the counts line in the footer" {
+    var tiny = stepped;
+    tiny.cols = 120;
+    tiny.rows = 4;
+    var lines: usize = 0;
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    lines = try log.footer(&out.writer, tiny, progress);
+    try testing.expectEqual(@as(usize, 1), lines);
+    try testing.expect(std.mem.indexOfScalar(u8, out.written(), '\n') == null);
+}
+
+test "[unit] - [log]: a terminal cuts a hint to its width, and the header's rule counts take the room their thousands need" {
     var narrow = plain;
     narrow.cols = 50;
-    try expectText("                                  | STAR: genome...\n", log.quote, .{ narrow, "STAR: genome index is incomplete" });
+    const got = try render(log.hint, .{ narrow, "kanit logs align/S2", ".workz/latest/attempts/S2__align/001/" });
+    defer testing.allocator.free(got);
+    try testing.expectEqual(@as(usize, 49), workz.names.columns(got) - 1);
+    const steps = [_]log.StepLine{ .{ .name = "call", .rules = 12000 }, .{ .name = "merge", .rules = 1 } };
+    const head = try render(log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "w", .launch = "L", .rules = 12001, .samples = 12000, .steps = &steps, .budget = "b", .isolated = true, .records = "r", .page = false } });
+    defer testing.allocator.free(head);
+    try testing.expect(std.mem.endsWith(u8, head, "          STEP    RULES\n          call   12,000\n          merge       1\n"));
+}
+
+test "[unit] - [log]: color marks the time, the status tag and the tool only" {
+    const t = log.Table.of(1, .{ .step = 4, .sample = 0 }, &.{64}, 1);
+    var nofig = t;
+    nofig.figures = false;
+    try expectText("\x1b[2m14:03:21  \x1b[0m  1/1  \x1b[31;1mFAIL  \x1b[0m  trim           exit 1\n", log.line, .{ log.Style{ .color = true, .table = nofig }, "14:03:21", 1, .failed, log.Who{ .step = "trim" }, log.Figures{}, "exit 1" });
+}
+
+test "[unit] - [log]: quoted output and hints start at the name column, and a terminal cuts quotes to its width" {
+    try expectText("                         | STAR: genome index is incomplete\n", log.quote, .{ plain, "STAR: genome index is incomplete" });
+    var narrow = plain;
+    narrow.cols = 46;
+    try expectText("                         | STAR: genome inde~\n", log.quote, .{ narrow, "STAR: genome index is incomplete" });
     var marked = plain;
     marked.marks = &log.unicode;
-    try expectText("                                  │ ok\n", log.quote, .{ marked, "ok" });
-    try expectText("                                  kanit logs align/S2   .workz/latest/attempts/S2__align/001/\n", log.hint, .{ plain, "kanit logs align/S2", ".workz/latest/attempts/S2__align/001/" });
+    try expectText("                         │ ok\n", log.quote, .{ marked, "ok" });
+    try expectText("                         kanit logs align/S2   .workz/latest/attempts/S2__align/001/\n", log.hint, .{ plain, "kanit logs align/S2", ".workz/latest/attempts/S2__align/001/" });
 }
 
-test "[unit] - [log]: the header shows the launch's shape, budget, tools with their versions and records in the status-word column" {
+test "[unit] - [log]: the header shows the launch, its budget and records, then one row per step with its tool, version and rules" {
     const steps = [_]log.StepLine{
-        .{ .name = "trim", .rules = 3 },
-        .{ .name = "align", .rules = 3 },
-        .{ .name = "count", .rules = 3 },
+        .{ .name = "trim", .rules = 2, .tool = "fastp", .version = "1.4.0" },
+        .{ .name = "index", .rules = 1, .tool = "STAR", .version = "2.7.11b" },
+        .{ .name = "align", .rules = 2, .tool = "STAR", .version = "2.7.11b" },
+        .{ .name = "sort", .rules = 2, .tool = "samtools", .version = "1.21" },
         .{ .name = "matrix", .rules = 1 },
     };
-    const tools = [_]log.ToolLine{
-        .{ .name = "fastp", .version = "1.4.0", .steps = "trim" },
-        .{ .name = "STAR", .version = "2.7.11b", .steps = "align" },
-        .{ .name = "awk", .steps = "count, matrix" },
-    };
     try expectText(
-        \\kanit 0.7.0   rnaseq-demo   launch 20261108T142320.410-8c1d
-        \\          plan       10 rules in 4 steps for 3 samples
-        \\          budget     4 threads, 2.0 GiB, 4 jobs, isolated
-        \\          steps      trim 3   align 3   count 3   matrix 1
-        \\          tools      fastp   1.4.0     trim
-        \\                     STAR    2.7.11b   align
-        \\                     awk     -         count, matrix
-        \\          records    .workz/latest/   log launch.log   page report.html
+        \\kanit 0.7.0   rnaseq   launch 20261108T101855.266-41e7e452
+        \\          plan         8 rules: 5 steps for 2 samples
+        \\          budget       8 threads, 16 GiB, 8 jobs, isolated
+        \\          records      .workz/latest/   log launch.log   page report.html
         \\
-    , log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "rnaseq-demo", .launch = "20261108T142320.410-8c1d", .rules = 10, .samples = 3, .steps = &steps, .tools = &tools, .budget = "4 threads, 2.0 GiB, 4 jobs", .isolated = true, .records = ".workz/latest/", .page = true } });
+        \\          TOOL      VERSION  STEP    RULES
+        \\          fastp     1.4.0    trim        2
+        \\          STAR      2.7.11b  index       1
+        \\          STAR      2.7.11b  align       2
+        \\          samtools  1.21     sort        2
+        \\          -         -        matrix      1
+        \\
+    , log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "rnaseq", .launch = "20261108T101855.266-41e7e452", .rules = 8, .samples = 2, .steps = &steps, .budget = "8 threads, 16 GiB, 8 jobs", .isolated = true, .records = ".workz/latest/", .page = true } });
 }
 
-test "[unit] - [log]: a tool column follows the sample, and lines without a tool keep the details in line" {
-    const with_tools: log.Style = .{ .widths = .{ .step = 5, .sample = 2, .tool = 5 } };
-    try expectText("03:11:44  completed  align  S1  STAR     0.5 s\n", log.line, .{ with_tools, "03:11:44", .completed, log.Who{ .step = "align", .sample = "S1", .tool = "STAR" }, "  0.5 s" });
-    try expectText("03:11:48  completed  count  S2           12 ms\n", log.line, .{ with_tools, "03:11:48", .completed, log.Who{ .step = "count", .sample = "S2" }, "  12 ms" });
-    try expectText("03:11:40  tool       trim       fastp  1.4.0\n", log.line, .{ with_tools, "03:11:40", .tool, log.Who{ .step = "trim", .tool = "fastp" }, "1.4.0" });
-}
-
-test "[unit] - [log]: a header of rules that are their own steps leaves the steps out and wraps a long step list" {
+test "[unit] - [log]: a header of rules that are their own steps without tools has no step table, and a long one is cut" {
     const solo = [_]log.StepLine{ .{ .name = "a", .rules = 1 }, .{ .name = "b", .rules = 1 } };
     try expectText(
         \\kanit 0.7.0   w   launch L
-        \\          plan       2 rules
-        \\          budget     1 threads, 1.0 GiB, 1 jobs, no isolation
-        \\          records    .workz/latest/   log launch.log
+        \\          plan         2 rules
+        \\          budget       1 threads, 1.0 GiB, 1 jobs, no isolation
+        \\          records      .workz/latest/   log launch.log
         \\
     , log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "w", .launch = "L", .rules = 2, .samples = 0, .steps = &solo, .budget = "1 threads, 1.0 GiB, 1 jobs", .isolated = false, .records = ".workz/latest/", .page = false } });
-    var many: [40]log.StepLine = undefined;
-    var name_buf: [40][8]u8 = undefined;
+    var many: [50]log.StepLine = undefined;
+    var name_buf: [50][8]u8 = undefined;
     for (&many, 0..) |*st, k| st.* = .{ .name = std.fmt.bufPrint(&name_buf[k], "step{d:0>2}", .{k}) catch unreachable, .rules = 20 };
-    var narrow = plain;
-    narrow.cols = 60;
-    const got = try render(log.header, .{ narrow, log.Header{ .version = "0.7.0", .workflow = "w", .launch = "L", .rules = 800, .samples = 20, .steps = &many, .budget = "b", .isolated = true, .records = "r", .page = false } });
+    const got = try render(log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "w", .launch = "L", .rules = 1000, .samples = 20, .steps = &many, .budget = "b", .isolated = true, .records = "r", .page = false } });
     defer testing.allocator.free(got);
-    try testing.expect(std.mem.indexOf(u8, got, "                     step03 20   step04 20") != null);
-    try testing.expect(std.mem.indexOf(u8, got, "more\n") != null);
-    var it = std.mem.splitScalar(u8, got, '\n');
-    while (it.next()) |l| try testing.expect(workz.names.columns(l) <= 60);
+    try testing.expect(std.mem.indexOf(u8, got, "          step39     20\n          +10 more steps; kanit plan lists them\n") != null);
+}
+
+test "[unit] - [log]: a step name of any length keeps the header and the column header whole" {
+    const long = "s" ** 900;
+    const steps = [_]log.StepLine{ .{ .name = long, .rules = 2, .tool = "t" }, .{ .name = "b", .rules = 1 } };
+    const got = try render(log.header, .{ plain, log.Header{ .version = "0.7.0", .workflow = "w", .launch = "L", .rules = 3, .samples = 0, .steps = &steps, .budget = "b", .isolated = true, .records = "r", .page = false } });
+    defer testing.allocator.free(got);
+    try testing.expect(std.mem.endsWith(u8, got, "          t     " ++ long ++ "      2\n          -     b" ++ " " ** 899 ++ "      1\n"));
+    const t = log.Table.of(3, .{ .step = 900, .sample = 0 }, &.{64}, 1);
+    const head = try render(log.columnHeader, .{log.Style{ .table = t }});
+    defer testing.allocator.free(head);
+    try testing.expectEqual(t.width() + "NOTE\n".len, head.len);
 }
 
 const progress_steps = [_]log.StepProgress{
-    .{ .name = "trim", .selected = 3, .done = 3, .failed = 0, .running = 0, .ended = true },
-    .{ .name = "align", .selected = 3, .done = 1, .failed = 1, .running = 1, .ended = false },
-    .{ .name = "count", .selected = 3, .done = 1, .failed = 0, .running = 1, .ended = false },
-    .{ .name = "matrix", .selected = 1, .done = 0, .failed = 0, .blocked = 1, .running = 0, .ended = true },
+    .{ .name = "trim", .tool = "fastp", .selected = 3, .done = 3, .failed = 0, .running = 0, .ended = true },
+    .{ .name = "align", .tool = "star", .selected = 3, .done = 1, .failed = 1, .running = 1, .ended = false },
+    .{ .name = "count", .tool = "awk", .selected = 3, .done = 1, .failed = 0, .running = 1, .ended = false },
+    .{ .name = "matrix", .tool = "sort", .selected = 1, .done = 0, .failed = 0, .blocked = 1, .running = 0, .ended = true },
 };
 
 const progress: log.Progress = .{
@@ -122,62 +214,66 @@ const progress: log.Progress = .{
     .cancelled = 0,
     .elapsed_s = 221,
     .steps = &progress_steps,
-    .steps_ok = 1,
     .grouped = true,
     .running_list = &.{ .{ .word = "align/S1", .seconds = 2 }, .{ .word = "count/S3", .seconds = 0.3 } },
 };
 
-test "[unit] - [log]: the footer shows the bar and counts, each step's progress and the running rules" {
-    var wide = plain;
+const stepped: log.Style = .{ .table = log.Table.of(10, .{ .step = 6, .sample = 2, .tool = 5 }, &.{ 2500, 512, 256 }, 2) };
+
+const step_rows =
+    "                         fastp  trim    ################  3/3  +\n" ++
+    "                         star   align   #####-----------  1/3  x 1 failed, 1 running\n" ++
+    "                         awk    count   #####-----------  1/3  1 running\n" ++
+    "                         sort   matrix  ----------------  0/1  1 blocked\n";
+
+test "[unit] - [log]: the footer is a table of the steps under the rows' tool and step columns, then the counts and the running rules" {
+    var wide = stepped;
     wide.cols = 120;
-    try expectText("##############----------  6 of 10 rules   2 running   1 failed   2 blocked   3m 41s\n" ++
-        "trim + 3/3   align x 1/3, 1 running   count 1/3, 1 running   matrix 0/1, 1 blocked\n" ++
-        "running   align/S1 2.0 s   count/S3 0.3 s", log.footer, .{ wide, progress });
+    try expectText("\n" ++ step_rows ++
+        "                         6 of 10 rules   2 running   1 failed   2 blocked   3m 41s   align/S1 2.0 s   +1", log.footer, .{ wide, progress });
 }
 
-test "[unit] - [log]: a narrow footer folds the steps that ended into a count and counts the rest it cannot show" {
-    var narrow = plain;
+test "[unit] - [log]: a short terminal folds the steps that are done into one row, and a narrow one never wraps a line" {
+    var short = stepped;
+    short.cols = 120;
+    short.rows = 8;
+    try expectText("\n" ++
+        "                         star   align   #####-----------  1/3  x 1 failed, 1 running\n" ++
+        "                         +3 more steps, 1 done +\n" ++
+        "                         6 of 10 rules   2 running   1 failed   2 blocked   3m 41s   align/S1 2.0 s   +1", log.footer, .{ short, progress });
+    var narrow = stepped;
     narrow.cols = 50;
     const got = try render(log.footer, .{ narrow, progress });
     defer testing.allocator.free(got);
     var it = std.mem.splitScalar(u8, got, '\n');
-    _ = it.next();
-    try testing.expectEqualStrings("1 step +   align x 1/3, 1 running   +2", it.next().?);
+    while (it.next()) |l| try testing.expect(workz.names.columns(l) <= 49);
 }
 
-test "[unit] - [log]: the heartbeat carries the footer's progress as log lines" {
-    try expectText("14:10:00  progress   6 of 10 rules   2 running   1 failed   2 blocked   3m 41s\n" ++
-        "                     trim + 3/3   align x 1/3, 1 running   count 1/3, 1 running   matrix 0/1, 1 blocked\n" ++
-        "                     running   align/S1 2.0 s   count/S3 0.3 s\n", log.heartbeat, .{ plain, "14:10:00", progress });
+test "[unit] - [log]: the heartbeat is an INFO row with the counts, then the step table and the running rules" {
+    var nofig = stepped;
+    nofig.table.figures = false;
+    try expectText("14:10:00   9/10  INFO                                    6 of 10 rules   2 running   1 failed   2 blocked   3m 41s\n" ++ step_rows ++
+        "                         running   align/S1 2.0 s   count/S3 0.3 s\n", log.heartbeat, .{ nofig, "14:10:00", 9, progress });
 }
 
 test "[unit] - [log]: a failure's details name the reason in few words and say what to quote" {
     const cases = [_]struct { end: workz.schedule.End, text: []const u8, block: log.Block }{
-        .{ .end = .{ .exit_code = 2 }, .text = "exit 2 after 0.5 s", .block = .stderr },
-        .{ .end = .{ .exit_code = 127 }, .text = "exit 127: command not found after 0.5 s", .block = .stderr },
-        .{ .end = .{ .exit_code = 125, .container = true }, .text = "exit 125: the container engine failed, or the command exited 125 after 0.5 s", .block = .stderr },
-        .{ .end = .{ .oom_kills = 1, .memory_mib = 64, .exit_code = 137 }, .text = "out of memory at its 64 MiB", .block = .memory },
+        .{ .end = .{ .exit_code = 2 }, .text = "exit 2", .block = .stderr },
+        .{ .end = .{ .exit_code = 127 }, .text = "exit 127: command not found", .block = .stderr },
+        .{ .end = .{ .exit_code = 125, .container = true }, .text = "exit 125: the container engine failed, or the command exited 125", .block = .stderr },
+        .{ .end = .{ .oom_kills = 1, .memory_mib = 64, .exit_code = 137 }, .text = "out of memory", .block = .memory },
         .{ .end = .{ .timed_out = true, .timeout_s = 7200, .signal = 15 }, .text = "timed out at 2h 00m", .block = .stderr },
-        .{ .end = .{ .signal = 11 }, .text = "killed by SIGSEGV after 0.5 s", .block = .stderr },
-        .{ .end = .{ .signal = 40 }, .text = "killed by signal 40 after 0.5 s", .block = .stderr },
+        .{ .end = .{ .signal = 11 }, .text = "killed by SIGSEGV", .block = .stderr },
+        .{ .end = .{ .signal = 40 }, .text = "killed by signal 40", .block = .stderr },
         .{ .end = .{ .lost_service = "its shared service genome stopped" }, .text = "its shared service genome stopped", .block = .none },
         .{ .end = .{ .exit_code = 0 }, .text = "", .block = .none },
     };
     for (cases) |c| {
         var out: std.Io.Writer.Allocating = .init(testing.allocator);
         defer out.deinit();
-        try testing.expectEqual(c.block, try log.ending(&out.writer, c.end, 0.5));
+        try testing.expectEqual(c.block, try log.ending(&out.writer, c.end));
         try testing.expectEqualStrings(c.text, out.written());
     }
-}
-
-test "[unit] - [log]: resource use fills fixed columns, so time, memory and CPU line up, and leaves out what was not measured" {
-    try expectText(" 1.0 s   mem   12 MiB of   32 MiB   cpu  0.9 of 1", log.usage, .{log.Use{ .wall_s = 1, .memory_mib = 12, .request_mib = 32, .cpu_s = 0.9, .threads = 1 }});
-    try expectText("2m 05s   mem  1.0 GiB of  2.4 GiB   cpu 12.5 of 16", log.usage, .{log.Use{ .wall_s = 125, .memory_mib = 1024, .request_mib = 2500, .cpu_s = 1562.5, .threads = 16 }});
-    try expectText(" 20 ms", log.usage, .{log.Use{ .wall_s = 0.02, .request_mib = 32, .cpu_s = 0.01, .threads = 1 }});
-    try expectText("2m 05s                              cpu  3.5 of 4   after 2 attempts", log.usage, .{log.Use{ .wall_s = 125, .request_mib = 32, .cpu_s = 437.5, .threads = 4, .attempts = 2 }});
-    try expectText(" 1 thread      32 MiB", log.request, .{ 1, 32 });
-    try expectText("16 threads    2.4 GiB", log.request, .{ 16, 2500 });
 }
 
 test "[unit] - [log]: a version is the number a tool prints, or its line up to that number" {

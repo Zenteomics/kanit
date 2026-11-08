@@ -25,7 +25,7 @@ const int = fields.int;
 const get = fields.get;
 
 const label_column = 10;
-const word_width = logging.word_width;
+const word_width = logging.label_width;
 const failures_max = 5;
 const blocked_max = 8;
 const steps_max = 20;
@@ -119,6 +119,21 @@ fn label(w: *Writer, s: logging.Style, name: []const u8) !void {
     try w.splatByteAll(' ', word_width + 2 -| names.columns(name));
 }
 
+/// Writes a name in a column of `width`, cut with the `more` mark when it
+/// is longer.
+fn nameCell(w: *Writer, s: logging.Style, text: []const u8, width: usize) !void {
+    if (names.columns(text) <= width or width == 0) return pad(w, text, width);
+    const head = logging.cut(text, width - 1);
+    try w.print("{s}{s}", .{ head, s.marks.more });
+    try w.splatByteAll(' ', width - 1 - names.columns(head));
+}
+
+/// The width of a column of names: the longest, held to `most` on a
+/// terminal, where longer names are cut.
+fn nameWidth(s: logging.Style, longest: usize, most: usize) usize {
+    return if (s.cols > 0) @min(longest, most) else longest;
+}
+
 fn pad(w: *Writer, text: []const u8, width: usize) !void {
     try w.writeAll(text);
     try w.splatByteAll(' ', width -| names.columns(text));
@@ -162,7 +177,7 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
     const rows = try a.alloc(Row, tr.rules.items.len);
     for (tr.rules.items, rows) |r, *row| {
         const idx: ?usize = if (snap) |sn| sn.names.find(r.name) else null;
-        const wall: f64 = if (r.started_ns > 0 and r.finished_ns > r.started_ns) @as(f64, @floatFromInt(r.finished_ns - r.started_ns)) / 1e9 else 0;
+        const wall: f64 = r.wall_s orelse if (r.started_ns > 0 and r.finished_ns > r.started_ns) @as(f64, @floatFromInt(r.finished_ns - r.started_ns)) / 1e9 else 0;
         row.* = .{
             .step = if (idx) |k| snap.?.names.step[k] else r.name,
             .sample = if (idx) |k| snap.?.names.sample[k] else "",
@@ -175,9 +190,11 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
     }
     var widths: names.Widths = .{ .step = 0, .sample = 0 };
     for (rows) |r| if (r.status == .failed or r.status == .blocked) {
-        widths.step = @max(widths.step, @min(names.columns(r.step), names.step_max));
-        widths.sample = @max(widths.sample, @min(names.columns(r.sample), names.sample_max));
+        widths.step = @max(widths.step, names.columns(r.step));
+        widths.sample = @max(widths.sample, names.columns(r.sample));
     };
+    widths.step = nameWidth(style, widths.step, names.step_max);
+    widths.sample = nameWidth(style, widths.sample, names.sample_max);
 
     var count: [@typeInfo(Status).@"enum".fields.len]usize = @splat(0);
     for (rows) |r| count[@intFromEnum(r.status)] += 1;
@@ -210,12 +227,11 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
         try units.duration(w, elapsed);
         var first = true;
         const parts = [_]struct { n: usize, what: []const u8, code: []const u8 }{
-            .{ .n = c(&count, .completed), .what = "completed", .code = "" },
             .{ .n = c(&count, .reused), .what = "reused", .code = "" },
             .{ .n = running, .what = "running", .code = "\x1b[36m" },
             .{ .n = c(&count, .failed), .what = "failed", .code = "\x1b[31;1m" },
             .{ .n = c(&count, .blocked), .what = "blocked", .code = "" },
-            .{ .n = c(&count, .cancelled), .what = "cancelled", .code = "" },
+            .{ .n = c(&count, .cancelled), .what = "stopped", .code = "" },
             .{ .n = waiting, .what = if (live) "waiting" else "not started", .code = "" },
         };
         for (parts) |p| if (p.n > 0) {
@@ -245,10 +261,10 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
         if (first_failed == null) first_failed = r;
         if (shown == failures_max) continue;
         try label(w, style, if (shown == 0) "failed" else "");
-        try pad(w, r.step, widths.step);
+        try nameCell(w, style, r.step, widths.step);
         try w.writeAll("  ");
         if (widths.sample > 0) {
-            try pad(w, r.sample, widths.sample);
+            try nameCell(w, style, r.sample, widths.sample);
             try w.writeAll("  ");
         }
         const used = label_column + word_width + 2 + widths.step + 2 + if (widths.sample > 0) widths.sample + 2 else 0;
@@ -268,10 +284,10 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
         if (r.status != .blocked) continue;
         if (blocked_shown == blocked_max) break;
         try label(w, style, if (blocked_shown == 0) "blocked" else "");
-        try pad(w, r.step, widths.step);
+        try nameCell(w, style, r.step, widths.step);
         try w.writeAll("  ");
         if (widths.sample > 0) {
-            try pad(w, r.sample, widths.sample);
+            try nameCell(w, style, r.sample, widths.sample);
             try w.writeAll("  ");
         }
         if (cause(&tr, snap, r)) |root| try w.print("after {s} {s}\n", .{ root.word, root.what }) else try w.writeAll("after a rule it needs did not complete\n");
@@ -295,13 +311,15 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
             top[k] = r;
         }
         if (top[0] != null and c(&count, .completed) > 1) {
-            try label(w, style, "slowest");
-            for (top, 0..) |t, k| if (t) |r| {
-                if (k > 0) try w.writeAll("   ");
-                try w.print("{s} ", .{r.word});
-                try units.duration(w, r.wall_s);
+            var flow: Flow = .{ .w = w, .style = style, .name = "slowest" };
+            for (top) |t| if (t) |r| {
+                var buf: [256]u8 = undefined;
+                var bw: Writer = .fixed(&buf);
+                bw.print("{s} ", .{r.word}) catch {};
+                units.duration(&bw, r.wall_s) catch {};
+                try flow.item(bw.buffered());
             };
-            try w.writeAll("\n");
+            try flow.end();
         }
     }
 
@@ -346,7 +364,7 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
     } else {
         if (first_failed) |r| try hints.append(a, .{ try std.fmt.allocPrint(a, "kanit logs {s}", .{r.word}), "the output of the failed attempt" });
         const again = try std.fmt.allocPrint(a, "kanit run{s}{s}", .{ if (wf_arg != null) " " else "", wf_arg orelse "" });
-        try hints.append(a, .{ again, if (done == 0) "run again" else if (done == 1) "run again; the completed rule is reused" else try std.fmt.allocPrint(a, "run again; the {d} completed rules are reused", .{done}) });
+        try hints.append(a, .{ again, if (done == 0) "run again" else if (done == 1) "run again; 1 rule is reused" else try std.fmt.allocPrint(a, "run again; {d} rules are reused", .{done}) });
     }
     var cmd_w: usize = 0;
     for (hints.items) |h| cmd_w = @max(cmd_w, h[0].len);
@@ -375,7 +393,7 @@ fn cause(tr: *const tracker.Tracker, snap: ?Snapshot, r: Row) ?Root {
             const ti = tr.index.get(sn.names.rule[p]) orelse continue;
             switch (tr.rules.items[ti].status) {
                 .failed => return .{ .word = sn.names.word[p], .what = "failed" },
-                .cancelled => return .{ .word = sn.names.word[p], .what = "was cancelled" },
+                .cancelled => return .{ .word = sn.names.word[p], .what = "was stopped" },
                 .pending, .waiting => return .{ .word = sn.names.word[p], .what = "did not start" },
                 .blocked => if (next == null) {
                     next = p;
@@ -398,6 +416,8 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
     @memset(step_failed, 0);
     const step_blocked = try a.alloc(u32, nsteps);
     @memset(step_blocked, 0);
+    const step_stopped = try a.alloc(u32, nsteps);
+    @memset(step_stopped, 0);
     const step_running = try a.alloc(u32, nsteps);
     @memset(step_running, 0);
     const step_slowest = try a.alloc(?Row, nsteps);
@@ -414,7 +434,8 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
         switch (r.status) {
             .completed, .reused => step_done[st] += 1,
             .failed => step_failed[st] += 1,
-            .blocked, .cancelled => step_blocked[st] += 1,
+            .blocked => step_blocked[st] += 1,
+            .cancelled => step_stopped[st] += 1,
             .running, .cancelling, .retrying => step_running[st] += 1,
             else => {},
         }
@@ -486,7 +507,7 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
             .{ .cell = .done, .text = "done" },
             .{ .cell = .running, .text = "running" },
             .{ .cell = .failed, .text = "failed" },
-            .{ .cell = .not_run, .text = "not run" },
+            .{ .cell = .not_run, .text = "blocked or stopped" },
         };
         for (legend) |l| if (present[@intFromEnum(l.cell)]) {
             if (!first) try w.writeAll("   ");
@@ -513,9 +534,11 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
     var step_w: usize = 0;
     var tool_w: usize = 0;
     for (steps.items) |st| {
-        step_w = @max(step_w, @min(names.columns(n.steps[st].name), names.step_max));
+        step_w = @max(step_w, names.columns(n.steps[st].name));
         tool_w = @max(tool_w, names.columns(n.steps[st].tool orelse ""));
     }
+    step_w = nameWidth(style, step_w, names.step_max);
+    tool_w = nameWidth(style, tool_w, names.tool_max);
     for (steps.items, 0..) |st, k| {
         if (k == steps_max) {
             try label(w, style, "");
@@ -523,12 +546,12 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
             break;
         }
         try label(w, style, if (k == 0) "steps" else "");
-        try pad(w, n.steps[st].name, step_w);
-        try w.writeAll("  ");
         if (tool_w > 0) {
-            try pad(w, n.steps[st].tool orelse "", tool_w);
+            try nameCell(w, style, n.steps[st].tool orelse "", tool_w);
             try w.writeAll("  ");
         }
+        try nameCell(w, style, n.steps[st].name, step_w);
+        try w.writeAll("  ");
         var buf: [128]u8 = undefined;
         var bw: Writer = .fixed(&buf);
         if (step_failed[st] > 0) {
@@ -537,12 +560,19 @@ fn shape(a: Allocator, w: *Writer, style: logging.Style, n: names.Names, rows: [
         try bw.print("{d} of {d} done", .{ step_done[st], step_rules[st] });
         if (step_running[st] > 0) try bw.print(", {d} running", .{step_running[st]});
         if (step_failed[st] > 0) try bw.print(", {d} failed", .{step_failed[st]});
-        if (step_blocked[st] > 0) try bw.print(", {d} not run", .{step_blocked[st]});
+        if (step_blocked[st] > 0) try bw.print(", {d} blocked", .{step_blocked[st]});
+        if (step_stopped[st] > 0) try bw.print(", {d} stopped", .{step_stopped[st]});
         const slowest: ?Row = if (!live and step_ran[st] > 1) step_slowest[st] else null;
+        const at = label_column + word_width + 2 + (if (tool_w > 0) tool_w + 2 else 0) + step_w + 2 + 32;
         if (slowest) |r| {
-            try pad(w, bw.buffered(), 32);
-            try w.print("slowest {s} ", .{if (r.sample.len > 0) r.sample else r.word});
-            try units.duration(w, r.wall_s);
+            var sb: [256]u8 = undefined;
+            var sw: Writer = .fixed(&sb);
+            sw.print("slowest {s} ", .{if (r.sample.len > 0) r.sample else r.word}) catch {};
+            units.duration(&sw, r.wall_s) catch {};
+            if (style.cols == 0 or at + names.columns(sw.buffered()) < style.cols) {
+                try pad(w, bw.buffered(), 32);
+                try w.writeAll(sw.buffered());
+            } else try w.writeAll(bw.buffered());
         } else try w.writeAll(bw.buffered());
         try w.writeAll("\n");
     }
@@ -554,8 +584,7 @@ fn toolsLine(gpa: Allocator, a: Allocator, w: *Writer, style: logging.Style, lau
     const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch return;
     const list = get(v, "commands") orelse return;
     if (list != .array) return;
-    const width = if (style.cols > 0) style.cols - 1 else 120;
-    var at: usize = 0;
+    var flow: Flow = .{ .w = w, .style = style, .name = "tools" };
     for (tools) |t| {
         const version = for (list.array.items) |e| {
             if (!std.mem.eql(u8, str(e, "command") orelse "", t.command)) continue;
@@ -567,21 +596,45 @@ fn toolsLine(gpa: Allocator, a: Allocator, w: *Writer, style: logging.Style, lau
             break logging.versionText(t.tool, std.mem.trim(u8, it.next() orelse "", " \t"));
         } else "";
         if (version.len == 0) continue;
-        const item = try std.fmt.allocPrint(a, "{s} {s}", .{ t.tool, version });
-        const need = names.columns(item) + if (at > 0) @as(usize, 3) else 0;
-        if (at == 0) {
-            try label(w, style, "tools");
-            at = label_column + word_width + 2;
-        } else if (at + need > width) {
-            try w.writeAll("\n");
-            try label(w, style, "");
-            at = label_column + word_width + 2;
-        } else try w.writeAll("   ");
-        try w.writeAll(item);
-        at += need;
+        try flow.item(try std.fmt.allocPrint(a, "{s} {s}", .{ t.tool, version }));
     }
-    if (at > 0) try w.writeAll("\n");
+    try flow.end();
 }
+
+/// Items after a label, three spaces apart, going on under the label when
+/// the next item would pass the width.
+const Flow = struct {
+    w: *Writer,
+    style: logging.Style,
+    name: []const u8,
+    at: usize = 0,
+
+    fn item(f: *Flow, text: []const u8) !void {
+        const width = if (f.style.cols > 0) f.style.cols - 1 else 120;
+        const start = label_column + word_width + 2;
+        const room = width -| start;
+        const shown = if (names.columns(text) > room and room > 1) logging.cut(text, room - 1) else text;
+        const more = shown.len < text.len;
+        const n = names.columns(shown) + @intFromBool(more);
+        if (f.at == 0) {
+            try label(f.w, f.style, f.name);
+            f.at = start;
+        } else if (f.at + 3 + n > width) {
+            try f.w.writeAll("\n");
+            try label(f.w, f.style, "");
+            f.at = start;
+        } else {
+            try f.w.writeAll("   ");
+            f.at += 3;
+        }
+        try f.w.print("{s}{s}", .{ shown, if (more) f.style.marks.more else "" });
+        f.at += n;
+    }
+
+    fn end(f: *Flow) !void {
+        if (f.at > 0) try f.w.writeAll("\n");
+    }
+};
 
 fn mark(w: *Writer, style: logging.Style, cell: Cell) !void {
     const m = style.marks;

@@ -126,29 +126,33 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.7.0   gc-content   launch 20261108T101803.929-e4108134
-          plan       4 rules in 2 steps
-          budget     2 threads, 1.0 GiB, 2 jobs, isolated
-          steps      gc 3   summary 1
-          records    .workz/latest/   log launch.log   page report.html
-03:18:04  started    gc_s1     1 thread      64 MiB
-03:18:04  started    gc_s2     1 thread      64 MiB
-03:18:04  completed  gc_s1      3 ms
-03:18:04  completed  gc_s2      3 ms
-03:18:04  started    gc_s3     1 thread      64 MiB
-03:18:04  completed  gc_s3      3 ms
-03:18:04  step       gc       3 of 3 completed   in 10 ms   slowest gc_s1 3 ms
-03:18:04  started    summary   1 thread      64 MiB
-03:18:04  completed  summary    4 ms
-          completed  4 of 4 rules done in 0.5 s: 4 completed
-          steps      gc       ✓ 3 of 3 done                   slowest gc_s1 4 ms
-                     summary  ✓ 1 of 1 done
-          slowest    summary 5 ms   gc_s1 4 ms   gc_s2 4 ms
-          records    .workz/latest/   log launch.log   page report.html
-          next       kanit report --bottlenecks   what limited this launch
+kanit 0.7.0   gc-content   launch 20261108T121724.311-8efeb4eb
+          plan         4 rules: 2 steps
+          budget       2 threads, 1.0 GiB, 2 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
+
+          STEP     RULES
+          gc           3
+          summary      1
+
+TIME      RULES  STATUS  STEP        TOOK             MEMORY      CPU  NOTE
+05:17:24    0/4  START   gc_s1                   - /  64 MiB    - / 1
+05:17:24    0/4  START   gc_s2                   - /  64 MiB    - / 1
+05:17:24    1/4  DONE    gc_s1       4 ms        - /  64 MiB    - / 1
+05:17:24    1/4  START   gc_s3                   - /  64 MiB    - / 1
+05:17:24    2/4  DONE    gc_s2       5 ms        - /  64 MiB    - / 1
+05:17:24    3/4  DONE    gc_s3       3 ms        - /  64 MiB    - / 1
+05:17:24    3/4  START   summary                 - /  64 MiB    - / 1
+05:17:24    4/4  DONE    summary     5 ms        - /  64 MiB    - / 1
+          completed    4 of 4 rules done in 0.5 s
+          steps        gc       ✓ 3 of 3 done                   slowest gc_s2 5 ms
+                       summary  ✓ 1 of 1 done
+          slowest      summary 5 ms   gc_s2 5 ms   gc_s1 4 ms
+          records      .workz/latest/   log launch.log   page report.html
+          next         kanit report --bottlenecks   what limited this launch
 ```
 
-The launch opens with its shape: four rules, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the summary to standard output: what was done, each step's progress, the slowest rules, where the records are and what to look at next. `--json` prints the summary as JSON instead, for a script. On a terminal the `started` lines give way to a footer of the step's progress and the running rules.
+The launch opens with its shape: four rules in two steps, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). Under the column header, each row has the time, how many of the four rules are done, what happened, the rule, how long it took, and its memory and CPU against its request; `-` is a figure the rule ended too soon to measure. The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the summary to standard output: what was done, each step's progress, the slowest rules, where the records are and what to look at next. `--json` prints the summary as JSON instead, for a script. On a terminal the `START` rows give way to a footer of the step's progress and the running rules.
 
 ```sh
 cat summary.tsv
@@ -223,16 +227,20 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.7.0   gc-content   launch 20261108T101805.029-d182efda
-          plan       4 rules in 2 steps
-          budget     2 threads, 1.0 GiB, 2 jobs, isolated
-          steps      gc 3   summary 1
-          records    .workz/latest/   log launch.log   page report.html
-03:18:05  started    gc_s2     1 thread      64 MiB
-03:18:05  completed  gc_s2      3 ms
-03:18:05  step       gc       3 of 3 completed, 2 of them reused   in 4 ms
-03:18:05  started    summary   1 thread      64 MiB
-03:18:05  completed  summary    4 ms
+kanit 0.7.0   gc-content   launch 20261108T121725.412-bce6cb75
+          plan         4 rules: 2 steps
+          budget       2 threads, 1.0 GiB, 2 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
+
+          STEP     RULES
+          gc           3
+          summary      1
+
+TIME      RULES  STATUS  STEP        TOOK             MEMORY      CPU  NOTE
+05:17:25    2/4  START   gc_s2                   - /  64 MiB    - / 1
+05:17:25    3/4  DONE    gc_s2       4 ms        - /  64 MiB    - / 1
+05:17:25    3/4  START   summary                 - /  64 MiB    - / 1
+05:17:25    4/4  DONE    summary     6 ms        - /  64 MiB    - / 1
 ```
 
 ## Look at what happened
@@ -245,9 +253,9 @@ kanit status --history
 
 ```text
 LAUNCH                         STATUS         ELAPSED  COMPLETED  REUSED  FAILED  BLOCKED  CANCELLED
-20261108T101805.029-d182efda   completed        0.5 s          2       2       0        0          0
-20261108T101804.486-3e95d233   completed        0.5 s          0       4       0        0          0
-20261108T101803.929-e4108134   completed        0.5 s          4       0       0        0          0
+20261108T121725.412-bce6cb75   completed        0.5 s          2       2       0        0          0
+20261108T121724.876-2f5ea3db   completed        0.5 s          0       4       0        0          0
+20261108T121724.311-8efeb4eb   completed        0.5 s          4       0       0        0          0
 ```
 
 `kanit report` prints one row per attempt of the newest launch, with wall and CPU time, memory request and peak, and how long the rule waited; `kanit report --bottlenecks` says what limited the launch. On a workflow that runs for minutes, `kanit watch` in a second terminal shows the launch live. [Watching a launch](Watching-a-Launch.md) and [Reports](Reports.md) show both on a larger workflow.

@@ -11,54 +11,87 @@ kanit run workflow.toml --max-threads 16 --max-memory 60G
 - `--keep-going` keeps running independent rules after a failure ([Failures](#failures)).
 - `--retry N` and `--timeout DURATION` apply to rules that set no `retries` or `timeout` of their own.
 - `--threads STEP=N` gives a step's rules another thread count for this launch only ([Trying another thread count](Resources-and-Scheduling.md#trying-another-thread-count)).
-- `--quiet` drops the progress lines; failures, warnings and control commands still print. `--verbose` keeps a line for every rule that starts.
+- `--quiet` leaves out the header and the rows of rules that run well; failures, warnings and control commands still print, under the column header. `--verbose` keeps the `START` row of every rule on a terminal too.
 
 Before a long launch, `kanit plan --budget` checks that every rule fits the budget ([Check before running](Writing-Workflows.md#check-before-running)).
 
-`run` writes one line for every event of the launch, the same on a terminal, on standard error off a terminal and in the launch's `launch.log`:
+`run` writes a row for every event of the launch, on standard error and in the launch's `launch.log`; a terminal leaves out the `START` rows and keeps a footer of the steps below the rows. Off a terminal:
 
 ```text
-kanit 0.7.0   rnaseq-mini   launch 20261108T101855.266-41e7e452
-          plan       7 rules in 4 steps for 2 samples
-          budget     4 threads, 4.0 GiB, 4 jobs, isolated
-          steps      trim 2   align 2   count 2   matrix 1
-          tools      fastp   1.4.0     trim
-                     star    2.7.11b   align
-                     awk     5.3.2     count
-                     sort    9.10      matrix
-          records    .workz/latest/   log launch.log   page report.html
-03:18:55  started    trim    S1  fastp   1 thread     2.4 GiB
-03:18:56  tool       trim        fastp  1.4.0
-03:18:59  completed  trim    S1  fastp   3.9 s   mem  1.0 GiB of  2.4 GiB   cpu  0.9 of 1
-03:18:59  started    trim    S2  fastp   1 thread     2.4 GiB   waited 3.9 s
-03:18:59  started    align   S1  star    2 threads    512 MiB
-03:19:00  tool       align       star   2.7.11b
-03:19:00  completed  align   S1  star    0.5 s   mem  277 MiB of  512 MiB   cpu  0.7 of 2
-03:19:00  started    count   S1  awk     1 thread     256 MiB
-03:19:00  tool       count       awk    5.3.2
-03:19:00  completed  count   S1  awk     12 ms
-03:19:00  sample             S1         all 3 steps completed   in 4.4 s
-03:19:03  completed  trim    S2  fastp   4.0 s   mem  1.0 GiB of  2.4 GiB   cpu  0.9 of 1
-03:19:03  step       trim        fastp  2 of 2 completed   in 7.9 s   slowest S2 4.0 s
-03:19:03  started    align   S2  star    2 threads    512 MiB
-03:19:04  completed  align   S2  star    0.5 s   mem  261 MiB of  512 MiB   cpu  0.8 of 2
-03:19:04  step       align       star   2 of 2 completed   in 4.5 s   slowest S1 0.5 s
-03:19:04  started    count   S2  awk     1 thread     256 MiB
-03:19:04  completed  count   S2  awk     13 ms
-03:19:04  step       count       awk    2 of 2 completed   in 4.0 s   slowest S2 13 ms
-03:19:04  sample             S2         all 3 steps completed   in 4.5 s
-03:19:04  started    matrix      sort    1 thread     256 MiB
-03:19:04  completed  matrix      sort     3 ms
-03:19:04  tool       matrix      sort   9.10
+kanit 0.7.0   rnaseq-mini   launch 20261108T121740.229-ab51811a
+          plan         7 rules: 4 steps for 2 samples
+          budget       4 threads, 4.0 GiB, 4 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
+
+          TOOL   VERSION  STEP    RULES
+          fastp  1.4.0    trim        2
+          star   2.7.11b  align       2
+          awk    5.3.2    count       2
+          sort   9.10     matrix      1
+
+TIME      RULES  STATUS  TOOL   STEP    SAMPLE     TOOK               MEMORY      CPU  NOTE
+05:17:40    0/7  START   fastp  trim    S2                      - /  2.4 GiB    - / 1
+05:17:44    1/7  DONE    fastp  trim    S2        3.7 s   1.0 GiB /  2.4 GiB  1.0 / 1
+05:17:44    1/7  START   fastp  trim    S1                      - /  2.4 GiB    - / 1  waited 3.8 s
+05:17:44    1/7  START   star   align   S2                      - /  512 MiB    - / 2
+05:17:45    2/7  DONE    star   align   S2        0.5 s   261 MiB /  512 MiB  0.7 / 2
+05:17:45    2/7  START   awk    count   S2                      - /  256 MiB    - / 1
+05:17:45    3/7  DONE    awk    count   S2        12 ms         - /  256 MiB    - / 1
+05:17:48    4/7  DONE    fastp  trim    S1        3.9 s   1.0 GiB /  2.4 GiB  0.9 / 1
+05:17:48    4/7  START   star   align   S1                      - /  512 MiB    - / 2
+05:17:49    5/7  DONE    star   align   S1        0.5 s   261 MiB /  512 MiB  0.7 / 2
+05:17:49    5/7  START   awk    count   S1                      - /  256 MiB    - / 1
+05:17:49    6/7  DONE    awk    count   S1        13 ms         - /  256 MiB    - / 1
+05:17:49    6/7  START   sort   matrix                          - /  256 MiB    - / 1
+05:17:49    7/7  DONE    sort   matrix             2 ms         - /  256 MiB    - / 1
 ```
 
-- The launch opens with its shape: how many rules, steps and samples it selected, the budget, each step with its rule count, each tool with the version an earlier launch recorded (`-` until one has) and the steps that use it, and where its records are.
-- Every line has the local time, a status word, the rule's step and sample, its tool, and what happened, each in its own column; the times, memory and CPU of `started` and `completed` lines sit in fixed columns too. A rule that has a sample is named by its step and sample, and `STEP/SAMPLE` (such as `align/S2`) names it in commands; a rule without one is named by its rule name.
-- The status words are `started`, `completed`, `retrying`, `failed`, `blocked` and `cancelled` for rules, `step` and `sample` when every selected rule of a step or sample has ended, `shared` for shared inputs and services, `tool` for what a tool's [version command](Writing-Workflows.md#tool-versions) printed in this launch, `control` for commands and interrupts, `warning`, and `progress`.
-- A completed rule shows its time, its memory against its request when it was measured, and the cores it used against its threads. A failure names its reason in a few words (`exit 2`, `timed out at 2h 00m`, `out of memory at its 64 MiB`, `killed by SIGSEGV`), quotes the last lines of its standard error or kept diagnostics, and names the command that shows its whole output. Rules that a failure blocks are reported once for that failure.
-- On a terminal, color marks the status words, the `started` lines are left out, and a footer below the lines shows a bar of the rules done, the counts, the elapsed time, every step's progress and the running rules. `-v` keeps the `started` lines. `--no-color` or `NO_COLOR=1` turns colors off; outside a UTF-8 locale the marks are ASCII.
-- Off a terminal, the `started` lines are kept, and a `progress` line every five minutes carries the footer's counts.
-- `launch.log` in the launch directory keeps every line, `started` included, whole and without color, so `tail -f .workz/latest/launch.log` follows a launch from anywhere. `.workz/latest` always points to the newest launch.
+On a terminal, the `START` rows are left out and a footer of the steps stays below the rows; the same launch 6 s in:
+
+```text
+TIME      RULES  STATUS  TOOL   STEP    SAMPLE     TOOK               MEMORY      CPU  NOTE
+05:17:53    1/7  DONE    fastp  trim    S1        3.8 s   1.0 GiB /  2.4 GiB  0.9 / 1
+05:17:54    2/7  DONE    star   align   S1        0.5 s   261 MiB /  512 MiB  0.7 / 2
+05:17:54    3/7  DONE    awk    count   S1        13 ms         - /  256 MiB    - / 1
+
+                         fastp  trim    ━━━━━━━━────────  1/2  1 running
+                         star   align   ━━━━━━━━────────  1/2
+                         awk    count   ━━━━━━━━────────  1/2
+                         sort   matrix  ────────────────  0/1
+                         3 of 7 rules   1 running   6.2 s   trim/S2 1.6 s
+```
+
+- The launch opens with its shape: how many rules, steps and samples it selected, the budget and where its records are. A table of the steps follows, with each step's tool, version and rule count. kanit runs the [version commands](Writing-Workflows.md#tool-versions) before the first rule and waits at most 5 s for them; a slower one shows `measuring` there and goes on beside the rules, and the summary names its version.
+- After a column header, every line is a row of one table:
+  - `TIME`, the local time.
+  - `RULES`, how many selected rules are done, of all selected. A reused rule has no row; it counts as done from the moment kanit reuses it.
+  - `STATUS`, what happened, as a tag (below).
+  - `TOOL`, the rule's tool.
+  - `STEP` and `SAMPLE`, the rule's name. A rule that has a sample is named by its step and sample, and `STEP/SAMPLE` (such as `align/S2`) names it in commands; a rule without one is named by its rule name.
+  - `TOOK`, the time from the rule's start to its end.
+  - `MEMORY`, the peak the rule used against its request, `-` when the rule ended before it was measured.
+  - `CPU`, the cores it used on average against its threads.
+  - `NOTE`, what happened, in a few words.
+- The widths of the columns are set when the launch starts, from every selected rule, so the rows stay aligned to the end. A table without samples or tools leaves out those columns. Off a terminal, each column is as wide as its longest name. On a terminal too narrow for that, tools are cut to 16 columns, steps to 24 and samples to 20, with `…` (`~` outside a UTF-8 locale) where a name was cut; the header's step table keeps the whole names. A terminal too narrow for the figures leaves out `MEMORY` and `CPU`, a narrower one narrows the name columns further, and a line still longer than the window is cut with the same mark, so no line wraps. Wide characters, such as those of Chinese, Japanese and Korean names, count as two columns.
+
+| Tag     | Status      | Meaning                 |
+| ------- | ----------- | ----------------------- |
+| `START` | `running`   | an attempt started      |
+| `DONE`  | `completed` | the rule completed      |
+| `RETRY` | `retrying`  | another attempt follows |
+| `FAIL`  | `failed`    | its last attempt failed |
+| `BLOCK` | `blocked`   | a rule it needs failed  |
+| `STOP`  | `cancelled` | stopped before it ended |
+| `INFO`  |             | a shared input, a command or the counts |
+| `WARN`  |             | a problem that does not stop the launch |
+
+- `kanit status`, `kanit watch`, `--json` and the records name a rule's statuses; the tags are for the log. The summary counts the rules done, reused, failed, blocked and stopped; `--json` and the records call stopped rules `cancelled`.
+- A `START` row shows the rule's request, and its note says how long the rule waited for room or which attempt it is.
+- A failure names its reason in its note (`exit 2`, `timed out at 2h 00m`, `out of memory`, `killed by SIGSEGV`), quotes the last lines of its standard error or kept diagnostics, and names the command that shows its whole output. Rules that a failure blocks are reported once for that failure.
+- An `INFO` row names a shared input in `STEP` when it loads, is ready, restarts or fails, the rule a `kanit control` command was for, or an interrupt. A `WARN` row names the rule it concerns, if any.
+- On a terminal, color marks the status tags, the `START` rows are left out, and a footer below the rows shows where the launch is: one row per step with its tool, a bar and how many of its rules are done, ✓ when all of them are, and how many failed, are running, blocked or stopped; then the counts of all the rules, the elapsed time and the running rules, the longest first. On a short terminal the steps that are done fold into one row. `-v` keeps the `START` rows. `--no-color` or `NO_COLOR=1` turns colors off; outside a UTF-8 locale the marks are ASCII.
+- Off a terminal, the `START` rows are kept, and every five minutes an `INFO` row with the counts is followed by the footer's step table and the running rules.
+- `launch.log` in the launch directory keeps every line, `START` rows included, whole and without color, so `tail -f .workz/latest/launch.log` follows a launch from anywhere. `.workz/latest` always points to the newest launch.
 
 When the launch ends, a summary follows on standard output: the outcome and counts, a matrix of samples by steps or a list of steps, the failed rules with their reasons, the rules they blocked, the slowest rules, where the records are and what to type next. `kanit status` prints the same summary later ([status](Watching-a-Launch.md#status)), and `launch.log` keeps it at its end. The summary is text wherever standard output goes, with colors only on a terminal; `--json` prints one line of JSON instead, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)), for a script to read.
 
@@ -110,28 +143,30 @@ If the engine itself is killed, the process holding its network namespace detect
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-kanit 0.7.0   failures   launch 20261108T101843.528-5cbfab09
-          plan       5 rules
-          budget     4 threads, 1.0 GiB, 4 jobs, isolated
-          records    .workz/latest/   log launch.log   page report.html
-03:18:43  failed     exits      exit 2 after 3 ms
-                                │ sort: cannot read: samples.tsv: No such file or directory
-                                kanit logs exits   .workz/latest/attempts/exits/001/
-03:18:43  failed     no_output  exited 0 without output d.txt
-03:18:44  blocked    after      after exits failed
-03:18:44  failed     too_big    out of memory at its 64 MiB
-                                raise its memory, or see kanit report --suggest
-03:18:46  failed     slow       timed out at 2.0 s
+kanit 0.7.0   failures   launch 20261108T121728.669-4d10cd11
+          plan         5 rules
+          budget       4 threads, 1.0 GiB, 4 jobs, isolated
+          records      .workz/latest/   log launch.log   page report.html
 
-          failed     0 of 5 rules done in 2.5 s: 4 failed, 1 blocked
-          failed     exits      exited with status 2: sort: cannot read: samples.tsv: No such file or dire...
-                     no_output  exited 0 without output d.txt
-                     too_big    out of memory: could not stay within its 64 MiB request
-                     slow       timed out after 2 s
-          blocked    after      after exits failed
-          records    .workz/latest/   log launch.log   page report.html
-          next       kanit logs exits   the output of the failed attempt
-                     kanit run          run again
+TIME      RULES  STATUS  STEP          TOOK             MEMORY      CPU  NOTE
+05:17:29    0/5  FAIL    exits         3 ms        - /  64 MiB    - / 1  exit 2
+                         │ sort: cannot read: samples.tsv: No such file or directory
+                         kanit logs exits   .workz/latest/attempts/exits/001/
+05:17:29    0/5  FAIL    no_output     3 ms        - /  64 MiB    - / 1  exited 0 without output d.txt
+05:17:29    0/5  BLOCK   after                                           after exits failed
+05:17:29    0/5  FAIL    too_big      51 ms   64 MiB /  64 MiB    - / 1  out of memory
+                         raise its memory, or see kanit report --suggest
+05:17:31    0/5  FAIL    slow         2.0 s        - /  64 MiB  0.0 / 1  timed out at 2.0 s
+
+          failed       0 of 5 rules done in 2.5 s: 4 failed, 1 blocked
+          failed       exits      exited with status 2: sort: cannot read: samples.tsv: No such file or di...
+                       no_output  exited 0 without output d.txt
+                       too_big    out of memory: could not stay within its 64 MiB request
+                       slow       timed out after 2 s
+          blocked      after      after exits failed
+          records      .workz/latest/   log launch.log   page report.html
+          next         kanit logs exits   the output of the failed attempt
+                       kanit run          run again
 ```
 
 The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. A failure whose standard error or kept [diagnostics](Writing-Workflows.md#diagnostics) has lines quotes the last three and names the `kanit logs` command that shows them whole, with the attempt's directory: under `.workz/latest/` on a terminal, and under the launch's own directory off a terminal and in `launch.log`, where the path must stay true after later launches.
@@ -159,7 +194,7 @@ kanit control retry align_s3    # run a failed or cancelled rule again, with its
 kanit control cancel            # stop the launch, like an interrupt
 ```
 
-Each command prints `sent: ...`, and the launch reports what it did in a `control` line of its log, for example `stop: stopping` for `align_s3`, or `stop: cancelled before it started` for a rule that had not started, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
+Each command prints `sent: ...`, and the launch reports what it did in an `INFO` row of its log, under the rule's name, for example `control stop: stopping`, or `control stop: stopped before it started` for a rule that had not started, even with `--quiet`. `retry` allows one more attempt whatever the rule's `retries`. A `cancel` ends the launch with exit status 130, unless the launch was already stopping after a failure; then it answers `already stopping`, and the status stays 1. The same commands are on the keys <kbd>S</kbd>, <kbd>R</kbd> and <kbd>X</kbd> of the [interactive view](Watching-a-Launch.md).
 
 Commands go through the `control` file in the launch directory, which the engine watches; every one is recorded as a `control` event.
 

@@ -129,7 +129,7 @@ Runs the selected rules that are not reusable. The run log goes to standard erro
 | `--grace`            | DURATION   | 10s               | wait before killing a stopped rule         |
 | `--slice`            | NAME.slice |                   | put the run's scope in this systemd slice  |
 | `--no-isolation`     |            | off               | no scope, cgroups or network namespace     |
-| `-q`, `--quiet`      |            | off               | no progress lines; failures still print    |
+| `-q`, `--quiet`      |            | off               | only failures, warnings and commands       |
 | `-v`, `--verbose`    |            | off               | also a line for every rule that starts     |
 | `--json`             |            | off               | the summary as one line of JSON            |
 | `--no-color`         |            | off               | no colors on a terminal                    |
@@ -227,7 +227,7 @@ Reports on the newest launch, or on `--launch ID` ([Reports](Reports.md)).
 kanit verify [WORKFLOW] [--content] [--json]
 ```
 
-Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, an `unrecorded` line for each selected rule with no record to check, each with the rule's step and sample and the output's path, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. `--json` prints `{"v", "checked", "by_content", "digests_stored", "unrecorded", "ok", "findings": [{"rule", "step", "sample", "finding", "path"}]}` instead. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
+Checks that every recorded output of the selected rules still has its recorded identity. `--content` also compares each output's bytes with its stored digest, and stores a digest for every output that has none. Prints `missing`, `changed` or `content` lines for differences, each with the rule's step and sample and the output's path, an `unrecorded` line with the step and sample of each selected rule with no record to check, and a final count, such as `12 outputs checked: all match; 1 selected rule has no record to check`. `--json` prints `{"v", "checked", "by_content", "digests_stored", "unrecorded", "ok", "findings": [{"rule", "step", "sample", "finding", "path"}]}` instead. It exits 1 on a difference, and when a selected rule has no record, since nothing then vouches for its outputs. Without records it creates no `.workz/`.
 
 ## clean
 

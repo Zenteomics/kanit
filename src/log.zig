@@ -1,12 +1,13 @@
-//! The run log: one line per event, the same on a terminal, on standard
-//! error off a terminal and in each launch's `launch.log`. A line is the
-//! local time, a status word, the rule's step and sample in padded columns
-//! (`names.zig`) and its details; lines that belong to an event follow it at
-//! the detail column. A terminal adds color, cuts quoted output to the window
-//! and keeps a footer of progress below the lines; off a terminal a heartbeat
-//! line carries the same progress every few minutes. `launch.log` keeps every
-//! line whole and without color. A fixed few marks are Unicode, with ASCII
-//! stand-ins outside a UTF-8 locale.
+//! The run log: one row of a table per event, on standard error and in each
+//! launch's `launch.log`. A row is the local time, the rules done, a status
+//! tag, the rule's tool, step and sample in columns as wide as the selected
+//! rules need (`names.zig`), its time, memory and cores, and a note; quoted
+//! output and hints that belong to a row follow it at the name column. A
+//! terminal leaves out the `START` rows, adds color, fits every line to the
+//! window and keeps a footer of the steps below the rows; off a terminal a
+//! heartbeat row carries the same progress every few minutes. `launch.log`
+//! keeps every row whole and without color. A fixed few marks are Unicode,
+//! with ASCII stand-ins outside a UTF-8 locale.
 //!
 //! Lines are kept per sink and written once per engine pass, at most a tenth
 //! of a second after they were made; the footer is drawn from counts the
@@ -27,10 +28,11 @@ pub const Marks = struct {
     quote: []const u8,
     full: []const u8,
     empty: []const u8,
+    more: []const u8,
 };
 
-pub const unicode: Marks = .{ .ok = "✓", .fail = "✗", .none = "·", .quote = "│", .full = "━", .empty = "─" };
-pub const ascii: Marks = .{ .ok = "+", .fail = "x", .none = ".", .quote = "|", .full = "#", .empty = "-" };
+pub const unicode: Marks = .{ .ok = "✓", .fail = "✗", .none = "·", .quote = "│", .full = "━", .empty = "─", .more = "…" };
+pub const ascii: Marks = .{ .ok = "+", .fail = "x", .none = ".", .quote = "|", .full = "#", .empty = "-", .more = "~" };
 
 pub fn marksFor(env: *const std.process.Environ.Map) *const Marks {
     for ([_][]const u8{ "LC_ALL", "LC_CTYPE", "LANG" }) |key| if (env.get(key)) |v| if (v.len > 0)
@@ -45,6 +47,9 @@ pub fn utf8Locale(locale: []const u8) bool {
     return std.mem.indexOf(u8, lower, "utf-8") != null or std.mem.indexOf(u8, lower, "utf8") != null;
 }
 
+/// What a row of the run log reports, shown as its tag. The first six are
+/// a rule's events; shared inputs, control commands and the progress
+/// heartbeat are `INFO`, and problems that do not stop the launch `WARN`.
 pub const Word = enum {
     started,
     completed,
@@ -52,13 +57,23 @@ pub const Word = enum {
     failed,
     blocked,
     cancelled,
-    step,
-    sample,
     shared,
-    tool,
     control,
     warning,
     progress,
+
+    pub fn tag(w: Word) []const u8 {
+        return switch (w) {
+            .started => "START",
+            .completed => "DONE",
+            .retrying => "RETRY",
+            .failed => "FAIL",
+            .blocked => "BLOCK",
+            .cancelled => "STOP",
+            .shared, .control, .progress => "INFO",
+            .warning => "WARN",
+        };
+    }
 
     pub fn tint(w: Word) []const u8 {
         return switch (w) {
@@ -68,28 +83,112 @@ pub const Word = enum {
             .failed => "\x1b[31;1m",
             .blocked => "\x1b[31m",
             .cancelled => "\x1b[35m",
-            .step, .sample => "\x1b[1m",
-            .shared, .tool, .control => "\x1b[36m",
+            .shared, .control => "\x1b[36m",
             .warning => "\x1b[33;1m",
         };
     }
 };
 
-pub const word_width = 9;
+/// The width of the labels of the header and the summary.
+pub const label_width = 11;
+const status_width = 6;
 const time_width = 8;
 const gap = "  ";
+const took_width = 7;
+
+pub const Table = struct {
+    total: usize = 0,
+    done: usize = 4,
+    step: usize = 4,
+    sample: usize = 0,
+    tool: usize = 0,
+    memory: usize = 7,
+    cores: usize = 3,
+    threads: usize = 1,
+    figures: bool = true,
+
+    pub fn of(total: usize, widths: names.Widths, requests: []const u64, max_threads: u32) Table {
+        var t: Table = .{ .total = total };
+        t.done = @max(5, 2 * digits(total) + 1);
+        t.step = @max(4, widths.step);
+        t.sample = if (widths.sample > 0) @max(6, widths.sample) else 0;
+        t.tool = if (widths.tool > 0) @max(4, widths.tool) else 0;
+        // `units.size` writes 8 columns for 1000 to 1023 MiB and for 10.0
+        // to 99.9 GiB, 7 below; a rule's peak stays within its request.
+        for (requests) |mib| if (mib >= 1000) {
+            t.memory = 8;
+        };
+        t.threads = digits(max_threads);
+        t.cores = digits(max_threads) + 2;
+        return t;
+    }
+
+    /// The widths for a launch without isolation, where nothing holds a
+    /// rule's memory or cores to its request.
+    pub fn unbounded(t: Table) Table {
+        var u = t;
+        u.memory = 8;
+        u.cores = @max(u.cores, 5);
+        return u;
+    }
+
+    /// The table narrowed to fit a terminal of `cols` columns: the name
+    /// columns give up their width, the widest first, down to a minimum.
+    pub fn fitted(t: Table, cols: usize) Table {
+        var f = t;
+        while (f.width() + 1 > cols) {
+            const widest = @max(f.step, @max(f.sample, f.tool));
+            if (widest <= 8) break;
+            if (f.step == widest) f.step -= 1 else if (f.sample == widest) f.sample -= 1 else f.tool -= 1;
+        }
+        return f;
+    }
+
+    fn memoryColumn(t: Table) usize {
+        return 2 * t.memory + 3;
+    }
+
+    fn cpuColumn(t: Table) usize {
+        return t.cores + 3 + t.threads;
+    }
+
+    /// Where the status tag and an event's sentence start.
+    pub fn statusColumn(t: Table) usize {
+        return time_width + gap.len + t.done + gap.len;
+    }
+
+    /// Where the rule's names start, and its quoted output and hints.
+    pub fn nameColumn(t: Table) usize {
+        return t.statusColumn() + status_width + gap.len;
+    }
+
+    pub fn width(t: Table) usize {
+        var c = t.nameColumn() + t.step + gap.len;
+        if (t.tool > 0) c += t.tool + gap.len;
+        if (t.sample > 0) c += t.sample + gap.len;
+        c += took_width + gap.len;
+        if (t.figures) c += t.memoryColumn() + gap.len + t.cpuColumn() + gap.len;
+        return c;
+    }
+};
+
+fn digits(n: usize) usize {
+    var d: usize = 1;
+    var v = n;
+    while (v >= 10) : (v /= 10) d += 1;
+    return d;
+}
 
 pub const Style = struct {
     color: bool = false,
     marks: *const Marks = &ascii,
-    widths: names.Widths = .{ .step = 0, .sample = 0 },
+    table: Table = .{},
     cols: usize = 0,
+    /// The terminal's height, which bounds the footer; 0 off a terminal.
+    rows: usize = 0,
 
-    pub fn detailColumn(s: Style) usize {
-        var c: usize = time_width + gap.len + word_width + gap.len + s.widths.step + gap.len;
-        if (s.widths.sample > 0) c += s.widths.sample + gap.len;
-        if (s.widths.tool > 0) c += s.widths.tool + gap.len;
-        return c;
+    pub fn blockColumn(s: Style) usize {
+        return s.table.nameColumn();
     }
 
     fn on(s: Style, code: []const u8) []const u8 {
@@ -110,14 +209,26 @@ fn pad(w: *Writer, text: []const u8, width: usize) !void {
     try w.splatByteAll(' ', width -| names.columns(text));
 }
 
+/// Writes `text` in a column of `width`, cut with the `more` mark when it
+/// is longer, so the columns after it stay in place.
+fn fit(w: *Writer, s: Style, text: []const u8, width: usize) !void {
+    const n = names.columns(text);
+    if (n <= width) return pad(w, text, width);
+    if (width == 0) return;
+    const head = cut(text, width - 1);
+    try w.print("{s}{s}", .{ head, s.marks.more });
+    try w.splatByteAll(' ', width - 1 - names.columns(head));
+}
+
+/// The longest start of `text` that takes at most `cols` columns.
 pub fn cut(text: []const u8, cols: usize) []const u8 {
     var n: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
-        if (n == cols) return text[0..i];
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        i = @min(text.len, i + len);
-        n += 1;
+        const c = names.codepoint(text, i);
+        n += names.width(c.value);
+        if (n > cols) return text[0..i];
+        i += c.len;
     }
     return text;
 }
@@ -128,44 +239,171 @@ pub const Who = struct {
     tool: []const u8 = "",
 };
 
-pub fn line(w: *Writer, s: Style, time: []const u8, word: Word, who: Who, detail: []const u8) !void {
+pub const Figures = struct {
+    took_s: ?f64 = null,
+    used_mib: ?f64 = null,
+    request_mib: ?u64 = null,
+    cores: ?f64 = null,
+    threads: ?u32 = null,
+};
+
+/// One row of the run log.
+pub fn line(w: *Writer, s: Style, time: []const u8, done: usize, word: Word, who: Who, f: Figures, note: []const u8) !void {
     var buf: [8192]u8 = undefined;
     var b: Writer = .fixed(&buf);
-    columns(&b, s, time, word, who, detail) catch return columns(w, s, time, word, who, detail);
-    try w.print("{s}\n", .{std.mem.trimEnd(u8, b.buffered(), " ")});
+    row(&b, s, time, done, word, who, f, note) catch {
+        try row(w, s, time, done, word, who, f, note);
+        return w.writeAll("\n");
+    };
+    const text = std.mem.trimEnd(u8, b.buffered(), " ");
+    if (s.cols > 1 and visible(text) > s.cols - 1) {
+        try clipped(w, s, text, s.cols - 2);
+        try w.print("{s}\n", .{s.marks.more});
+    } else try w.print("{s}\n", .{text});
 }
 
-fn columns(w: *Writer, s: Style, time: []const u8, word: Word, who: Who, detail: []const u8) !void {
-    try w.print("{s}{s}{s}{s}{s}", .{ s.on("\x1b[2m"), time, s.off(), gap, s.on(word.tint()) });
-    try pad(w, @tagName(word), word_width);
-    try w.print("{s}{s}", .{ s.off(), gap });
-    try pad(w, who.step, s.widths.step);
+/// Writes each line of `text`, cut with the `more` mark where it is wider
+/// than the terminal.
+fn fitLines(w: *Writer, s: Style, text: []const u8) !void {
+    var it = std.mem.splitScalar(u8, text, '\n');
+    var first = true;
+    while (it.next()) |l| {
+        if (!first) try w.writeAll("\n");
+        first = false;
+        if (s.cols > 1 and visible(l) > s.cols - 1) {
+            try clipped(w, s, l, s.cols - 2);
+            try w.writeAll(s.marks.more);
+        } else try w.writeAll(l);
+    }
+}
+
+/// The columns `text` takes on a terminal, without its escape sequences.
+fn visible(text: []const u8) usize {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            i = (std.mem.indexOfScalarPos(u8, text, i, 'm') orelse text.len - 1) + 1;
+            continue;
+        }
+        const c = names.codepoint(text, i);
+        n += names.width(c.value);
+        i += c.len;
+    }
+    return n;
+}
+
+fn lead(w: *Writer, s: Style, time: []const u8, done: usize) !void {
+    var nb: [32]u8 = undefined;
+    try w.print("{s}{s}{s}{s}", .{ s.on("\x1b[2m"), time, gap, s.off() });
+    try right(w, std.fmt.bufPrint(&nb, "{d}/{d}", .{ done, s.table.total }) catch "", s.table.done);
     try w.writeAll(gap);
-    if (s.widths.sample > 0) {
-        try pad(w, who.sample, s.widths.sample);
+}
+
+fn right(w: *Writer, text: []const u8, width: usize) !void {
+    try w.splatByteAll(' ', width -| names.columns(text));
+    try w.writeAll(text);
+}
+
+fn row(w: *Writer, s: Style, time: []const u8, done: usize, word: Word, who: Who, f: Figures, note: []const u8) !void {
+    const t = s.table;
+    try lead(w, s, time, done);
+    try w.writeAll(s.on(word.tint()));
+    try pad(w, word.tag(), status_width);
+    try w.print("{s}{s}", .{ s.off(), gap });
+    if (t.tool > 0) {
+        try w.writeAll(s.on("\x1b[2m"));
+        try fit(w, s, who.tool, t.tool);
+        try w.writeAll(s.off());
         try w.writeAll(gap);
     }
-    if (s.widths.tool > 0) {
-        if (who.tool.len > 0) try w.print("{s}{s}{s}", .{ s.on("\x1b[2m"), who.tool, s.off() });
-        try w.splatByteAll(' ', s.widths.tool -| names.columns(who.tool));
+    try fit(w, s, who.step, t.step);
+    try w.writeAll(gap);
+    if (t.sample > 0) {
+        try fit(w, s, who.sample, t.sample);
         try w.writeAll(gap);
     }
-    try w.writeAll(detail);
+    var tb: [32]u8 = undefined;
+    var tw: Writer = .fixed(&tb);
+    if (f.took_s) |sec| units.duration(&tw, sec) catch {};
+    try right(w, tw.buffered(), took_width);
+    try w.writeAll(gap);
+    if (t.figures) {
+        if (f.request_mib) |req| {
+            var ub: [32]u8 = undefined;
+            var uw: Writer = .fixed(&ub);
+            if (f.used_mib) |m| units.size(&uw, m) catch {} else uw.writeAll("-") catch {};
+            try right(w, uw.buffered(), t.memory);
+            try w.writeAll(" / ");
+            var rb: [32]u8 = undefined;
+            var rw: Writer = .fixed(&rb);
+            units.size(&rw, @floatFromInt(req)) catch {};
+            try right(w, rw.buffered(), t.memory);
+        } else try w.splatByteAll(' ', t.memoryColumn());
+        try w.writeAll(gap);
+        if (f.threads) |n| {
+            var cb: [32]u8 = undefined;
+            try right(w, if (f.cores) |c| std.fmt.bufPrint(&cb, "{d:.1}", .{c}) catch "" else "-", t.cores);
+            try w.print(" / {d}", .{n});
+            try w.splatByteAll(' ', t.threads -| digits(n));
+        } else try w.splatByteAll(' ', t.cpuColumn());
+        try w.writeAll(gap);
+    }
+    try w.writeAll(note);
+}
+
+pub fn columnHeader(w: *Writer, s: Style) !void {
+    const t = s.table;
+    try w.writeAll(s.on("\x1b[1m"));
+    try pad(w, "TIME", time_width);
+    try w.writeAll(gap);
+    try right(w, "RULES", t.done);
+    try w.writeAll(gap);
+    try pad(w, "STATUS", status_width);
+    try w.writeAll(gap);
+    if (t.tool > 0) {
+        try pad(w, "TOOL", t.tool);
+        try w.writeAll(gap);
+    }
+    try pad(w, "STEP", t.step);
+    try w.writeAll(gap);
+    if (t.sample > 0) {
+        try pad(w, "SAMPLE", t.sample);
+        try w.writeAll(gap);
+    }
+    try right(w, "TOOK", took_width);
+    try w.writeAll(gap);
+    if (t.figures) {
+        try right(w, "MEMORY", t.memoryColumn());
+        try w.writeAll(gap);
+        try right(w, "CPU", t.cpuColumn());
+        try w.writeAll(gap);
+    }
+    try w.print("NOTE{s}\n", .{s.off()});
 }
 
 pub fn quote(w: *Writer, s: Style, text: []const u8) !void {
-    const col = s.detailColumn();
+    const col = s.blockColumn();
     try w.splatByteAll(' ', col);
-    const room = if (s.cols > col + 3) s.cols - col - 3 else 0;
+    // The mark, a space, the text and a mark where it was cut fit in all
+    // but the terminal's last column.
+    const room = if (s.cols > col + 4) s.cols - col - 4 else 0;
     const shown = if (s.cols == 0) text else cut(text, room);
     const whole = shown.len == text.len;
-    try w.print("{s}{s} {s}{s}{s}\n", .{ s.on("\x1b[2m"), s.marks.quote, if (whole) shown else std.mem.trimEnd(u8, shown, " "), if (whole) "" else "...", s.off() });
+    try w.print("{s}{s} {s}{s}{s}\n", .{ s.on("\x1b[2m"), s.marks.quote, if (whole) shown else std.mem.trimEnd(u8, shown, " "), if (whole) "" else s.marks.more, s.off() });
 }
 
 pub fn hint(w: *Writer, s: Style, command: []const u8, where: []const u8) !void {
-    try w.splatByteAll(' ', s.detailColumn());
-    try w.print("{s}{s}{s}", .{ s.on("\x1b[36m"), command, s.off() });
-    if (where.len > 0) try w.print("   {s}{s}{s}", .{ s.on("\x1b[2m"), where, s.off() });
+    var buf: [4096]u8 = undefined;
+    var b: Writer = .fixed(&buf);
+    b.splatByteAll(' ', s.blockColumn()) catch {};
+    b.print("{s}{s}{s}", .{ s.on("\x1b[36m"), command, s.off() }) catch {};
+    if (where.len > 0) b.print("   {s}{s}{s}", .{ s.on("\x1b[2m"), where, s.off() }) catch {};
+    const text = b.buffered();
+    if (s.cols > 1 and visible(text) > s.cols - 1) {
+        try clipped(w, s, text, s.cols - 2);
+        try w.writeAll(s.marks.more);
+    } else try w.writeAll(text);
     try w.writeAll("\n");
 }
 
@@ -216,14 +454,9 @@ fn counted(w: *Writer, n: usize, one: []const u8, many: []const u8) !void {
 
 pub const StepLine = struct {
     name: []const u8,
-    tool: ?[]const u8 = null,
     rules: usize,
-};
-
-pub const ToolLine = struct {
-    name: []const u8,
+    tool: ?[]const u8 = null,
     version: []const u8 = "",
-    steps: []const u8,
 };
 
 pub const Header = struct {
@@ -233,19 +466,18 @@ pub const Header = struct {
     rules: usize,
     samples: usize,
     steps: []const StepLine,
-    tools: []const ToolLine = &.{},
     budget: []const u8,
     isolated: bool,
     records: []const u8,
     page: bool,
 };
 
-const header_lines_max = 3;
+const header_steps_max = 40;
 
 fn label(w: *Writer, s: Style, name: []const u8) !void {
     try w.splatByteAll(' ', time_width + gap.len);
     try w.print("{s}", .{s.on("\x1b[2m")});
-    try pad(w, name, word_width);
+    try pad(w, name, label_width);
     try w.print("{s}{s}", .{ s.off(), gap });
 }
 
@@ -253,81 +485,92 @@ pub fn header(w: *Writer, s: Style, h: Header) !void {
     try w.print("{s}kanit {s}{s}   {s}   launch {s}\n", .{ s.on("\x1b[1m"), h.version, s.off(), h.workflow, h.launch });
     try label(w, s, "plan");
     try counted(w, h.rules, "rule", "rules");
+    var tools = false;
+    var versions = false;
+    for (h.steps) |st| {
+        tools = tools or st.tool != null;
+        versions = versions or st.version.len > 0;
+    }
     const grouped = h.steps.len < h.rules or h.samples > 0;
     if (grouped) {
-        try w.writeAll(" in ");
+        try w.writeAll(": ");
         try counted(w, h.steps.len, "step", "steps");
-    }
-    if (h.samples > 0) {
-        try w.writeAll(" for ");
-        try counted(w, h.samples, "sample", "samples");
+        if (h.samples > 0) {
+            try w.writeAll(" for ");
+            try counted(w, h.samples, "sample", "samples");
+        }
     }
     try w.writeAll("\n");
     try label(w, s, "budget");
     try w.print("{s}, {s}\n", .{ h.budget, if (h.isolated) "isolated" else "no isolation" });
-    if (grouped) {
-        try label(w, s, "steps");
-        const start = time_width + gap.len + word_width + gap.len;
-        const width = if (s.cols > start + 20) s.cols - 1 else 120;
-        var at = start;
-        var lines: usize = 1;
-        for (h.steps, 0..) |st, k| {
-            var buf: [160]u8 = undefined;
-            var iw: Writer = .fixed(&buf);
-            iw.print("{s} ", .{st.name}) catch {};
-            thousands(&iw, st.rules) catch {};
-            const item = iw.buffered();
-            const need = names.columns(item) + if (at > start) @as(usize, 3) else 0;
-            const more: usize = if (lines == header_lines_max and k + 1 < h.steps.len) 12 else 0;
-            if (at > start and at + need + more > width) {
-                if (lines == header_lines_max) {
-                    try w.print("   +{d} more", .{h.steps.len - k});
-                    break;
-                }
-                try w.writeAll("\n");
-                try w.splatByteAll(' ', start);
-                at = start;
-                lines += 1;
-            }
-            if (at > start) try w.writeAll("   ");
-            try w.writeAll(item);
-            at += names.columns(item) + if (at > start) @as(usize, 3) else 0;
-        }
-        try w.writeAll("\n");
-    }
-    if (h.tools.len > 0) {
-        var name_w: usize = 0;
-        var version_w: usize = 0;
-        for (h.tools) |t| {
-            name_w = @max(name_w, names.columns(t.name));
-            version_w = @max(version_w, names.columns(t.version));
-        }
-        for (h.tools, 0..) |t, k| {
-            try label(w, s, if (k == 0) "tools" else "");
-            try pad(w, t.name, name_w + 3);
-            if (version_w > 0) {
-                if (t.version.len > 0) try pad(w, t.version, version_w + 3) else {
-                    try w.print("{s}{s}{s}", .{ s.on("\x1b[2m"), "-", s.off() });
-                    try w.splatByteAll(' ', version_w + 2);
-                }
-            }
-            try w.print("{s}{s}{s}\n", .{ s.on("\x1b[2m"), t.steps, s.off() });
-        }
-    }
     try label(w, s, "records");
     try w.print("{s}   log launch.log", .{h.records});
     if (h.page) try w.writeAll("   page report.html");
     try w.writeAll("\n");
+    if (!grouped and !tools) return;
+    var step_w: usize = 4;
+    var tool_w: usize = 4;
+    var version_w: usize = 7;
+    var rules_w: usize = 5;
+    for (h.steps[0..@min(h.steps.len, header_steps_max)]) |st| {
+        step_w = @max(step_w, names.columns(st.name));
+        tool_w = @max(tool_w, names.columns(st.tool orelse "-"));
+        version_w = @max(version_w, names.columns(st.version));
+        var cb: [24]u8 = undefined;
+        var cw: Writer = .fixed(&cb);
+        thousands(&cw, st.rules) catch {};
+        rules_w = @max(rules_w, cw.buffered().len);
+    }
+    const indent = time_width + gap.len;
+    try w.writeAll("\n");
+    try w.splatByteAll(' ', indent);
+    try w.writeAll(s.on("\x1b[1m"));
+    if (tools) {
+        try pad(w, "TOOL", tool_w);
+        try w.writeAll(gap);
+        if (versions) {
+            try pad(w, "VERSION", version_w);
+            try w.writeAll(gap);
+        }
+    }
+    try pad(w, "STEP", step_w);
+    try w.writeAll(gap);
+    try right(w, "RULES", rules_w);
+    try w.print("{s}\n", .{s.off()});
+    for (h.steps, 0..) |st, k| {
+        try w.splatByteAll(' ', indent);
+        if (k == header_steps_max) {
+            try w.print("+{d} more steps; kanit plan lists them\n", .{h.steps.len - k});
+            break;
+        }
+        if (tools) {
+            try pad(w, st.tool orelse "-", tool_w);
+            try w.writeAll(gap);
+            if (versions) {
+                try pad(w, if (st.version.len > 0) st.version else "-", version_w);
+                try w.writeAll(gap);
+            }
+        }
+        try pad(w, st.name, step_w);
+        try w.writeAll(gap);
+        var nb: [24]u8 = undefined;
+        var nw: Writer = .fixed(&nb);
+        try thousands(&nw, st.rules);
+        try right(w, nw.buffered(), rules_w);
+        try w.writeAll("\n");
+    }
 }
 
 // --- Progress ---
 
 pub const StepProgress = struct {
     name: []const u8,
+    tool: []const u8 = "",
     selected: u32,
     done: u32,
     failed: u32,
     blocked: u32 = 0,
+    stopped: u32 = 0,
     running: u32,
     ended: bool,
 };
@@ -346,12 +589,12 @@ pub const Progress = struct {
     cancelled: usize,
     elapsed_s: f64,
     steps: []const StepProgress,
-    steps_ok: usize,
     grouped: bool,
     running_list: []const Running,
 };
 
 const bar_width = 24;
+const step_bar_width = 16;
 
 pub fn counts(w: *Writer, s: Style, p: Progress) !void {
     try thousands(w, p.done);
@@ -375,24 +618,26 @@ pub fn counts(w: *Writer, s: Style, p: Progress) !void {
     if (p.cancelled > 0) {
         try w.writeAll("   ");
         try thousands(w, p.cancelled);
-        try w.writeAll(" cancelled");
+        try w.writeAll(" stopped");
     }
     try w.writeAll("   ");
     try units.duration(w, p.elapsed_s);
 }
 
-pub fn bar(w: *Writer, s: Style, p: Progress) !void {
-    const total = @max(p.selected, 1);
+/// A bar of `cells`: done in green, running in cyan, failed, blocked and
+/// stopped in red, the rest empty.
+fn meter(w: *Writer, s: Style, total_: usize, done: usize, running: usize, bad: usize, cells: usize) !void {
+    const total = @max(total_, 1);
     const parts = [_]struct { n: usize, code: []const u8 }{
-        .{ .n = p.done, .code = "\x1b[32m" },
-        .{ .n = p.running, .code = "\x1b[36m" },
-        .{ .n = p.failed + p.blocked + p.cancelled, .code = "\x1b[31m" },
+        .{ .n = done, .code = "\x1b[32m" },
+        .{ .n = running, .code = "\x1b[36m" },
+        .{ .n = bad, .code = "\x1b[31m" },
     };
     var filled: usize = 0;
     for (parts, 0..) |part, k| {
-        var n = part.n * bar_width / total;
+        var n = part.n * cells / total;
         if (n == 0 and part.n > 0) n = 1;
-        n = @min(n, bar_width - filled);
+        n = @min(n, cells - filled);
         if (n == 0) continue;
         try w.writeAll(s.on(part.code));
         const mark = if (k == 0 or s.color) s.marks.full else s.marks.empty;
@@ -401,81 +646,119 @@ pub fn bar(w: *Writer, s: Style, p: Progress) !void {
         filled += n;
     }
     try w.writeAll(s.on("\x1b[2m"));
-    for (0..bar_width - filled) |_| try w.writeAll(s.marks.empty);
+    for (0..cells - filled) |_| try w.writeAll(s.marks.empty);
     try w.writeAll(s.off());
 }
 
-fn stepItem(w: *Writer, s: Style, st: StepProgress) !void {
-    try w.print("{s} ", .{st.name});
-    if (st.failed > 0) {
-        try w.print("{s}{s}{s} ", .{ s.on("\x1b[31m"), s.marks.fail, s.off() });
-    } else if (st.done == st.selected) try w.print("{s}{s}{s} ", .{ s.on("\x1b[32m"), s.marks.ok, s.off() });
-    try w.print("{d}/{d}", .{ st.done, st.selected });
-    if (st.running > 0) try w.print(", {s}{d} running{s}", .{ s.on("\x1b[36m"), st.running, s.off() });
-    if (st.blocked > 0) try w.print(", {d} blocked", .{st.blocked});
+pub fn bar(w: *Writer, s: Style, p: Progress) !void {
+    try meter(w, s, p.selected, p.done, p.running, p.failed + p.blocked + p.cancelled, bar_width);
 }
 
-fn itemColumns(st: StepProgress) usize {
-    var buf: [256]u8 = undefined;
-    var iw: Writer = .fixed(&buf);
-    stepItem(&iw, .{}, st) catch return 256;
-    return names.columns(iw.buffered());
+/// One step of the step table: its tool and name in the columns of the
+/// rows above, a bar, the rules done of its rules, and how the others are.
+fn stepRow(w: *Writer, s: Style, st: StepProgress, count_w: usize) !void {
+    const t = s.table;
+    if (t.tool > 0) {
+        try w.writeAll(s.on("\x1b[2m"));
+        try fit(w, s, st.tool, t.tool);
+        try w.print("{s}{s}", .{ s.off(), gap });
+    }
+    try fit(w, s, st.name, t.step);
+    try w.writeAll(gap);
+    try meter(w, s, st.selected, st.done, st.running, st.failed + st.blocked + st.stopped, step_bar_width);
+    try w.writeAll(gap);
+    var nb: [48]u8 = undefined;
+    try right(w, std.fmt.bufPrint(&nb, "{d}/{d}", .{ st.done, st.selected }) catch "", count_w);
+    if (st.done == st.selected) return w.print("  {s}{s}{s}", .{ s.on("\x1b[32m"), s.marks.ok, s.off() });
+    var first = true;
+    const parts = [_]struct { n: u32, what: []const u8, code: []const u8 }{
+        .{ .n = st.failed, .what = "failed", .code = "\x1b[31;1m" },
+        .{ .n = st.running, .what = "running", .code = "\x1b[36m" },
+        .{ .n = st.blocked, .what = "blocked", .code = "" },
+        .{ .n = st.stopped, .what = "stopped", .code = "" },
+    };
+    for (parts, 0..) |part, k| if (part.n > 0) {
+        try w.writeAll(if (first) "  " else ", ");
+        if (first and k == 0) try w.print("{s}{s}{s} ", .{ s.on("\x1b[31;1m"), s.marks.fail, s.off() });
+        first = false;
+        try w.print("{s}{d} {s}{s}", .{ s.on(part.code), part.n, part.what, s.off() });
+    };
 }
 
-pub fn stepsLine(w: *Writer, s: Style, p: Progress, width: usize) !void {
-    var used: usize = 0;
+fn countWidth(p: Progress) usize {
+    var most: u32 = 1;
+    for (p.steps) |st| most = @max(most, st.selected);
+    return 2 * digits(most) + 1;
+}
+
+/// Writes `text` cut to `cols` visible columns, skipping escape sequences,
+/// so that no line on a terminal wraps.
+fn clipped(w: *Writer, s: Style, text: []const u8, cols: usize) !void {
+    var n: usize = 0;
+    var i: usize = 0;
+    while (i < text.len) {
+        if (text[i] == 0x1b) {
+            const end = std.mem.indexOfScalarPos(u8, text, i, 'm') orelse text.len - 1;
+            try w.writeAll(text[i .. end + 1]);
+            i = end + 1;
+            continue;
+        }
+        const c = names.codepoint(text, i);
+        n += names.width(c.value);
+        if (n > cols) {
+            try w.writeAll(s.off());
+            return;
+        }
+        try w.writeAll(text[i .. i + c.len]);
+        i += c.len;
+    }
+}
+
+/// The step table, at most `room` rows: every step when they fit, else the
+/// steps still running or with failures and one row counting the rest.
+/// Each row ends with a newline and is cut to `width` when it is set.
+fn stepTable(w: *Writer, s: Style, p: Progress, indent: usize, room: usize, width: ?usize) !usize {
+    const count_w = countWidth(p);
+    const all = p.steps.len <= room;
     var shown: usize = 0;
-    var full = true;
+    var hidden: usize = 0;
+    var hidden_done: usize = 0;
+    var buf: [1024]u8 = undefined;
     for (p.steps) |st| {
-        const need = itemColumns(st) + if (shown > 0) @as(usize, 3) else 0;
-        if (used + need > width) {
-            full = false;
-            break;
+        const done = st.done == st.selected;
+        if (!all and (done or shown + 1 >= room)) {
+            hidden += 1;
+            hidden_done += @intFromBool(done);
+            continue;
         }
-        used += need;
+        var bw: Writer = .fixed(&buf);
+        bw.splatByteAll(' ', indent) catch {};
+        stepRow(&bw, s, st, count_w) catch {};
+        if (width) |cols| try clipped(w, s, bw.buffered(), cols) else try w.writeAll(bw.buffered());
+        try w.writeAll("\n");
         shown += 1;
     }
-    if (full) {
-        for (p.steps, 0..) |st, k| {
-            if (k > 0) try w.writeAll("   ");
-            try stepItem(w, s, st);
-        }
-        return;
-    }
-    used = 0;
-    shown = 0;
-    if (p.steps_ok > 0) {
-        var buf: [64]u8 = undefined;
-        const text = std.fmt.bufPrint(&buf, "{d} {s} ", .{ p.steps_ok, if (p.steps_ok == 1) "step" else "steps" }) catch "";
-        try w.print("{s}{s}{s}{s}", .{ text, s.on("\x1b[32m"), s.marks.ok, s.off() });
-        used = names.columns(text) + 1;
-        shown = 1;
-    }
-    const open = p.steps.len - p.steps_ok;
-    var listed: usize = 0;
-    for (p.steps) |st| {
-        if (st.done == st.selected) continue;
-        const need = itemColumns(st) + if (shown > 0) @as(usize, 3) else 0;
-        if (used + need + 8 > width) break;
-        if (shown > 0) try w.writeAll("   ");
-        try stepItem(w, s, st);
-        used += need;
+    if (hidden > 0) {
+        var bw: Writer = .fixed(&buf);
+        bw.splatByteAll(' ', indent) catch {};
+        bw.print("+{d} more {s}", .{ hidden, if (hidden == 1) "step" else "steps" }) catch {};
+        if (hidden_done > 0) bw.print(", {d} done {s}{s}{s}", .{ hidden_done, s.on("\x1b[32m"), s.marks.ok, s.off() }) catch {};
+        if (width) |cols| try clipped(w, s, bw.buffered(), cols) else try w.writeAll(bw.buffered());
+        try w.writeAll("\n");
         shown += 1;
-        listed += 1;
     }
-    if (listed < open) try w.print("   +{d}", .{open - listed});
+    return shown;
 }
 
-pub fn runningLine(w: *Writer, s: Style, list: []const Running, total: usize, width: usize) !void {
-    try w.print("{s}running{s}", .{ s.on("\x1b[2m"), s.off() });
-    var used: usize = 7;
+fn runningItems(w: *Writer, s: Style, list: []const Running, total: usize, room: usize) !void {
+    var used: usize = 0;
     var shown: usize = 0;
     for (list) |r| {
         var buf: [96]u8 = undefined;
         var iw: Writer = .fixed(&buf);
         units.duration(&iw, r.seconds) catch {};
         const need = 3 + names.columns(r.word) + 1 + iw.buffered().len;
-        if (used + need + 6 > width) break;
+        if (used + need + 6 > room) break;
         try w.print("   {s}{s}{s} {s}", .{ s.on("\x1b[36m"), r.word, s.off(), iw.buffered() });
         used += need;
         shown += 1;
@@ -483,41 +766,50 @@ pub fn runningLine(w: *Writer, s: Style, list: []const Running, total: usize, wi
     if (shown < total) try w.print("   +{d}", .{total - shown});
 }
 
+/// The footer below the rows on a terminal: a blank line, the step table,
+/// then a line of the counts, the elapsed time and the running rules. Without steps
+/// the line opens with a bar of all the rules.
 pub fn footer(w: *Writer, s: Style, p: Progress) !usize {
     const width = if (s.cols > 1) s.cols - 1 else 79;
-    try bar(w, s, p);
-    try w.writeAll("  ");
-    try counts(w, s, p);
-    var lines: usize = 1;
-    if (p.grouped and p.steps.len > 0) {
+    const steps = p.grouped and p.steps.len > 0;
+    const row_w = s.table.tool + gap.len + s.table.step + gap.len + step_bar_width + gap.len + countWidth(p) + 24;
+    const indent = if (steps and s.table.nameColumn() + row_w <= width) s.table.nameColumn() else 0;
+    // A blank line and the step table take at most half the terminal, and
+    // none of a terminal under six rows, which keeps only the counts.
+    var lines: usize = 0;
+    if (steps and (s.rows == 0 or s.rows >= 6)) {
         try w.writeAll("\n");
-        try stepsLine(w, s, p, width);
-        lines += 1;
+        lines = 1;
+        const room = if (s.rows > 0) s.rows / 2 - 2 else header_steps_max;
+        lines += try stepTable(w, s, p, indent, room, width);
     }
-    if (p.running > 0) {
-        try w.writeAll("\n");
-        try runningLine(w, s, p.running_list, p.running, width);
-        lines += 1;
+    var buf: [2048]u8 = undefined;
+    var lw: Writer = .fixed(&buf);
+    lw.splatByteAll(' ', indent) catch {};
+    if (!steps) {
+        bar(&lw, s, p) catch {};
+        lw.writeAll("  ") catch {};
     }
-    return lines;
+    counts(&lw, s, p) catch {};
+    const used = names.columns(lw.buffered());
+    if (p.running > 0 and width > used + 12) runningItems(&lw, s, p.running_list, p.running, width - used) catch {};
+    try clipped(w, s, lw.buffered(), width);
+    return lines + 1;
 }
 
-pub fn heartbeat(w: *Writer, s: Style, time: []const u8, p: Progress) !void {
-    const indent = time_width + gap.len + word_width + gap.len;
-    const width: usize = 160;
-    try w.print("{s}{s}{s}{s}{s}", .{ s.on("\x1b[2m"), time, s.off(), gap, s.on(Word.progress.tint()) });
-    try pad(w, "progress", word_width);
-    try w.print("{s}{s}", .{ s.off(), gap });
-    try counts(w, s, p);
-    try w.writeAll("\n");
-    if (p.grouped and p.steps.len > 0) {
-        try w.splatByteAll(' ', indent);
-        try stepsLine(w, s, p, width - indent);
-        try w.writeAll("\n");
-    }
+/// The heartbeat off a terminal: an `INFO` row with the counts, then the
+/// step table and the running rules under the rule's names.
+pub fn heartbeat(w: *Writer, s: Style, time: []const u8, done: usize, p: Progress) !void {
+    const indent = s.table.nameColumn();
+    var cb: [256]u8 = undefined;
+    var cw: Writer = .fixed(&cb);
+    try counts(&cw, s, p);
+    try line(w, s, time, done, .progress, .{}, .{}, cw.buffered());
+    if (p.grouped and p.steps.len > 0) _ = try stepTable(w, s, p, indent, header_steps_max, null);
     if (p.running > 0) {
         try w.splatByteAll(' ', indent);
-        try runningLine(w, s, p.running_list, p.running, width - indent);
+        try w.print("{s}running{s}", .{ s.on("\x1b[2m"), s.off() });
+        try runningItems(w, s, p.running_list, p.running, 160);
         try w.writeAll("\n");
     }
 }
@@ -546,7 +838,7 @@ pub fn signalName(n: u32) ?[]const u8 {
     };
 }
 
-pub fn ending(w: *Writer, e: schedule.End, wall_s: f64) !Block {
+pub fn ending(w: *Writer, e: schedule.End) !Block {
     if (e.lost_service) |why| {
         try w.writeAll(why);
         return .none;
@@ -557,7 +849,7 @@ pub fn ending(w: *Writer, e: schedule.End, wall_s: f64) !Block {
         return .stderr;
     }
     if (e.oom_kills > 0) {
-        try w.print("out of memory at its {d} MiB", .{e.memory_mib});
+        try w.writeAll("out of memory");
         return .memory;
     }
     if (e.exit_code) |c| {
@@ -567,52 +859,13 @@ pub fn ending(w: *Writer, e: schedule.End, wall_s: f64) !Block {
         if (e.container and (c == 126 or c == 127)) try w.writeAll(": the command could not run in the container");
         if (!e.container and c == 127) try w.writeAll(": command not found");
         if (!e.container and c == 126) try w.writeAll(": command cannot run");
-        try w.writeAll(" after ");
-        try units.duration(w, wall_s);
         return .stderr;
     }
     if (e.signal) |n| {
         if (signalName(n)) |sig| try w.print("killed by {s}", .{sig}) else try w.print("killed by signal {d}", .{n});
-        try w.writeAll(" after ");
-        try units.duration(w, wall_s);
         return .stderr;
     }
     return .none;
-}
-
-pub const Use = struct {
-    wall_s: f64,
-    memory_mib: ?f64 = null,
-    request_mib: u64,
-    cpu_s: ?f64 = null,
-    threads: u32,
-    attempts: u32 = 1,
-};
-
-const duration_width = 6;
-const size_width = 8;
-
-pub fn usage(w: *Writer, u: Use) !void {
-    var buf: [256]u8 = undefined;
-    var b: Writer = .fixed(&buf);
-    try units.right(&b, duration_width, units.duration, .{u.wall_s});
-    const cpu = u.cpu_s != null and u.wall_s >= 0.1;
-    if (u.memory_mib) |m| {
-        try b.writeAll("   mem ");
-        try units.right(&b, size_width, units.size, .{m});
-        try b.writeAll(" of ");
-        try units.right(&b, size_width, units.size, .{@as(f64, @floatFromInt(u.request_mib))});
-    } else if (cpu or u.attempts > 1) try b.splatByteAll(' ', 3 + 4 + size_width + 4 + size_width);
-    if (cpu) {
-        try b.print("   cpu {d:>4.1} of {d}", .{ u.cpu_s.? / u.wall_s, u.threads });
-    } else if (u.attempts > 1) try b.splatByteAll(' ', 14);
-    if (u.attempts > 1) try b.print("   after {d} attempts", .{u.attempts});
-    try w.writeAll(std.mem.trimEnd(u8, b.buffered(), " "));
-}
-
-pub fn request(w: *Writer, threads: u32, memory_mib: u64) !void {
-    try w.print("{d:>2} {s:<7}   ", .{ threads, if (threads == 1) "thread" else "threads" });
-    try units.right(w, size_width, units.size, .{@as(f64, @floatFromInt(memory_mib))});
 }
 
 // --- Sinks ---
@@ -625,6 +878,9 @@ pub const Sink = struct {
     level: Level,
     terminal: bool,
     owned: bool = false,
+    /// Whether the column header was written; a quiet sink writes it
+    /// before its first row.
+    headed: bool = false,
     pending: std.ArrayList(u8) = .empty,
     last_flush_ns: i128 = 0,
 
@@ -648,8 +904,12 @@ pub const Log = struct {
     showing: [2]bool = .{ false, false },
     day: ?clock.Civil = null,
     footer_lines: usize = 0,
+    /// The columns each footer line took, to count the rows it takes after
+    /// the terminal was resized.
+    footer_widths: std.ArrayList(usize) = .empty,
     footer_ns: i128 = 0,
     footer_dirty: bool = true,
+    done: usize = 0,
 
     pub fn init(gpa: Allocator, zone: clock.Zone) Log {
         return .{ .gpa = gpa, .zone = zone, .detail = .init(gpa) };
@@ -661,6 +921,7 @@ pub const Log = struct {
             if (s.owned) sys.close(s.fd);
         };
         self.detail.deinit();
+        self.footer_widths.deinit(self.gpa);
     }
 
     pub fn terminal(self: *Log) ?*Sink {
@@ -686,16 +947,18 @@ pub const Log = struct {
         return out;
     }
 
-    pub fn emit(self: *Log, word: Word, who: Who) void {
+    pub fn emit(self: *Log, word: Word, who: Who, f: Figures) void {
         var t = self.now();
-        const detail = self.detail.written();
+        const note = self.detail.written();
         for (&self.sinks, 0..) |*slot, k| {
             self.showing[k] = false;
             const s = &(slot.* orelse continue);
             if (!s.shows(word)) continue;
             self.showing[k] = true;
             var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &s.pending);
-            line(&aw.writer, s.style, &t, word, who, detail) catch {};
+            if (!s.headed) columnHeader(&aw.writer, s.style) catch {};
+            s.headed = true;
+            line(&aw.writer, s.style, &t, self.done, word, who, f, note) catch {};
             s.pending = aw.toArrayList();
         }
         self.footer_dirty = true;
@@ -727,7 +990,13 @@ pub const Log = struct {
             const s = &(slot.* orelse continue);
             if (s.level == .quiet) continue;
             var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &s.pending);
-            header(&aw.writer, s.style, h) catch {};
+            var opened: std.Io.Writer.Allocating = .init(self.gpa);
+            defer opened.deinit();
+            header(&opened.writer, s.style, h) catch {};
+            opened.writer.writeAll("\n") catch {};
+            columnHeader(&opened.writer, s.style) catch {};
+            fitLines(&aw.writer, s.style, opened.written()) catch {};
+            s.headed = true;
             s.pending = aw.toArrayList();
         }
     }
@@ -743,7 +1012,7 @@ pub const Log = struct {
             const s = &(slot.* orelse continue);
             if (s.terminal or s.level == .quiet) continue;
             var aw: std.Io.Writer.Allocating = .fromArrayList(self.gpa, &s.pending);
-            heartbeat(&aw.writer, s.style, &t, p) catch {};
+            heartbeat(&aw.writer, s.style, &t, self.done, p) catch {};
             s.pending = aw.toArrayList();
         }
     }
@@ -782,7 +1051,9 @@ pub const Log = struct {
         var out: std.ArrayList(u8) = .empty;
         defer out.deinit(self.gpa);
         if (self.footer_lines > 0) {
-            if (self.footer_lines > 1) out.print(self.gpa, "\r\x1b[{d}A\x1b[J", .{self.footer_lines - 1}) catch {} else out.appendSlice(self.gpa, "\r\x1b[J") catch {};
+            var rows: usize = 0;
+            for (self.footer_widths.items) |n| rows += if (s.style.cols > 0) @max(1, (n + s.style.cols - 1) / s.style.cols) else 1;
+            if (rows > 1) out.print(self.gpa, "\r\x1b[{d}A\x1b[J", .{rows - 1}) catch {} else out.appendSlice(self.gpa, "\r\x1b[J") catch {};
             self.footer_lines = 0;
         }
         if (lines_due) {
@@ -792,6 +1063,9 @@ pub const Log = struct {
         }
         if (footer_text) |f| {
             out.appendSlice(self.gpa, f) catch {};
+            self.footer_widths.clearRetainingCapacity();
+            var it = std.mem.splitScalar(u8, f, '\n');
+            while (it.next()) |l| self.footer_widths.append(self.gpa, visible(l)) catch {};
             self.footer_lines = footer_lines;
             self.footer_ns = now_ns;
             self.footer_dirty = false;

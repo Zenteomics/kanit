@@ -250,8 +250,8 @@ new container-failures
   crule slow '[]' '["s.txt"]' '"sleep 30; touch s.txt"' "" 'timeout = "1s"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -k --grace 2 -q --json > s.json 2> err.txt
-check "a container above its memory request is killed as out of memory" 'grep -qE "failed +hog +(\S+ +)?out of memory at its" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
-check "a timed-out container is stopped" 'grep -qE "failed +slow +(\S+ +)?timed out at 1.0 s" err.txt'
+check "a container above its memory request is killed as out of memory" 'grep -qE "FAIL +(\S+ +)?hog .*  out of memory$" err.txt && jq -e ".cgroup.oom_kill >= 1" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "a timed-out container is stopped" 'grep -qE "FAIL +(\S+ +)?slow .*  timed out at 1.0 s$" err.txt'
 check "failed containers leave no container and no cgroup behind" '[ "$(leftovers)" = 0 ] && ! ls -d /sys/fs/cgroup$(jq -r "select(.event == \"launch_started\") | .cgroup" "$(last_launch)/events.jsonl" | sed "s|^/sys/fs/cgroup||")/task-* 2> /dev/null'
 
 new container-interrupt
@@ -291,6 +291,14 @@ new container-version
 "$kanit" run wf.toml "${iso[@]}" -q --json > s.json
 l=".workz/launches/$(jq -r .launch s.json)"
 check "a version command runs once per image in the image, and the record names the image ID" 'jq -e ".v == 1 and (.commands | length) == 1 and (.commands[0].output | startswith(\"sort (GNU coreutils)\")) and .commands[0].image == \"$(jq -r .image "$l/attempts/c1/001/record.json")\"" "$l/versions.json" > /dev/null'
+
+new container-version-reuse
+{ header container-version-reuse; crule c1 '[]' '["c1.txt"]' '"touch c1.txt"' "$img" 'version = "date +%s%N"'; } > wf.toml
+"$kanit" run wf.toml "${iso[@]}" -q --json > s1.json
+"$kanit" run wf.toml "${iso[@]}" -q --json > s2.json
+v1=".workz/launches/$(jq -r .launch s1.json)/versions.json"
+v2=".workz/launches/$(jq -r .launch s2.json)/versions.json"
+check "a launch takes a container version an earlier launch recorded for the same image ID and command, without starting the container" '[ "$(jq -r ".commands[0].status" "$v2")" = completed ] && [ "$(jq -r ".commands[0].output" "$v1")" = "$(jq -r ".commands[0].output" "$v2")" ] && [ -n "$(jq -r ".commands[0].output" "$v1")" ]'
 else skip "container rules (needs rootless Podman with $img)"; fi
 fi
 
@@ -383,7 +391,7 @@ new service-failures
 timeout 60 "$kanit" run wf.toml "${iso[@]}" -k -q --json > s.json 2> err.txt
 rc=$?
 reason() { jq -r "select(.event == \"task_failed\") | select(.rule == \"$1\") | .reason" "$(last_launch)/events.jsonl"; }
-check "a service that fails before it is ready fails its rules, also one admitted later, with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ] && [ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ] && grep -qE "failed +b1 +(\S+ +)?shared input broken could not be loaded" err.txt && grep -qE "failed +b2 +(\S+ +)?shared input broken could not be loaded" err.txt'
+check "a service that fails before it is ready fails its rules, also one admitted later, with the service's last line" '[ $rc = 1 ] && [ "$(reason b1)" = "shared input broken could not be loaded: exited with status 3 before it was ready: cannot load" ] && [ "$(reason b2)" = "$(reason b1)" ] && [ "$(status_of s.json completed)" = 1 ] && grep -qE "FAIL +(\S+ +)?b1 .*shared input broken could not be loaded" err.txt && grep -qE "FAIL +(\S+ +)?b2 .*shared input broken could not be loaded" err.txt'
 check "a service above its memory is reported as out of memory, and failed services leave nothing behind" 'reason f1 | grep -q "^shared input fat could not be loaded: out of memory" && [ "$(leftovers)" = 0 ] && no_cgroups'
 
 new service-dies
@@ -442,6 +450,8 @@ wait $engine 2> /dev/null
 run_cg=$(jq -r 'select(.event == "launch_started") | .cgroup' "$(last_launch)/events.jsonl")
 wait_until 50 '[ ! -d "$run_cg" ]'
 check "a killed engine's service and container rules end with it" '[ ! -d "$run_cg" ]'
+"$kanit" clean -d . > clean.txt
+check "clean removes the containers a killed engine left recorded" '[ "$(leftovers)" = 0 ] && grep -q "removed 2 containers and " clean.txt'
 else skip "shared services (needs rootless Podman with $img)"; fi
 fi
 
@@ -456,7 +466,7 @@ new failure
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" --max-threads 1 -q --json > s1.json 2> err1.txt
 rc=$?
-check "a failure stops the run with status 1, names the exit status and keeps stderr" '[ $rc = 1 ] && [ "$(status_of s1.json failed)" = 1 ] && [ "$(status_of s1.json blocked)" = 1 ] && grep -qE "failed +bad +exit 3 after" err1.txt && grep -q boom "$(last_launch)/attempts/bad/001/stderr.log"'
+check "a failure stops the run with status 1, names the exit status under the column header even with -q, and keeps stderr" '[ $rc = 1 ] && [ "$(status_of s1.json failed)" = 1 ] && [ "$(status_of s1.json blocked)" = 1 ] && head -1 err1.txt | grep -q "^TIME  " && grep -qE "FAIL +bad .*  exit 3$" err1.txt && grep -q boom "$(last_launch)/attempts/bad/001/stderr.log"'
 check "the summary lists each failed and blocked rule with its reason" 'jq -e "[.failures[] | [.rule, .status, .reason]] == [[\"bad\", \"failed\", \"exited with status 3: boom\"], [\"child\", \"blocked\", \"it needs a rule that did not complete\"]] and (.failures[0].stderr | endswith(\"/attempts/bad/001/stderr.log\"))" s1.json > /dev/null'
 "$kanit" run wf.toml "${iso[@]}" -k -q --json > s2.json
 check "--keep-going completes independent rules" '[ "$(status_of s2.json completed)" = 1 ] && [ -f slow.txt ]'
@@ -467,7 +477,7 @@ new outputs
   rule link '[]' '["s.txt"]' '"ln -s wf.toml s.txt"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -k -q --json > s.json 2> err.txt
-check "exit 0 without a declared output, or with one written as a symlink, fails the attempt" 'grep -qE "failed +quiet +exited 0 without output never.txt" err.txt && jq -r ".failures[].reason" s.json | grep -q "^exited 0, but its output s.txt is not a regular file$"'
+check "exit 0 without a declared output, or with one written as a symlink, fails the attempt" 'grep -qE "FAIL +quiet .*  exited 0 without output never.txt$" err.txt && jq -r ".failures[].reason" s.json | grep -q "^exited 0, but its output s.txt is not a regular file$"'
 
 new diagnostics
 echo not-for-the-records > ../diagnostics-secret
@@ -477,7 +487,7 @@ echo not-for-the-records > ../diagnostics-secret
 "$kanit" run wf.toml "${iso[@]}" -q --json > s.json 2> err.txt
 "$kanit" logs align > logs.txt
 d="$(last_launch)/attempts/align/001"
-check "a failed rule keeps the tail of its diagnostics, quoted when stderr is empty, and logs shows them" 'grep -qE "failed +\S+ +exit 4 after" err.txt && grep -qE "^ +[|│] FATAL ERROR: genome too large" err.txt && [ "$(jq -c .diagnostics "$d/record.json")" = "[\"a/s1/Log.out\"]" ] && grep -q loaded "$d/diagnostics/a/s1/Log.out" && jq -e ".failures[0].diagnostics == [\"$PWD/$d/diagnostics/a/s1/Log.out\"]" s.json > /dev/null && grep -qE "^diagnostics a/s1/Log.out  align  attempt 1  failed, exit 4  " logs.txt'
+check "a failed rule keeps the tail of its diagnostics, quoted when stderr is empty, and logs shows them" 'grep -qE "FAIL +\S+ .*  exit 4$" err.txt && grep -qE "^ +[|│] FATAL ERROR: genome too large" err.txt && [ "$(jq -c .diagnostics "$d/record.json")" = "[\"a/s1/Log.out\"]" ] && grep -q loaded "$d/diagnostics/a/s1/Log.out" && jq -e ".failures[0].diagnostics == [\"$PWD/$d/diagnostics/a/s1/Log.out\"]" s.json > /dev/null && grep -qE "^diagnostics a/s1/Log.out  align  attempt 1  failed, exit 4  " logs.txt'
 check "diagnostics never copy a file from outside the working directory" '! grep -rq not-for-the-records "$d"'
 
 new versions
@@ -488,9 +498,14 @@ new versions
   rule t '[]' '["t.txt"]' '"touch t.txt"' $'tool = "t"\nversion = "no_such_tool_xyz --version"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -q --json > s1.json
-"$kanit" run wf.toml "${iso[@]}" -q --rerun-rule join --json > s2.json
+"$kanit" run wf.toml "${iso[@]}" --rerun-rule join --json > s2.json 2> err2.txt
 v1=".workz/launches/$(jq -r .launch s1.json)/versions.json"
-check "a version command runs once per launch, a failing one records no version, and none runs for reused rules" '[ "$(jq -c "[.commands[] | select(.status != \"failed\") | .output]" "$v1")" = "[\"upper 1.4.2\"]" ] && jq -e "[.commands[] | select(.status == \"failed\") | .exit_code] == [127]" "$v1" > /dev/null && [ ! -e "$(last_launch)/versions.json" ]'
+check "a version command runs once per launch before the first rule, also for reused rules, a failing one records no version, and the header names each step's tool and version" '[ "$(jq -c "[.commands[] | select(.status != \"failed\") | .output]" "$v1")" = "[\"upper 1.4.2\"]" ] && jq -e "[.commands[] | select(.status == \"failed\") | .exit_code] == [127]" "$v1" > /dev/null && cmp -s "$v1" "$(last_launch)/versions.json" && grep -qE "^ +upper +1\.4\.2 +up +2$" err2.txt && grep -qE "^ +t +failed +t +1$" err2.txt && ! grep -qE "^[0-9:]{8} .* tool " err2.txt'
+
+new versions-slow
+{ header versions-slow; rule v '[]' '["v.txt"]' '"touch v.txt"' $'tool = "slowtool"\nversion = "sleep 7; echo slowtool 3.1"'; } > wf.toml
+"$kanit" run wf.toml --no-isolation > out.txt 2> err.txt
+check "a version command slower than the start wait shows measuring in the header, runs beside the rules, and the summary names its version" 'grep -qE "^ +slowtool +measuring +v +1$" err.txt && grep -qE "^ +tools +slowtool 3\.1$" out.txt && jq -e "[.commands[].status] == [\"completed\"]" "$(last_launch)/versions.json" > /dev/null'
 
 new prepare
 mkdir reads && echo one > reads/a.txt && echo two > reads/b.txt
@@ -541,7 +556,7 @@ touch logs
 mkdir ro && touch ro/m.txt && chmod 555 ro
 "$kanit" run wf.toml "${iso[@]}" -k -q --json > s.json 2> err.txt
 chmod 755 ro
-check "a log that cannot be written or an output that cannot be moved aside fails its rule, which keeps its record, and the launch goes on" '[ "$(jq -r .reason "$(last_launch)/attempts/logged/001/record.json")" = "cannot write its log or benchmark file: a part of the path is not a directory" ] && grep -qE "failed +moved +cannot move its earlier output ro/m.txt into previous/: permission denied, or a read-only file system" err.txt && [ "$(status_of s.json failed)" = 2 ] && [ "$(status_of s.json completed)" = 1 ] && jq -e ".error == null" s.json > /dev/null'
+check "a log that cannot be written or an output that cannot be moved aside fails its rule, which keeps its record, and the launch goes on" '[ "$(jq -r .reason "$(last_launch)/attempts/logged/001/record.json")" = "cannot write its log or benchmark file: a part of the path is not a directory" ] && grep -qE "FAIL +moved +cannot move its earlier output ro/m.txt into previous/: permission denied, or a read-only file system" err.txt && [ "$(status_of s.json failed)" = 2 ] && [ "$(status_of s.json completed)" = 1 ] && jq -e ".error == null" s.json > /dev/null'
 
 new failed-rerun
 { header failed-rerun; rule r '[]' '["out.txt"]' '"echo A > out.txt"'; } > wf.toml
@@ -636,7 +651,7 @@ new timeout
 start=$(date +%s)
 "$kanit" run wf.toml "${iso[@]}" -k --grace 2 -q --json > s.json 2> err.txt
 took=$(( $(date +%s) - start ))
-check "timeouts end both tasks, one ignoring SIGTERM, after the grace period ($took s)" '[ "$(status_of s.json failed)" = 2 ] && [ $took -le 20 ] && grep -qE "failed +\S+ +timed out at 1.0 s" err.txt'
+check "timeouts end both tasks, one ignoring SIGTERM, after the grace period ($took s)" '[ "$(status_of s.json failed)" = 2 ] && [ $took -le 20 ] && grep -qE "FAIL +\S+ .*  timed out at 1.0 s$" err.txt'
 { header timeout; rule quick '[]' '["q.txt"]' '"touch q.txt"' 'timeout = "18446744073709551615"'; } > far.toml
 "$kanit" run far.toml "${iso[@]}" --grace 18446744073709551615 -q --json > f.json 2> f.err
 check "the largest timeout and grace end a launch with its summary" '[ "$(status_of f.json completed)" = 1 ] && [ ! -s f.err ]'
@@ -647,7 +662,7 @@ printf '%s\n' "trap 'sleep 1; echo tidied > \"\$1\"; exit 0' TERM" 'while :; do 
 "$kanit" run wf.toml "${iso[@]}" --grace 5 -q --json > s.json 2> err.txt
 { header grace-children; rule tidy '[]' '["t.txt"]' '"bash tool.sh bare.txt; touch t.txt"' 'timeout = "1s"'; } > bare.toml
 "$kanit" run bare.toml --no-isolation --grace 5 -q --json > b.json 2> /dev/null
-check "a stopped rule's tool gets the grace period after its shell exits, with and without isolation" '[ "$(status_of s.json failed)" = 1 ] && grep -qE "failed +\S+ +timed out at 1.0 s" err.txt && [ "$(cat tidied.txt 2>/dev/null)" = tidied ] && [ "$(status_of b.json failed)" = 1 ] && [ "$(cat bare.txt 2>/dev/null)" = tidied ]'
+check "a stopped rule's tool gets the grace period after its shell exits, with and without isolation" '[ "$(status_of s.json failed)" = 1 ] && grep -qE "FAIL +\S+ .*  timed out at 1.0 s$" err.txt && [ "$(cat tidied.txt 2>/dev/null)" = tidied ] && [ "$(status_of b.json failed)" = 1 ] && [ "$(cat bare.txt 2>/dev/null)" = tidied ]'
 
 new escaped
 { header escaped
@@ -661,7 +676,7 @@ check "a process that leaves the task's session is ended with its cgroup" '[ -n 
 new oom
 { header oom; rule hog '[]' '["h.txt"]' '"dd if=/dev/zero of=/dev/null bs=300M count=1 2> /dev/null; touch h.txt"'; } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -q --json > s.json 2> err.txt
-check "a task above its memory request is OOM-killed as a whole, shell included, and reported" 'grep -qE "failed +hog +out of memory at its 64 MiB" err.txt && jq -e ".cgroup.oom_kill >= 1 and .signal == 9 and .exit_code == null" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
+check "a task above its memory request is OOM-killed as a whole, shell included, and reported" 'grep -qE "FAIL +hog .* / +64 MiB .*  out of memory$" err.txt && jq -e ".cgroup.oom_kill >= 1 and .signal == 9 and .exit_code == null" "$(last_launch)/attempts/hog/001/record.json" > /dev/null'
 { header oom; rule swap '[]' '["s.txt"]' '"cg=$(sed -n \"s/^0:://p\" /proc/self/cgroup); cat /sys/fs/cgroup${cg%/*}/memory.swap.max > s.txt"'; } > swap.toml
 "$kanit" run swap.toml "${iso[@]}" -q --json > swap.json
 check "the run's scope allows tasks no swap" '[ "$(cat s.txt)" = 0 ]'
@@ -781,10 +796,10 @@ wait $engine
 check "a cancel sent while the launch starts is applied" '[ ! -e s.txt ] && [ "$(jq -r .status s.json)" = interrupted ]'
 
 new control-ending
-{ header control-ending; rule v '[]' '["v.txt"]' '"touch v.txt"' 'version = "sleep 3; echo v1"'; } > wf.toml
+{ header control-ending; rule v '[]' '["v.txt"]' '"touch v.txt"' 'version = "sleep 8; echo v1"'; } > wf.toml
 "$kanit" run wf.toml --no-isolation -q --json > s.json 2> /dev/null &
 engine=$!
-wait_until 50 'jq -e "select(.event == \"launch_ending\")" .workz/launches/*/events.jsonl > /dev/null 2>&1'
+wait_until 150 'jq -e "select(.event == \"launch_ending\")" .workz/launches/*/events.jsonl > /dev/null 2>&1'
 "$kanit" control -d . cancel > c.out 2> c.err
 crc=$?
 echo "stop v" >> "$(last_launch)/control"
@@ -1157,7 +1172,7 @@ new run-milestones
   rule S2__align '["t2"]' '["a2"]' '"echo index missing >&2; exit 5"'
 } > wf.toml
 "$kanit" run wf.toml "${iso[@]}" -k --json > s.json 2> err.txt
-check "the run log names rules by step and sample, and says when each step and sample has ended" 'grep -qE "plan +4 rules in 2 steps for 2 samples$" err.txt && grep -qE "^[0-9:]{8}  completed +trim +S1 " err.txt && grep -qE "step +trim +2 of 2 completed" err.txt && grep -qE "sample +S1 +all 2 steps completed" err.txt && grep -qE "failed +align +S2 +exit 5 after" err.txt && grep -qE "^ +[|│] index missing$" err.txt && grep -qE "kanit logs align/S2" err.txt && grep -qE "step +align +1 of 2 completed, 1 failed" err.txt && grep -qE "sample +S2 +1 of 2 steps completed, 1 failed" err.txt'
+check "the run log names rules by step and sample in rows of the table, and every line is a row or a failure's detail" 'grep -qE "plan +4 rules: 2 steps for 2 samples$" err.txt && grep -qE "^[0-9:]{8} +[0-9]+/4  DONE +trim +S1 " err.txt && grep -qE "FAIL +align +S2 .*  exit 5$" err.txt && grep -qE "^ +[|│] index missing$" err.txt && grep -qE "kanit logs align/S2" err.txt && ! sed -n "/^TIME /,\$p" err.txt | grep -vqE "^(TIME |[0-9:]{8} +[0-9]+/4  (START|DONE|FAIL|INFO|WARN) |  +([|│] |kanit logs ))"'
 
 new run-lines
 { header run-lines
@@ -1167,7 +1182,7 @@ new run-lines
 "$kanit" run wf.toml "${iso[@]}" -k --json > s.json 2> err.txt
 first_log="$(last_launch)/launch.log"
 "$kanit" run wf.toml "${iso[@]}" -k --json > s2.json 2> err2.txt
-check "run opens with its launch, plan, budget and records, and launch.log under .workz/latest keeps the same lines and the summary" '[ "$(sed -n 1p err.txt | cut -d" " -f1)" = kanit ] && grep -qE "^ +plan +2 rules$" err.txt && grep -qE "^ +budget +4 threads, 2.0 GiB, 4 jobs, (isolated|no isolation)$" err.txt && grep -qE "^ +records +\.workz/latest/ +log launch.log +page report.html$" err.txt && grep -qE "^[0-9]{2}:[0-9]{2}:[0-9]{2}  failed +bad +exit 4 after" err.txt && head -n "$(wc -l < err.txt)" "$first_log" | cmp -s - err.txt && grep -qE "^ +failed +1 of 2 rules done in .*: 1 completed, 1 failed$" "$first_log" && [ "$(readlink .workz/latest)" = "launches/$(basename "$(last_launch)")" ] && head -n "$(wc -l < err2.txt)" .workz/latest/launch.log | cmp -s - err2.txt && [ -s "$(last_launch)/report.html" ]'
+check "run opens with its launch, plan, budget and records, and launch.log under .workz/latest keeps the same lines and the summary" '[ "$(sed -n 1p err.txt | cut -d" " -f1)" = kanit ] && grep -qE "^ +plan +2 rules$" err.txt && grep -qE "^ +budget +4 threads, 2.0 GiB, 4 jobs, (isolated|no isolation)$" err.txt && grep -qE "^ +records +\.workz/latest/ +log launch.log +page report.html$" err.txt && grep -qE "^[0-9]{2}:[0-9]{2}:[0-9]{2} +[0-9]+/2  FAIL +bad .*  exit 4$" err.txt && head -n "$(wc -l < err.txt)" "$first_log" | cmp -s - err.txt && grep -qE "^ +failed +1 of 2 rules done in [^:]*: 1 failed$" "$first_log" && [ "$(readlink .workz/latest)" = "launches/$(basename "$(last_launch)")" ] && head -n "$(wc -l < err2.txt)" .workz/latest/launch.log | cmp -s - err2.txt && [ -s "$(last_launch)/report.html" ]'
 "$kanit" run wf.toml "${iso[@]}" -k -q > text.txt 2> /dev/null
 "$kanit" status -d . > status.txt
 "$kanit" status -d . --json > status.json
@@ -1257,12 +1272,24 @@ new run-tty
 } > wf.toml
 sess=r1; start -s "$sess" -x 120 -y 20 "NO_COLOR=1 \"$kanit\" run wf.toml ${iso[*]} -k; echo \$? > exit.txt; sleep 30"
 wait_until 100 '[ -s exit.txt ]'
-check "on a terminal run prints a failure's last error lines, the blocked rules, no footer and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -qE "failed +bad +exit 3 after" && screen | grep -qE "^ +[|│] last-error-line" && screen | grep -qE "blocked +after +after bad failed" && ! screen | grep -qE " of 3 rules   " && screen | grep -qE "^ +failed +1 of 3 rules done in .*: 1 completed, 1 failed, 1 blocked$" && screen | grep -qE "^ +next +kanit logs bad " && ! screen | grep -q "{"'
+check "on a terminal run prints a failure's last error lines, the blocked rules, no footer and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -qE "FAIL +bad .*  exit 3$" && screen | grep -qE "^ +[|│] last-error-line" && screen | grep -qE "blocked +after +after bad failed" && ! screen | grep -qE " of 3 rules   " && screen | grep -qE "^ +failed +1 of 3 rules done in [^:]*: 1 failed, 1 blocked$" && screen | grep -qE "^ +next +kanit logs bad " && ! screen | grep -q "{"'
 rm -f exit.txt
 sess=r3; start -s "$sess" -x 400 -y 20 "\"$kanit\" run wf.toml ${iso[*]} -k --json --no-color; echo \$? > exit.txt; sleep 30"
 wait_until 100 '[ -s exit.txt ]'
 esc=$(printf '\033')
 check "run --json --no-color prints the JSON summary without colors on a terminal" '[ "$(cat exit.txt)" = 1 ] && screen | grep -q "\"status\":\"failed\"" && ! tm capture-pane -e -p -t "$sess" | grep -qF "$esc"'
+
+new run-footer
+{ header run-footer
+  rule S1__trim '[]' '["t1"]' '"touch t1"'
+  rule S2__trim '[]' '["t2"]' '"touch t2"'
+  rule S1__align '["t1"]' '["a1"]' '"touch a1"'
+  rule S2__align '["t2"]' '["a2"]' '"sleep 4; touch a2"'
+} > wf.toml
+sess=r4; start -s "$sess" -x 120 -y 20 "NO_COLOR=1 \"$kanit\" run wf.toml ${iso[*]}; echo \$? > exit.txt; sleep 30"
+wait_until 60 'screen | grep -qE "^ +3 of 4 rules   1 running"'
+check "on a terminal the footer is a table of the steps with their counts, then the counts and the running rule" 'screen | grep -qE "^ +trim +[#━]+ +2/2  [+✓]$" && screen | grep -qE "^ +align +[#━]+[-─]+ +1/2  1 running$" && screen | grep -qE "^ +3 of 4 rules   1 running   .*align/S2 "'
+wait_until 100 '[ -s exit.txt ]'
 
 tm kill-server 2> /dev/null
 rm -f "${TMUX_TMPDIR:-/tmp}/tmux-$(id -u)/workz-check-$$"
