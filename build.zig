@@ -4,7 +4,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    // Shipped builds (ReleaseSafe) are stripped; -Dstrip=false keeps symbols for profiling.
     const strip = b.option(bool, "strip", "Strip debug information") orelse (optimize != .Debug);
 
     const toml = b.dependency("z_toml", .{ .target = target, .optimize = optimize }).module("toml");
@@ -27,7 +26,6 @@ pub fn build(b: *std.Build) void {
     });
     exe.root_module.addImport("workz", workz);
     b.installArtifact(exe);
-    // The licence, and the notice of z-toml, which the binary links, ship with it.
     b.installFile("LICENSE", "share/doc/kanit/LICENSE");
     b.installFile("THIRD_PARTY.md", "share/doc/kanit/THIRD_PARTY.md");
 

@@ -10,8 +10,6 @@ _kanit() {
         COMPREPLY=($(compgen -W "$commands" -- "$cur"))
         return
     fi
-    # The workflow file and working directory named so far, and the other
-    # words, without the values of options.
     words=()
     for ((i = 2; i < COMP_CWORD; i++)); do
         case ${COMP_WORDS[i]} in
@@ -19,7 +17,6 @@ _kanit() {
             -t | --target | --rerun-rule | --pass-env | -j | --jobs | --max-threads | --max-memory | -r | --retry | \
                 --timeout | --grace | --input-manifest | --slice | --launch | --attempt | --format | -o | --output | --params | \
                 --compare | --keep | --interval | --threads | --layer | --by | --focus | --why | --users) ((i++)) ;;
-            # As typed: a backslash or quotes may hold a space in the name.
             *.toml | *.toml\" | *.toml\') wf=${COMP_WORDS[i]//\\/}; wf=${wf#[\"\']}; wf=${wf%[\"\']} ;;
             -*) ;;
             *) words+=("${COMP_WORDS[i]}") ;;
@@ -33,7 +30,6 @@ _kanit() {
             COMPREPLY=($(compgen -W "$(kanit __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
             return ;;
         --pass-env) COMPREPLY=($(compgen -e -- "$cur")); return ;;
-        # Numbers, sizes, durations and names: nothing to offer, and never files.
         -j | --jobs | --max-threads | --max-memory | -r | --retry | --timeout | --grace | --slice | --attempt | \
             --keep | --interval | --threads | --why | --users)
             COMPREPLY=(); return ;;
@@ -80,8 +76,6 @@ _kanit() {
     elif [ "$cmd" = control ]; then
         COMPREPLY=()
     elif { [ "$cmd" = explain ] || [ "$cmd" = logs ]; } && [ ${#words[@]} = 0 ]; then
-        # The rule, of the workflow named or of workflow.toml; a workflow
-        # file may come first.
         COMPREPLY=($(compgen -W "$(kanit __rules ${wf:+"$wf"} 2> /dev/null)" -- "$cur"))
         if [ -z "$wf" ]; then
             compopt -o filenames 2> /dev/null

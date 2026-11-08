@@ -22,22 +22,14 @@ const sys = @import("sys.zig");
 const Allocator = std.mem.Allocator;
 
 pub const event_version = 1;
-/// Version of the JSON records of a launch: `launch.json`, `request.json`,
-/// `record.json`, `versions.json` and `summary.json`. A reader refuses a
-/// newer one; one without `v` is from before the field and reads as 1.
 pub const record_version = 1;
 
-/// The largest launch record a reader takes. `summary.json` lists every
-/// rule that failed, was blocked or was cancelled, about 150 bytes each, so
-/// an interrupted launch of a million rules still fits.
 pub const launch_record_max: usize = 256 << 20;
 
 pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
     return std.fs.path.join(a, &.{ root, ".workz" });
 }
 
-/// Makes the records directory `records`, readable by its owner alone: it
-/// holds every attempt's output and the environment values passed to rules.
 pub fn makeRecordsDir(gpa: Allocator, records: []const u8) !void {
     try sys.mkdirAll(gpa, records);
     const p = try sys.z(gpa, records);
@@ -45,16 +37,12 @@ pub fn makeRecordsDir(gpa: Allocator, records: []const u8) !void {
     _ = try sys.check(linux.fchmodat(linux.AT.FDCWD, p, 0o700));
 }
 
-/// Where an attempt keeps its copies of the diagnostics files the rule
-/// wrote as `written`.
 pub fn diagnosticPaths(a: Allocator, dir: []const u8, written: []const []const u8) ![]const []const u8 {
     const out = try a.alloc([]const u8, written.len);
     for (written, out) |w, *o| o.* = try std.fs.path.join(a, &.{ dir, "diagnostics", w });
     return out;
 }
 
-/// The diagnostics an ended attempt kept, as its `record.json` lists them;
-/// none when it has no record yet.
 pub fn keptDiagnostics(gpa: Allocator, a: Allocator, dir: []const u8) ![]const []const u8 {
     const path = try std.fs.path.join(a, &.{ dir, "record.json" });
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else &.{};
@@ -68,7 +56,6 @@ pub fn keptDiagnostics(gpa: Allocator, a: Allocator, dir: []const u8) ![]const [
     return diagnosticPaths(a, dir, written.items);
 }
 
-/// Takes the run lock; error.Busy when another run holds it.
 pub fn lock(gpa: Allocator, records: []const u8) !sys.Fd {
     const p = try std.fs.path.join(gpa, &.{ records, "lock" });
     defer gpa.free(p);
@@ -76,8 +63,6 @@ pub fn lock(gpa: Allocator, records: []const u8) !sys.Fd {
     errdefer sys.close(fd);
     const LOCK_EX = 2;
     const LOCK_NB = 4;
-    // `running` probes take the lock shared for an instant; a launch holds
-    // it for its whole life. A short retry tells the two apart.
     var tries: u32 = 0;
     while (true) : (tries += 1) {
         _ = sys.check(linux.flock(fd, LOCK_EX | LOCK_NB)) catch |err| switch (err) {
@@ -93,8 +78,6 @@ pub fn lock(gpa: Allocator, records: []const u8) !sys.Fd {
     }
 }
 
-/// Whether a run holds the run lock now. It only tests the lock: a shared
-/// lock that is free is let go at once.
 pub fn running(gpa: Allocator, records: []const u8) bool {
     const p = std.fs.path.join(gpa, &.{ records, "lock" }) catch return false;
     defer gpa.free(p);
@@ -105,13 +88,11 @@ pub fn running(gpa: Allocator, records: []const u8) bool {
     return linux.errno(linux.flock(fd, LOCK_SH | LOCK_NB)) == .AGAIN;
 }
 
-/// A new launch directory named by UTC time and a random suffix.
 pub fn newLaunch(gpa: Allocator, a: Allocator, records: []const u8) !struct { id: []const u8, dir: []const u8 } {
     var tbuf: [32]u8 = undefined;
     var tw = std.Io.Writer.fixed(&tbuf);
     try sys.formatTime(&tw, sys.realNs());
     const t = tw.buffered();
-    // 2026-10-23T11:51:02.123Z -> 20261023T115102.123, which sorts by time.
     const compact = try std.fmt.allocPrint(a, "{s}{s}{s}T{s}{s}{s}.{s}", .{ t[0..4], t[5..7], t[8..10], t[11..13], t[14..16], t[17..19], t[20..23] });
     var rnd: [4]u8 = undefined;
     sys.randomBytes(&rnd);
@@ -121,21 +102,16 @@ pub fn newLaunch(gpa: Allocator, a: Allocator, records: []const u8) !struct { id
     return .{ .id = id, .dir = dir };
 }
 
-/// The launch IDs under `records`, oldest first: an ID begins with its
-/// start time, so the names sort by time.
 pub fn launchNames(gpa: Allocator, a: Allocator, records: []const u8) ![]const []const u8 {
     return (try sys.dirNames(gpa, a, try std.fs.path.join(a, &.{ records, "launches" }))) orelse &.{};
 }
 
-/// The newest launch directory, or null when there is none.
 pub fn latestLaunch(gpa: Allocator, a: Allocator, records: []const u8) !?[]const u8 {
     const names = try launchNames(gpa, a, records);
     if (names.len == 0) return null;
     return try std.fs.path.join(a, &.{ records, "launches", names[names.len - 1] });
 }
 
-/// The attempt directories of a rule's directory `rule_dir`, oldest first:
-/// sorted by number, so attempt 1000 follows 999. Null when there is none.
 pub fn attemptNames(gpa: Allocator, a: Allocator, rule_dir: []const u8) !?[]const []const u8 {
     const names = try a.dupe([]const u8, (try sys.dirNames(gpa, a, rule_dir)) orelse return null);
     std.mem.sort([]const u8, names, {}, struct {
@@ -148,13 +124,8 @@ pub fn attemptNames(gpa: Allocator, a: Allocator, rule_dir: []const u8) !?[]cons
     return names;
 }
 
-/// An attempt a killed launch left unfinished: its `previous/` may hold the
-/// only copy of the rule's earlier outputs until the next launch moves them
-/// back.
 pub const Pending = struct { rule: []const u8, launch: []const u8, dir: []const u8 };
 
-/// For each rule the journal shows dispatched and never finished, its newest
-/// attempt in the newest launch that ran it, other than `current`.
 pub fn pendingAttempts(gpa: Allocator, a: Allocator, records: []const u8, current: ?[]const u8) ![]const Pending {
     const open = try Journal.unfinished(gpa, a, records);
     if (open.len == 0) return &.{};
@@ -175,11 +146,6 @@ pub fn pendingAttempts(gpa: Allocator, a: Allocator, records: []const u8, curren
     return out.items;
 }
 
-/// Whether the launch in `launch_dir` (`<records>/launches/<id>`) can still
-/// change: it has no summary, an engine holds the working directory's lock,
-/// and it is the newest launch, the only one a held lock can belong to. A
-/// launch without a summary that is not active ended without recording its
-/// end, as when its engine was killed.
 pub fn launchActive(gpa: Allocator, launch_dir: []const u8) bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -191,8 +157,6 @@ pub fn launchActive(gpa: Allocator, launch_dir: []const u8) bool {
     return std.mem.eql(u8, std.fs.path.basename(latest), std.fs.path.basename(launch_dir));
 }
 
-/// Append-only JSON Lines event stream. Each line is one object with a
-/// format version, a UTC time and an event name.
 pub const Events = struct {
     gpa: Allocator,
     fd: sys.Fd,
@@ -223,7 +187,6 @@ pub const Events = struct {
     }
 };
 
-/// Writes `,"name":value` for each field of an anonymous struct.
 pub fn writeFields(w: *std.Io.Writer, fields: anytype) !void {
     inline for (@typeInfo(@TypeOf(fields)).@"struct".fields) |f| {
         try w.writeAll(",\"" ++ f.name ++ "\":");
@@ -231,13 +194,18 @@ pub fn writeFields(w: *std.Io.Writer, fields: anytype) !void {
     }
 }
 
-/// Writes a value as a JSON record file through a rename, so readers never
-/// see a partial file. Resume state uses `state.save`, which also fsyncs.
 pub fn writeJson(gpa: Allocator, path: []const u8, value: anytype) !void {
     var w: std.Io.Writer.Allocating = .init(gpa);
     defer w.deinit();
     try w.writer.print("{f}\n", .{std.json.fmt(value, .{ .whitespace = .indent_2 })});
     try sys.writeFileReplace(gpa, path, w.written());
+}
+
+pub fn writeJsonNew(gpa: Allocator, path: []const u8, value: anytype) !void {
+    var w: std.Io.Writer.Allocating = .init(gpa);
+    defer w.deinit();
+    try w.writer.print("{f}\n", .{std.json.fmt(value, .{ .whitespace = .indent_2 })});
+    try sys.writeFile(gpa, path, w.written());
 }
 
 pub fn timeText(a: Allocator, ns: i128) ![]const u8 {
@@ -246,9 +214,6 @@ pub fn timeText(a: Allocator, ns: i128) ![]const u8 {
     return w.toOwnedSlice();
 }
 
-/// Dispatch and done markers. A rule dispatched without a later done marker
-/// was interrupted before its result reached `state.json`; its entry is
-/// dropped on the next launch so the rule runs again.
 pub const Journal = struct {
     fd: sys.Fd,
 
@@ -268,7 +233,6 @@ pub const Journal = struct {
         try sys.writeAll(self.fd, line);
     }
 
-    /// Rules dispatched without a later done marker.
     pub fn unfinished(gpa: Allocator, a: Allocator, records: []const u8) ![]const []const u8 {
         const p = try std.fs.path.join(gpa, &.{ records, "journal" });
         defer gpa.free(p);
@@ -289,7 +253,6 @@ pub const Journal = struct {
         return open_rules.keys();
     }
 
-    /// Empties the journal after a final state save.
     pub fn reset(gpa: Allocator, records: []const u8) !void {
         const p = try std.fs.path.join(gpa, &.{ records, "journal" });
         defer gpa.free(p);

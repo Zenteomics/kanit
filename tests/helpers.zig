@@ -6,7 +6,6 @@ const workz = @import("workz");
 const workflow = workz.workflow;
 const sys = workz.sys;
 
-/// A temporary working directory under /var/tmp, removed file by file.
 pub const Scratch = struct {
     path: []u8,
     files: std.ArrayList([]u8) = .empty,
@@ -34,7 +33,6 @@ pub const Scratch = struct {
         return p;
     }
 
-    /// A symlink `name` pointing at `target`.
     pub fn link(self: *Scratch, name: []const u8, target: []const u8) !void {
         const linux = std.os.linux;
         const p = try std.fs.path.join(testing.allocator, &.{ self.path, name });
@@ -70,6 +68,11 @@ pub const Scratch = struct {
 pub fn loadText(s: *Scratch, text: []const u8, problem: *workflow.Problem) !workflow.Workflow {
     const p = try s.file("wf.toml", text);
     return workflow.load(testing.allocator, p, s.path, problem);
+}
+
+pub fn loadTextLines(s: *Scratch, text: []const u8, problem: *workflow.Problem) !workflow.Workflow {
+    const p = try s.file("wf.toml", text);
+    return workflow.loadWithLines(testing.allocator, p, s.path, problem);
 }
 
 pub fn expectInvalid(text: []const u8, needle: []const u8) !void {

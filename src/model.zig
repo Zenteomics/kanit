@@ -26,12 +26,10 @@ const eql = std.mem.eql;
 const get = fields.get;
 const num = fields.number;
 
-// ---- attempt records ----
+// --- Attempt records ---
 
-/// Time a ready attempt waited for one resource.
 pub const Wait = struct { reason: []const u8, seconds: f64 };
 
-/// Units of a resource group an attempt held while it ran.
 pub const GroupUse = struct { name: []const u8, count: f64 };
 
 pub const Attempt = struct {
@@ -43,52 +41,30 @@ pub const Attempt = struct {
     cpu_s: f64,
     threads: f64,
     request_mib: f64,
-    /// What admission reserved for it, a container's Podman client
-    /// included; records that do not say reserved `request_mib`.
     reserved_mib: ?f64 = null,
-    /// Units of resource groups it held.
     groups: []const GroupUse = &.{},
-    /// cgroup peak (includes page cache) and process peak RSS.
     peak_mib: ?f64,
     rss_mib: f64,
-    /// `rss_mib` is at most the engine's own resident memory when the
-    /// attempt started: a process started from the engine counts the
-    /// engine's memory, so only an upper bound of its own is known.
     rss_bound: bool = false,
-    /// The largest anonymous memory the cgroup was seen to hold while the
-    /// attempt ran, sampled; null without isolation or in older records.
     anon_mib: ?f64 = null,
     oom_kill: f64,
     limit_events: f64,
     waited_s: f64,
-    /// What it waited for longest, and every wait by reason.
     wait_reason: []const u8,
     waits: []const Wait = &.{},
-    /// The engine recorded the attempt's queue; older records lack it.
     queue_recorded: bool = false,
-    /// Share of wall time some task of the attempt stalled on each resource.
     cpu_stall: ?f64,
     memory_stall: ?f64,
     io_stall: ?f64,
-    /// The attempt mapped shared inputs, which count in its RSS but are
-    /// charged to their holders.
     uses_shared: bool,
-    /// The diagnostics files a failed attempt kept, as the rule wrote them.
     diagnostics: []const []const u8 = &.{},
-    /// Ran in a container: its process is the Podman client.
     in_container: bool = false,
-    /// Start time, nanoseconds since the epoch; 0 when not recorded.
     started_ns: i128 = 0,
-    /// What the rule is: its step, and its category, tool and sample when
-    /// known, as the workflow declared them or as derived from its name.
     step: []const u8 = "",
     category: ?[]const u8 = null,
     tool: ?[]const u8 = null,
     sample: ?[]const u8 = null,
-    /// Directory of the attempt's files.
     dir: []const u8 = "",
-    /// For a rule reused in a launch, the earlier launch whose attempt made
-    /// its outputs; null for an attempt of the launch itself.
     reused_from: ?[]const u8 = null,
 
     pub fn completed(self: Attempt) bool {
@@ -100,47 +76,31 @@ pub const Attempt = struct {
         return self.cpu_s / (self.wall_s * self.threads);
     }
 
-    /// The attempt ran for at least half a second but its own cgroup did
-    /// almost nothing: under a tenth of its CPU request and a twentieth of
-    /// its memory request. The command waited (a sleep, the network, a
-    /// lock) or handed the work to a process outside its cgroup, such as
-    /// another supervisor's; its counters size nothing either way.
     pub fn idle(self: Attempt) bool {
         if (self.wall_s < 0.5 or !self.completed()) return false;
         const memory = @max(self.peak_mib orelse 0, self.rss_mib);
         return self.cpuEfficiency() < 0.1 and memory < @max(self.request_mib * 0.05, 64);
     }
 
-    /// The memory a request must cover: the largest process RSS, or the
-    /// cgroup peak where the process size misses the work (mapped shared
-    /// inputs count in the RSS but are charged to their holders; in a
-    /// container the process is the Podman client). Page cache beyond it
-    /// is reclaimed under the limit, not counted. Processes running at once
-    /// can hold more than the largest of them: the sampled anonymous memory
-    /// is a lower bound, and the result is never below it.
     pub fn usedMib(self: Attempt) f64 {
         if (self.uses_shared or self.in_container) if (self.peak_mib) |p| return p;
         return @max(self.rss_mib, self.anon_mib orelse 0);
     }
 
-    /// Whether `usedMib` is the process figure and only an upper bound.
     pub fn usedIsBound(self: Attempt) bool {
         return self.rss_bound and !self.usedIsPeak();
     }
 
-    /// Whether `usedMib` comes from the cgroup's counters, not the process.
     pub fn usedIsPeak(self: Attempt) bool {
         if ((self.uses_shared or self.in_container) and self.peak_mib != null) return true;
         return (self.anon_mib orelse 0) > self.rss_mib;
     }
 };
 
-/// A string field, or "" when it is missing.
 fn str(v: Value, key: []const u8) []const u8 {
     return fields.str(v, key) orelse "";
 }
 
-/// The strings of array `v`; others and a missing array give none.
 fn stringsOf(a: Allocator, v: ?Value) ![]const []const u8 {
     const x = v orelse return &.{};
     if (x != .array) return &.{};
@@ -154,8 +114,6 @@ fn optStr(v: ?Value) ?[]const u8 {
     return if (x == .string and x.string.len > 0) x.string else null;
 }
 
-/// An attempt's labels as its record holds them; a record written before
-/// labels existed gets the labels derived from its rule name and image.
 fn labelsOf(v: Value) workflow.Labels {
     if (get(v, "labels")) |lv| if (lv == .object) if (optStr(get(lv, "step"))) |step| return .{
         .step = step,
@@ -174,16 +132,12 @@ fn stall(cg: ?Value, key: []const u8, wall: f64) ?f64 {
     return @min(us / 1e6 / wall, 1.0);
 }
 
-/// The median of `xs`, which must be sorted ascending; 0 when empty.
 pub fn median(xs: []const f64) f64 {
     if (xs.len == 0) return 0;
     const m = xs.len / 2;
     return if (xs.len % 2 == 1) xs[m] else (xs[m - 1] + xs[m]) / 2;
 }
 
-/// Reads every attempt record of a launch, in rule and attempt order:
-/// `attempts/<rule>/<NNN>/record.json`, attempts sorted by number. An attempt
-/// still running has no record yet.
 pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     const dir = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
     var out: std.ArrayList(Attempt) = .empty;
@@ -196,10 +150,6 @@ pub fn attempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, unreadable
     return out.items;
 }
 
-/// The attempt in record file `path`, or null when there is none yet or it
-/// cannot be read. The path of a record that exists but does not parse is
-/// added to `unreadable`, in `a`. The parsed record lives only while its
-/// fields are taken; the attempt's strings are copied into `a`.
 fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.ArrayList([]const u8)) !?Attempt {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
@@ -209,7 +159,6 @@ fn readRecord(gpa: Allocator, a: Allocator, path: []const u8, unreadable: ?*std.
     return try own(a, attempt);
 }
 
-/// A copy of `x` whose strings and lists are in `a`.
 fn own(a: Allocator, x: Attempt) !Attempt {
     var y = x;
     y.rule = try a.dupe(u8, x.rule);
@@ -234,16 +183,12 @@ fn own(a: Allocator, x: Attempt) !Attempt {
     return y;
 }
 
-/// The attempt in record text `bytes`, with its strings and lists in `t`;
-/// null when the text does not parse or is of a newer format, and then
-/// `path` is added to `unreadable`, in `a`.
 fn parseRecord(t: Allocator, a: Allocator, bytes: []const u8, path: []const u8, unreadable: ?*std.ArrayList([]const u8)) !?Attempt {
     const v = std.json.parseFromSliceLeaky(Value, t, bytes, .{}) catch |err| {
         if (err == error.OutOfMemory) return err;
         if (unreadable) |list| try list.append(a, path);
         return null;
     };
-    // A record of a newer format is left out rather than misread.
     if (fields.newer(v, records.record_version)) {
         if (unreadable) |list| try list.append(a, path);
         return null;
@@ -304,11 +249,6 @@ fn parseRecord(t: Allocator, a: Allocator, bytes: []const u8, path: []const u8, 
     };
 }
 
-/// For each rule in `names`, which a launch reused, the attempt that made
-/// the outputs it reused: the rule's last completed attempt in an earlier
-/// launch of the same working directory. Launch IDs begin with their start
-/// time, so earlier launches sort first. A rule whose earlier launch was
-/// cleaned up is left out.
 pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, names: []const []const u8, unreadable: ?*std.ArrayList([]const u8)) ![]Attempt {
     if (names.len == 0) return &.{};
     var wanted: std.StringArrayHashMapUnmanaged(void) = .empty;
@@ -318,19 +258,15 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
     const launches = try records.launchNames(gpa, a, std.fs.path.dirname(launches_dir) orelse return &.{});
 
     var out: std.ArrayList(Attempt) = .empty;
-    // Newest earlier launch first, so each rule takes its last completed attempt.
     var k = launches.len;
     while (k > 0 and wanted.count() > 0) {
         k -= 1;
         const launch = launches[k];
         if (!std.mem.lessThan(u8, launch, id)) continue;
-        // The rules that launch ran, listed once: probing every wanted rule
-        // in every earlier launch would cost rules times launches.
         const attempts_dir = try std.fs.path.join(a, &.{ launches_dir, launch, "attempts" });
         const ran = (try sys.dirNames(gpa, a, attempts_dir)) orelse continue;
         for (ran) |rule| {
             const i = wanted.getIndex(rule) orelse continue;
-            // The rule's last completed attempt in that launch, if any.
             const rule_dir = try std.fs.path.join(a, &.{ attempts_dir, rule });
             const numbers = (try records.attemptNames(gpa, a, rule_dir)) orelse &.{};
             var j = numbers.len;
@@ -350,24 +286,18 @@ pub fn reusedAttempts(gpa: Allocator, a: Allocator, launch_dir: []const u8, name
     return out.items;
 }
 
-// ---- the launch ----
+// --- The launch ---
 
-/// Where a selected rule stands.
 pub const State = enum {
-    /// Its producers have not finished.
     pending,
-    /// Ready, waiting for resources.
     waiting,
     running,
-    /// Asked to stop, still running.
     stopping,
     completed,
     reused,
     failed,
-    /// A producer did not complete.
     blocked,
     cancelled,
-    /// The launch ended before it was ready.
     not_run,
 
     pub fn active(s: State) bool {
@@ -380,31 +310,18 @@ pub const Rule = struct {
     labels: workflow.Labels,
     selected: bool,
     state: State = .not_run,
-    /// Attempts started in this launch.
     attempts: u32 = 0,
-    /// Its latest completed run: this launch's, or, for a rule reused here,
-    /// the earlier run whose outputs it reused.
     run: ?*const Attempt = null,
-    /// This launch's last attempt, whatever its result. Both point into the
-    /// launch's rows or the runs it reused.
     final: ?*const Attempt = null,
-    /// Index of its step in `Launch.steps`.
     step: usize = 0,
-    /// The current attempt's times while it runs, for the live page.
     started_ns: i128 = 0,
     reason: []const u8 = "",
 };
 
-/// How to size a step's request from its runs.
 pub const Sizing = struct {
     threads: f64 = 0,
     memory_mib: f64 = 0,
-    /// Why there is no plain suggestion: the runs were idle, or an
-    /// attempt was killed for exceeding its memory, so the suggestion is a
-    /// guess above the request it exceeded.
     note: enum { none, measured, idle, out_of_memory } = .none,
-    /// The runs kept nine tenths or more of the threads they requested busy
-    /// over their time: the request capped them, so what they would use is not known, and more threads may help.
     at_thread_limit: bool = false,
 };
 
@@ -412,47 +329,35 @@ pub const Step = struct {
     name: []const u8,
     category: ?[]const u8 = null,
     tool: ?[]const u8 = null,
-    /// Producers deep in the graph, and the first rule of the step in the
-    /// file: the pipeline order.
     depth: u32 = 0,
     first: usize = 0,
     rules: std.ArrayList(usize) = .empty,
-    /// Steps whose rules produce inputs of this step's rules.
     parents: std.ArrayList(usize) = .empty,
     samples: usize = 0,
-    /// Selected rules by state.
     states: [@typeInfo(State).@"enum".fields.len]u32 = @splat(0),
 
-    // The latest completed run of each rule.
     runs: usize = 0,
     reused: usize = 0,
-    /// Wall times, ascending, and their median.
     walls: std.ArrayList(f64) = .empty,
     median_s: f64 = 0,
     wall_s: f64 = 0,
     cpu_s: f64 = 0,
-    /// The most cores one run kept busy, and the threads requested.
     cores: f64 = 0,
     threads: f64 = 0,
     request_mib: f64 = 0,
-    /// The largest `Attempt.usedMib` and cgroup peak of the runs.
     used_mib: f64 = 0,
     used_is_peak: bool = false,
-    /// `used_mib` is a process figure that is only an upper bound.
     used_bound: bool = false,
     peak_mib: f64 = 0,
     idle: usize = 0,
     limit_events: f64 = 0,
-    /// Thread-seconds the runs reserved: wall time times threads.
     reserved_s: f64 = 0,
     stall_n: usize = 0,
     cpu_stall: f64 = 0,
     memory_stall: f64 = 0,
     io_stall: f64 = 0,
-    // This launch's attempts that did not complete.
     failed_attempts: usize = 0,
     oom_kills: f64 = 0,
-    /// The largest request an attempt exceeded when it was killed.
     oom_request_mib: f64 = 0,
     sizing: Sizing = .{},
 
@@ -464,20 +369,14 @@ pub const Step = struct {
         return self.rules.items.len;
     }
 
-    /// CPU use of the runs: their CPU time over the thread-seconds they
-    /// reserved, so a long run weighs more than a short one.
     pub fn efficiency(self: Step) f64 {
         return if (self.reserved_s > 0) self.cpu_s / self.reserved_s else 0;
     }
 
-    /// The runs add up to a second or more, enough to judge their CPU use.
     pub fn judged(self: Step) bool {
         return self.wall_s >= 1;
     }
 
-    /// What the step spent its time on, judged from its stall shares and CPU
-    /// use; "-" when there is too little to judge: runs under a second in
-    /// all, or no stall shares to tell waiting from work.
     pub fn character(self: Step) []const u8 {
         if (!self.judged()) return "-";
         const eff = self.efficiency();
@@ -489,56 +388,32 @@ pub const Step = struct {
             if (self.cpu_stall / n >= 0.3) return "CPU-starved";
         }
         if (eff >= 0.7) return "CPU-bound";
-        // Busy, but on fewer cores than it reserved: the program runs
-        // fewer threads than it was given.
         if (self.threads >= 2 and self.cores >= 0.7 and self.cores < self.threads * 0.6) return "runs fewer threads";
         if (!stalls) return "-";
         return if (eff < 0.3) "mostly idle" else "mixed";
     }
 
-    /// Most runs were idle.
     pub fn mostlyIdle(self: Step) bool {
         return self.runs > 0 and self.idle * 2 > self.runs;
     }
 };
 
-/// One rule on the critical path, with every attempt it made in this launch.
 pub const PathRow = struct {
     rule: usize,
-    /// Seconds from the launch start to its first attempt's start.
     start_s: f64,
-    /// Time its attempts waited once ready, and the time they ran.
     waited_s: f64,
     ran_s: f64,
-    /// Attempts before the final one.
     earlier: i64,
-    /// Time between the end of the rule before it on the path, or the
-    /// launch's start, and its becoming ready: it waited for producers off
-    /// the path.
     held_s: f64 = 0,
-    /// Time between its attempts that none of them waited or ran, as when
-    /// a stopped attempt was retried later.
     between_s: f64 = 0,
-    /// When its last attempt ended, seconds from the launch start.
     end_s: f64 = 0,
 };
 
-/// Launches shorter than this are not judged: starting the engine,
-/// checking inputs and recording attempts are then a large part of them,
-/// and a few milliseconds swing any share.
 pub const judge_s: f64 = 2;
 
-/// A lower bound on the elapsed time of the attempts a launch made: the
-/// longest chain of work, which no budget can shorten; the work one limit
-/// of the budget had to carry; the CPU time its rules used, over the
-/// threads; or the engine's own CPU time, as the engine works on one
-/// thread.
 pub const Bound = struct {
     kind: enum { chain, threads, cpu, memory, jobs, group, engine },
-    /// The group, for a group.
     name: []const u8 = "",
-    /// Thread-, CPU-, MiB-, job- or unit-seconds of work, and the limit
-    /// that carried it; both 0 for the chain and the engine.
     work: f64 = 0,
     limit: f64 = 0,
     seconds: f64,
@@ -546,13 +421,8 @@ pub const Bound = struct {
 
 pub const GroupAdvice = struct {
     name: []const u8,
-    /// Rule-seconds that ready rules waited for the group.
     seconds: f64,
-    /// Share of the run samples taken while some rule waited for the group
-    /// in which the free threads and memory had room for one of the waiting
-    /// rules; null without samples.
     fit: ?f64,
-    /// Those samples.
     samples: usize = 0,
 };
 
@@ -564,7 +434,6 @@ pub const SampleRow = struct {
     runs: usize = 0,
     wall_s: f64 = 0,
     cpu_s: f64 = 0,
-    /// Its longest run, and that run's step.
     slowest: ?usize = null,
 };
 
@@ -575,30 +444,20 @@ pub const Launch = struct {
     dir: []const u8,
     id: []const u8,
     workdir: []const u8 = "",
-    /// The working directory's base name, which names the launch.
     name: []const u8 = "launch",
-    /// "kanit X.Y.Z", without the executable's digest.
     engine: []const u8 = "",
-    /// The engine with its executable's digest, and the workflow file's
-    /// digest, as `launch.json` holds them; "" when not recorded.
     engine_id: []const u8 = "",
     workflow_sha256: []const u8 = "",
-    /// Record files that exist but do not parse, which were left out.
     unreadable: std.ArrayList([]const u8) = .empty,
-    /// The `--threads STEP=N` the launch ran with.
     thread_overrides: []const []const u8 = &.{},
     started_text: []const u8 = "",
     max_threads: f64 = 0,
     max_memory_mib: f64 = 0,
     max_jobs: f64 = 0,
-    /// "running" until `summary.json` exists, then its status.
     status: []const u8 = "running",
     finished: bool = false,
     @"error": ?[]const u8 = null,
-    /// Seconds since the launch started: from the summary when it ended,
-    /// else up to the newest event or now.
     elapsed_s: f64 = 0,
-    /// When the launch started its rules, nanoseconds since the epoch.
     t0_ns: i128 = 0,
     counts: Counts = .{},
     selected: usize = 0,
@@ -608,55 +467,37 @@ pub const Launch = struct {
     tracker: tracker.Tracker,
     wf: ?workflow.Workflow = null,
     g: ?graph.Graph = null,
-    /// Why the workflow snapshot gives no graph, when it does not.
+    borrowed: bool = false,
     snapshot_problem: ?[]const u8 = null,
 
-    /// This launch's attempts, in rule and attempt order.
     rows: []const Attempt = &.{},
-    /// Rules reused here whose earlier run is gone from the records.
     reused_unrecorded: usize = 0,
-    /// Every rule of the workflow, in file order; `selected` marks the
-    /// launch's.
     rules: []Rule = &.{},
-    /// Each rule's index in `rules`, by name.
     rule_index: std.StringHashMapUnmanaged(usize) = .empty,
-    /// Steps of the selected rules, in pipeline order.
     steps: []Step = &.{},
-    /// Distinct samples of the selected rules, in name order.
     samples: []const []const u8 = &.{},
-    /// Some selected rule declares a category.
     by_category: bool = false,
-    /// The critical path: the longest chain of work in this launch, its
-    /// work and the time its rules waited once ready.
     path: []const PathRow = &.{},
     path_ran_s: f64 = 0,
     path_waited_s: f64 = 0,
     path_held_s: f64 = 0,
     path_between_s: f64 = 0,
-    /// Seconds the launch spent on its checks before the first rule.
     path_checks_s: f64 = 0,
-    /// Seconds from the end of the path's last rule to the end of the
-    /// launch: rules off the path still ran. Checks, held, waited, ran,
-    /// between and after add up to the elapsed time.
     path_after_s: f64 = 0,
-    /// Lower bounds on the elapsed time, and the largest of them: what
-    /// limited the launch.
     bounds: []const Bound = &.{},
     binding: ?usize = null,
-    /// Rule-seconds that ready attempts waited, by reason, most first.
     waits: std.StringArrayHashMapUnmanaged(f64) = .empty,
-    /// Some attempt recorded its queue.
     waits_recorded: bool = false,
     groups: []const GroupAdvice = &.{},
 
     pub fn deinit(self: *Launch) void {
-        if (self.g) |*g| g.deinit();
-        if (self.wf) |*wf| wf.deinit();
+        if (!self.borrowed) {
+            if (self.g) |*g| g.deinit();
+            if (self.wf) |*wf| wf.deinit();
+        }
         self.tracker.deinit();
     }
 
-    /// How far the launch ran over its largest bound, in percent; null when
-    /// no attempt ran, or the launch is too short to say.
     pub fn overBound(self: *const Launch) ?f64 {
         const b = self.bounds[self.binding orelse return null];
         if (self.elapsed_s < judge_s or b.seconds <= 0) return null;
@@ -671,12 +512,10 @@ pub const Launch = struct {
         return self.tracker.shared.items;
     }
 
-    /// Seconds from the launch start to `ns`.
     pub fn at(self: *const Launch, ns: i128) f64 {
         return @as(f64, @floatFromInt(ns - self.t0_ns)) / 1e9;
     }
 
-    /// CPU seconds of every rule's latest run, and of those this launch ran.
     pub fn cpu(self: *const Launch) struct { all: f64, here: f64 } {
         var all: f64 = 0;
         var here: f64 = 0;
@@ -687,8 +526,6 @@ pub const Launch = struct {
         return .{ .all = all, .here = here };
     }
 
-    /// Runs summed per value of a label, most CPU time first; rules
-    /// without that label are left out.
     pub fn totals(self: *const Launch, a: Allocator, by: enum { category, tool }) ![]Total {
         var map: std.StringArrayHashMapUnmanaged(Total) = .empty;
         var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -720,7 +557,6 @@ pub const Launch = struct {
         return list;
     }
 
-    /// Each sample's runs, most CPU time first.
     pub fn sampleRows(self: *const Launch, a: Allocator) ![]SampleRow {
         var map: std.StringArrayHashMapUnmanaged(SampleRow) = .empty;
         var seen: std.StringHashMapUnmanaged(void) = .empty;
@@ -750,22 +586,17 @@ pub const Launch = struct {
         return list;
     }
 
-    /// The selected rule named `name`.
     pub fn ruleOf(self: *const Launch, name: []const u8) ?*const Rule {
         const i = self.rule_index.get(name) orelse return null;
         return if (self.rules[i].selected) &self.rules[i] else null;
     }
 
-    /// Whether a run took at least 1.5 times its step's median and 2 s more:
-    /// worth a look, since the same work took longer on this data.
     pub fn slow(self: *const Launch, r: Rule) bool {
         const run = r.run orelse return false;
         const m = self.steps[r.step].median_s;
         return m > 0 and run.wall_s >= m * 1.5 and run.wall_s - m >= 2;
     }
 
-    /// The rule of `step` with `sample` (null: the rules without a sample);
-    /// with several, the one whose run took longest.
     pub fn cell(self: *const Launch, step: usize, sample: ?[]const u8) ?usize {
         var best: ?usize = null;
         for (self.steps[step].rules.items) |ri| {
@@ -781,27 +612,20 @@ pub const Launch = struct {
     }
 };
 
-/// "kanit X.Y.Z" from an engine ID, without the executable's digest.
 fn engineName(id: []const u8) []const u8 {
     return if (std.mem.indexOf(u8, id, " sha256:")) |i| id[0..i] else id;
 }
 
-/// A key for a pair of names, such as a sample and a step.
 fn pairKey(a: Allocator, x: []const u8, y: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "{s}\x00{s}", .{ x, y });
 }
 
-/// The reason a workflow snapshot gave no graph: its problems, which name
-/// their lines, on one line, or the error's name.
 fn snapshotProblem(a: Allocator, p: *const workflow.Problem, err: anyerror) ![]const u8 {
     if (err == error.OutOfMemory) return error.OutOfMemory;
     if (p.message.len == 0) return @errorName(err);
     return std.mem.replaceOwned(u8, a, p.message, "\n", "; ");
 }
 
-/// A JSON record file parsed into `t`, or null when there is none. One that
-/// exists but does not parse reads as absent, and `path` is added to
-/// `unreadable`, in `a`.
 fn readJson(gpa: Allocator, t: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?Value {
     const bytes = sys.readFile(gpa, path, records.launch_record_max) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
@@ -831,16 +655,19 @@ fn stateOf(s: tracker.Status, finished: bool) State {
     };
 }
 
-/// Reads a launch's records into one model. `a` holds everything the model
-/// returns; call `deinit` for the event tracker and the workflow.
+pub const Snapshot = struct { wf: *const workflow.Workflow, g: *const graph.Graph };
+
 pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
+    return loadWith(gpa, a, launch_dir, null);
+}
+
+pub fn loadWith(gpa: Allocator, a: Allocator, launch_dir: []const u8, given: ?Snapshot) !Launch {
     var l: Launch = .{ .gpa = gpa, .dir = launch_dir, .id = std.fs.path.basename(launch_dir), .tracker = try tracker.Tracker.init(gpa, launch_dir) };
     errdefer l.deinit();
     _ = try l.tracker.update();
     _ = try readSettings(gpa, a, &l);
     follow(&l);
     const end = try readEnd(gpa, a, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), &l.unreadable);
-    // Without a summary, a launch whose engine is gone reads as unfinished.
     if (end == null) _ = try l.tracker.settleEnd();
     settle(&l, end);
 
@@ -850,13 +677,15 @@ pub fn load(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Launch {
     const reused = try reusedAttempts(gpa, a, launch_dir, reused_names.items, &l.unreadable);
     l.reused_unrecorded = reused_names.items.len - reused.len;
 
-    try readSnapshot(gpa, a, &l);
+    if (given) |s| {
+        l.wf = s.wf.*;
+        l.g = s.g.*;
+        l.borrowed = true;
+    } else try readSnapshot(gpa, a, &l);
     try collect(a, &l, reused);
     return l;
 }
 
-/// The launch's settings from `launch.json`, copied into `a`. True when the
-/// file is there, read or found unreadable.
 fn readSettings(gpa: Allocator, a: Allocator, l: *Launch) !bool {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
@@ -880,7 +709,6 @@ fn readSettings(gpa: Allocator, a: Allocator, l: *Launch) !bool {
     return true;
 }
 
-/// The budget and the start as the events give them, over `launch.json`.
 fn follow(l: *Launch) void {
     const tr = &l.tracker;
     if (tr.max_threads > 0) l.max_threads = @floatFromInt(tr.max_threads);
@@ -889,7 +717,6 @@ fn follow(l: *Launch) void {
     l.t0_ns = if (tr.launch_ns != 0) tr.launch_ns else tr.started_ns;
 }
 
-/// How a launch ended, as its `summary.json` says.
 const End = struct {
     status: []const u8,
     @"error": ?[]const u8,
@@ -900,8 +727,6 @@ const End = struct {
     engine_rss_mib: ?f64 = null,
 };
 
-/// The summary at `path`, its strings copied into `a`; null when there is
-/// none or it cannot be read. The summary's list of failures is not kept.
 fn readEnd(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.ArrayList([]const u8)) !?End {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
@@ -920,8 +745,6 @@ fn readEnd(gpa: Allocator, a: Allocator, path: []const u8, unreadable: *std.Arra
     return end;
 }
 
-/// Whether the launch ended, how, and how long it has run: from its
-/// summary, else from its events, else up to now.
 fn settle(l: *Launch, end: ?End) void {
     const tr = &l.tracker;
     l.finished = false;
@@ -949,8 +772,6 @@ fn settle(l: *Launch, end: ?End) void {
     }
 }
 
-/// The workflow snapshot, which gives every rule its labels and the graph,
-/// with the launch's `--threads` overrides.
 fn readSnapshot(gpa: Allocator, a: Allocator, l: *Launch) !void {
     if (l.workdir.len == 0) return;
     var problem: workflow.Problem = .{};
@@ -967,9 +788,6 @@ fn readSnapshot(gpa: Allocator, a: Allocator, l: *Launch) !void {
     } else |err| l.snapshot_problem = try snapshotProblem(a, &problem, err);
 }
 
-/// The figures computed from the records read, in `a`: the rules with
-/// their states and runs, the steps, the critical path, the bounds and the
-/// waits.
 fn collect(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     try collectRules(a, l, reused);
     try collectSteps(a, l);
@@ -978,7 +796,6 @@ fn collect(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     try collectWaits(a, l);
 }
 
-/// Clears the figures `collect` fills, before it fills them again.
 fn clearFigures(l: *Launch) void {
     l.counts = .{};
     l.rules = &.{};
@@ -1000,39 +817,21 @@ fn clearFigures(l: *Launch) void {
     l.groups = &.{};
 }
 
-/// A launch's model kept current while the launch runs, for a view that
-/// draws it again and again. `open` reads what `load` reads. Each `refresh`
-/// applies the events appended since the last one, reads the record of each
-/// attempt that ended since, and computes the figures again from what it
-/// holds: it costs what changed, not the whole launch. Records the events do
-/// not name, as an older engine left them, are found by listing the attempt
-/// directories once at the start and once after the launch ends.
 pub const Live = struct {
     gpa: Allocator,
-    /// What is read once: the settings, the attempt records and the earlier
-    /// runs the launch reused.
     keep: std.heap.ArenaAllocator,
-    /// The figures of `launch`, computed again by every refresh.
     view: std.heap.ArenaAllocator,
-    /// The model as of the last refresh. Its figures stay valid until the
-    /// next refresh, its records until `deinit`.
     launch: Launch,
     summary_path: []const u8,
     rows: std.ArrayList(Attempt) = .empty,
-    /// Attempt directories whose record was read or found unreadable.
     seen: std.StringHashMapUnmanaged(void) = .empty,
-    /// For each rule the events name, the first attempt whose record may
-    /// not have been read.
     next: std.ArrayList(u32) = .empty,
-    /// Reused rules whose earlier run was looked for, and the runs found.
     asked: std.StringHashMapUnmanaged(void) = .empty,
     reused: std.ArrayList(Attempt) = .empty,
     settings_read: bool = false,
     end: ?End = null,
-    /// `summary.json` is there but cannot be read.
     end_unreadable: bool = false,
     refreshes: usize = 0,
-    /// The attempt directories were listed after the launch ended.
     swept: bool = false,
 
     pub fn open(gpa: Allocator, launch_dir: []const u8) !Live {
@@ -1054,16 +853,12 @@ pub const Live = struct {
         self.keep.deinit();
     }
 
-    /// Brings the model up to date with what was recorded since the last
-    /// refresh; true when anything new was read.
     pub fn refresh(self: *Live) !bool {
         const gpa = self.gpa;
         const keep = self.keep.allocator();
         const l = &self.launch;
         const tr = &l.tracker;
         var changed = try tr.update();
-        // The settings are written as the launch opens; a launch followed
-        // from its first moment may not have them yet.
         if (!self.settings_read) {
             self.settings_read = try readSettings(gpa, keep, l);
             if (self.settings_read) {
@@ -1085,8 +880,6 @@ pub const Live = struct {
             if (try self.sweep()) changed = true;
             self.swept = l.finished;
         }
-        // The record of each attempt that ended, read once: a record is
-        // written before the event that ends its attempt.
         var buf: [std.fs.max_path_bytes]u8 = undefined;
         for (tr.rules.items, 0..) |r, i| {
             if (i == self.next.items.len) try self.next.append(keep, 1);
@@ -1098,13 +891,11 @@ pub const Live = struct {
                 switch (try self.readOnce(dir)) {
                     .read => changed = true,
                     .known => {},
-                    // Not written yet, or never: looked for again next time.
                     .missing => gap = true,
                 }
                 if (!gap) self.next.items[i] = n + 1;
             }
         }
-        // The earlier run of each rule found reused since.
         var names: std.ArrayList([]const u8) = .empty;
         for (tr.rules.items) |r| if (r.status == .reused and !self.asked.contains(r.name)) {
             try self.asked.put(keep, r.name, {});
@@ -1118,7 +909,6 @@ pub const Live = struct {
 
         if (changed) std.mem.sort(Attempt, self.rows.items, {}, rowOrder);
         l.rows = self.rows.items;
-        // A running launch's figures move with the clock.
         if (changed or !l.finished or self.refreshes == 0) {
             _ = self.view.reset(.retain_capacity);
             clearFigures(l);
@@ -1128,8 +918,6 @@ pub const Live = struct {
         return changed;
     }
 
-    /// Reads every record in the attempt directories that was not read yet;
-    /// true when one was.
     fn sweep(self: *Live) !bool {
         var scratch: std.heap.ArenaAllocator = .init(self.gpa);
         defer scratch.deinit();
@@ -1145,7 +933,6 @@ pub const Live = struct {
         return found;
     }
 
-    /// Reads the record in attempt directory `dir` unless it was read.
     fn readOnce(self: *Live, dir: []const u8) !enum { read, known, missing } {
         if (self.seen.contains(dir)) return .known;
         const keep = self.keep.allocator();
@@ -1163,7 +950,6 @@ pub const Live = struct {
     }
 };
 
-/// The order `attempts` gives: by rule name, then by attempt.
 fn rowOrder(_: void, x: Attempt, y: Attempt) bool {
     return switch (std.mem.order(u8, x.rule, y.rule)) {
         .lt => true,
@@ -1172,7 +958,6 @@ fn rowOrder(_: void, x: Attempt, y: Attempt) bool {
     };
 }
 
-/// Every rule with its state, its run and its final attempt.
 fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     const tr = &l.tracker;
     var rules: std.ArrayList(Rule) = .empty;
@@ -1180,8 +965,6 @@ fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
         try rules.ensureTotalCapacityPrecise(a, wf.rules.len);
         for (wf.rules) |r| rules.appendAssumeCapacity(.{ .name = r.name, .labels = r.labels, .selected = tr.index.contains(r.name) });
     } else {
-        // Without the snapshot, the rules are those the events and the
-        // attempt records name, with the labels the records carry.
         var names: std.StringArrayHashMapUnmanaged(?workflow.Labels) = .empty;
         for (tr.rules.items) |r| try names.put(a, r.name, null);
         for (l.rows) |row| try names.put(a, row.rule, null);
@@ -1192,7 +975,6 @@ fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     }
     const index = &l.rule_index;
     for (rules.items, 0..) |r, i| try index.put(a, r.name, i);
-    // A rule no event speaks of takes its state from its last attempt.
     for (l.rows) |row| if (index.get(row.rule)) |i| if (!tr.index.contains(row.rule)) {
         rules.items[i].state = if (row.completed()) .completed else if (eql(u8, row.status, "cancelled")) .cancelled else .failed;
     };
@@ -1229,8 +1011,6 @@ fn collectRules(a: Allocator, l: *Launch, reused: []const Attempt) !void {
     l.counts = c;
 }
 
-/// The steps of the selected rules in pipeline order, with what their runs
-/// took and the request to suggest.
 fn collectSteps(a: Allocator, l: *Launch) !void {
     var depth: []u32 = &.{};
     if (l.g) |g| {
@@ -1240,7 +1020,6 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
             for (g.parents[i]) |p| depth[i] = @max(depth[i], depth[p] + 1);
         }
     }
-    // This launch's attempts that did not complete, per rule.
     const Missed = struct { failed: usize = 0, oom_kills: f64 = 0, oom_request_mib: f64 = 0 };
     const missed = try a.alloc(Missed, l.rules.len);
     @memset(missed, .{});
@@ -1303,7 +1082,6 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
             s.stall_n += 1;
         }
     }
-    // A rule's request also counts where it has no run yet.
     if (l.wf) |wf| for (l.rules, 0..) |r, i| if (r.selected) {
         const s = &map.values()[r.step];
         s.threads = @max(s.threads, @as(f64, @floatFromInt(wf.rules[i].threads)));
@@ -1314,7 +1092,6 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
         s.median_s = median(s.walls.items);
         s.sizing = size(s.*);
     }
-    // Pipeline order: graph depth, then the step's first rule in the file.
     const steps = map.values();
     const order = try a.alloc(usize, steps.len);
     for (order, 0..) |*o, i| o.* = i;
@@ -1334,7 +1111,6 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
         r.step = new_index[r.step];
     };
     l.steps = sorted;
-    // Edges between steps, from the rules' producers.
     if (l.g) |g| for (l.rules, 0..) |r, i| if (r.selected) {
         const s = &l.steps[r.step];
         for (g.parents[i]) |p| {
@@ -1353,11 +1129,6 @@ fn collectSteps(a: Allocator, l: *Launch) !void {
     l.samples = names;
 }
 
-/// The request to suggest for a step: memory from the largest used memory
-/// plus a fifth, in 64 MiB steps; threads from the most cores a run used,
-/// rounded up and at most the request. A step whose attempt was killed for
-/// exceeding its memory gets half again the request it exceeded, at least;
-/// an idle step keeps its request, as its counters measured nothing.
 fn size(s: Step) Sizing {
     if (s.mostlyIdle()) return .{ .threads = @max(s.threads, 1), .memory_mib = s.request_mib, .note = .idle };
     var out: Sizing = .{};
@@ -1375,18 +1146,12 @@ fn size(s: Step) Sizing {
     return out;
 }
 
-/// The critical path: the longest chain of work through the graph, each
-/// rule weighing the wall time of its attempts in this launch, as retries
-/// run one after another. However large the budget, the launch could not
-/// take less.
 fn collectPath(a: Allocator, l: *Launch) !void {
     const g = l.g orelse return;
     const n = l.rules.len;
     const work = try a.alloc(f64, n);
     const waited = try a.alloc(f64, n);
     const tries = try a.alloc(i64, n);
-    // Each rule's first attempt, which tells when the rule became ready,
-    // and when its last attempt ended, in seconds from the launch's start.
     const first = try a.alloc(?Attempt, n);
     const ended = try a.alloc(f64, n);
     @memset(work, 0);
@@ -1394,7 +1159,7 @@ fn collectPath(a: Allocator, l: *Launch) !void {
     @memset(tries, 0);
     @memset(first, null);
     @memset(ended, 0);
-    for (l.rows) |r| if (l.rule_index.get(r.rule)) |i| {
+    for (l.rows) |r| if (l.rule_index.get(r.rule)) |i| if (l.rules[i].selected) {
         work[i] += r.wall_s;
         waited[i] += r.waited_s;
         tries[i] += 1;
@@ -1403,7 +1168,6 @@ fn collectPath(a: Allocator, l: *Launch) !void {
             ended[i] = @max(ended[i], l.at(r.started_ns) + r.wall_s);
         }
     };
-    // The longest chain ending at each rule, and the producer it continues.
     const longest = try a.alloc(f64, n);
     const from = try a.alloc(?usize, n);
     var end: ?usize = null;
@@ -1418,7 +1182,6 @@ fn collectPath(a: Allocator, l: *Launch) !void {
     var rows: std.ArrayList(PathRow) = .empty;
     var cur = end;
     while (cur) |i| : (cur = from[i]) {
-        // A rule that did no work here, reused or not selected, only links.
         if (work[i] == 0) continue;
         const start = if (first[i]) |f| l.at(f.started_ns) else 0;
         const ready = if (first[i]) |f| start - f.waited_s else 0;
@@ -1434,7 +1197,6 @@ fn collectPath(a: Allocator, l: *Launch) !void {
         });
     }
     std.mem.reverse(PathRow, rows.items);
-    // Held: from the end of the rule before on the path, or from the start.
     var prev_end: f64 = 0;
     for (rows.items) |*p| {
         p.held_s = @max(p.held_s - prev_end, 0);
@@ -1444,17 +1206,11 @@ fn collectPath(a: Allocator, l: *Launch) !void {
         l.path_held_s += p.held_s;
         l.path_between_s += p.between_s;
     }
-    // Path times count from `launch_started`; the elapsed time from the
-    // launch's opening, before its checks.
     l.path_checks_s = @min(l.tracker.checks_s, l.elapsed_s);
     l.path_after_s = @max(l.elapsed_s - l.path_checks_s - prev_end, 0);
     l.path = rows.items;
 }
 
-/// The lower bounds on the elapsed time: the critical path, and for each
-/// limit of the budget the work it carried over the limit. The largest is
-/// what limited the launch; the elapsed time beyond it went to waiting
-/// that scheduling could not avoid, to launching and to starting rules.
 fn collectBounds(a: Allocator, l: *Launch) !void {
     var bounds: std.ArrayList(Bound) = .empty;
     if (l.path.len > 0) try bounds.append(a, .{ .kind = .chain, .seconds = l.path_ran_s });
@@ -1469,17 +1225,13 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
         jobs += r.wall_s;
     }
     if (l.max_threads > 0 and threads > 0) try bounds.append(a, .{ .kind = .threads, .work = threads, .limit = l.max_threads, .seconds = threads / l.max_threads });
-    // The CPU time used fits in the threads however rules are ordered; far
-    // below the threads bound, the requests reserved more than was used.
     if (l.max_threads > 0 and cpu > 0) try bounds.append(a, .{ .kind = .cpu, .work = cpu, .limit = l.max_threads, .seconds = cpu / l.max_threads });
-    // A shared input's memory counts against the budget while it is held.
     const end_ns = l.t0_ns + std.math.lossyCast(i128, l.elapsed_s * 1e9);
     for (l.shared()) |s| {
         const open: f64 = if (s.held_since > 0) @as(f64, @floatFromInt(@max(end_ns - s.held_since, 0))) / 1e9 else 0;
         memory += (s.reserved_mib orelse s.declared_mib) * (s.held_s + open);
     }
     if (l.max_memory_mib > 0 and memory > 0) try bounds.append(a, .{ .kind = .memory, .work = memory, .limit = l.max_memory_mib, .seconds = memory / l.max_memory_mib });
-    // Every rule takes a thread, so jobs bind only below the thread budget.
     if (l.max_jobs > 0 and l.max_jobs < l.max_threads and jobs > 0) try bounds.append(a, .{ .kind = .jobs, .work = jobs, .limit = l.max_jobs, .seconds = jobs / l.max_jobs });
     if (l.wf) |wf| for (wf.groups) |grp| {
         var units: f64 = 0;
@@ -1495,8 +1247,6 @@ fn collectBounds(a: Allocator, l: *Launch) !void {
     };
 }
 
-/// Waiting by reason from this launch's attempt records, and for each
-/// resource group whether the budget had room while its rules waited.
 fn collectWaits(a: Allocator, l: *Launch) !void {
     for (l.rows) |r| {
         if (r.queue_recorded) l.waits_recorded = true;
@@ -1519,7 +1269,6 @@ fn collectWaits(a: Allocator, l: *Launch) !void {
     for (l.waits.keys(), l.waits.values()) |reason, seconds| {
         if (!std.mem.startsWith(u8, reason, "group:") or seconds < 0.05) continue;
         const name = reason["group:".len..];
-        // Each sample counts once, however many rules waited at it.
         var moments: usize = 0;
         var fit: usize = 0;
         for (tr.samples.items) |s| {
@@ -1528,8 +1277,6 @@ fn collectWaits(a: Allocator, l: *Launch) !void {
             for (tr.group_waits.items) |w| {
                 if (!eql(u8, w.group, name) or w.to_ns == 0 or s.ns < w.from_ns or s.ns >= w.to_ns) continue;
                 const v = tr.rules.items[w.rule];
-                // Older records give a rule's request only once it starts: one
-                // that never started cannot tell whether it fit.
                 if (v.threads == 0 and v.memory_mib == 0) continue;
                 waiting = true;
                 if (l.max_threads - s.threads_reserved >= @as(f64, @floatFromInt(v.threads)) and l.max_memory_mib - s.memory_reserved_mib >= @as(f64, @floatFromInt(v.memory_mib))) fits = true;

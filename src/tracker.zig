@@ -16,7 +16,6 @@ const whole = fields.whole;
 const float = fields.float;
 
 pub const Status = enum {
-    /// Selected but not yet ready: its producers have not finished.
     pending,
     waiting,
     running,
@@ -32,8 +31,6 @@ pub const Status = enum {
         return s == .running or s == .cancelling;
     }
 
-    /// The word shown for the state: a rule being stopped is "stopping",
-    /// and "cancelled" once it has ended.
     pub fn label(s: Status) []const u8 {
         return if (s == .cancelling) "stopping" else @tagName(s);
     }
@@ -47,25 +44,17 @@ pub const RuleView = struct {
     name: []const u8,
     status: Status = .waiting,
     attempt: u32 = 0,
-    /// The shared inputs its latest attempt holds.
     shared: []const []const u8 = &.{},
-    /// Attempt directory and cgroup of the latest attempt.
     dir: []const u8 = "",
     cg: ?[]const u8 = null,
-    /// Event times, nanoseconds since the epoch; 0 when not reached.
     ready_ns: i128 = 0,
     started_ns: i128 = 0,
     finished_ns: i128 = 0,
-    /// Failure reason, or the current wait reason while waiting.
     reason: []const u8 = "",
     memory_peak: ?u64 = null,
     cpu_s: ?f64 = null,
-    /// Request of the latest attempt.
     threads: u32 = 0,
     memory_mib: u64 = 0,
-    /// Counters of a running attempt, sampled by the interactive view. A
-    /// failed read keeps the last value; `live_cores` is the CPU used
-    /// between the last two samples.
     live_memory: ?u64 = null,
     live_peak: ?u64 = null,
     live_cores: ?f64 = null,
@@ -76,102 +65,66 @@ pub const RuleView = struct {
 pub const SharedView = struct {
     name: []const u8,
     state: []const u8,
-    /// Rules whose attempts started using it, by rule index, each once.
     users: std.ArrayList(usize) = .empty,
-    /// The largest memory peak of any of its holders.
     memory_peak: ?u64 = null,
-    /// cgroup of the current holder, for live counters.
     cg: ?[]const u8 = null,
-    /// Memory the holder uses, sampled by the interactive view.
     live_memory: ?u64 = null,
-    /// A container service, not mapped files.
     service: bool = false,
-    /// Holders started, and the seconds they took to become ready.
     starts: u32 = 0,
     load_s: f64 = 0,
     loading_ns: i128 = 0,
-    /// Memory the input is counted for: a service's declared memory, or the
-    /// pages of its files.
     declared_mib: f64 = 0,
-    /// What it took from the budget, a service's Podman client included;
-    /// records that do not say count `declared_mib`.
     reserved_mib: ?f64 = null,
     failed: bool = false,
-    /// Seconds its holders held memory, from loading to release, and when
-    /// the current one began; a holder still held when the records end
-    /// counts to that end.
     held_s: f64 = 0,
     held_since: i128 = 0,
 };
 
-/// One run sample, taken every 5 s while rules run.
 pub const Sample = struct {
     ns: i128,
     threads_reserved: f64,
     memory_reserved_mib: f64,
-    /// The part of it shared inputs hold, once.
     shared_reserved_mib: f64 = 0,
-    /// The run cgroup's memory in use and CPU cores used, when isolated.
     memory_current: ?u64,
     cpu_cores: ?f64,
 };
 
-/// The time a ready rule waited for a resource group, for the advice on
-/// whether a larger group would have started it earlier.
 pub const GroupWait = struct { rule: usize, group: []const u8, from_ns: i128, to_ns: i128 = 0 };
 
-/// The state of one launch, kept up to date from its event stream.
 pub const Tracker = struct {
     arena: std.heap.ArenaAllocator,
     gpa: Allocator,
     events_path: []const u8,
     offset: u64 = 0,
-    /// Bytes of a line not yet terminated.
     partial: std.ArrayList(u8) = .empty,
 
     launch: []const u8 = "",
-    /// Base name of the working directory, from `launch.json`; empty when
-    /// it cannot be read.
     workdir_name: []const u8 = "",
     selected: u32 = 0,
-    /// Time of the first event, and of `launch_started`, when the launch
-    /// began its rules after its checks.
     started_ns: i128 = 0,
     launch_ns: i128 = 0,
-    /// Seconds the launch spent on its checks before `launch_started`.
     checks_s: f64 = 0,
-    /// Lines of the event stream that were not valid JSON, and were skipped.
     unreadable_lines: usize = 0,
     max_threads: u32 = 0,
     max_memory_mib: u64 = 0,
     max_jobs: u32 = 0,
-    /// The run's cgroup, when isolated.
     run_cg: ?[]const u8 = null,
-    /// The engine left its run loop and applies no more control commands.
     ending: bool = false,
     finished: bool = false,
     finished_ns: i128 = 0,
     final_status: []const u8 = "",
-    /// Time of the newest event.
     last_ns: i128 = 0,
     final_error: []const u8 = "",
-    /// The run's memory in use and CPU cores used: from the last sample, or
-    /// read live by the interactive view.
     memory_current: ?u64 = null,
     cpu_cores: ?f64 = null,
     rules: std.ArrayList(RuleView) = .empty,
     index: std.StringHashMapUnmanaged(usize) = .empty,
     shared: std.ArrayList(SharedView) = .empty,
-    /// Every run sample, oldest first.
     samples: std.ArrayList(Sample) = .empty,
-    /// Waits for resource groups; one still open has `to_ns` 0.
     group_waits: std.ArrayList(GroupWait) = .empty,
-    /// The engine that ran the launch, with its digest, from `launch.json`.
     engine: []const u8 = "",
     engine_key: ?i64 = null,
-    /// Bytes of earlier outputs moved into `previous/` so far.
     previous_bytes: u64 = 0,
-    /// The open group wait of each rule, by rule index.
     open_wait: std.AutoHashMapUnmanaged(usize, usize) = .empty,
 
     pub fn init(gpa: Allocator, launch_dir: []const u8) !Tracker {
@@ -196,9 +149,6 @@ pub const Tracker = struct {
         self.arena.deinit();
     }
 
-    /// Ends the view of a launch whose engine ended without recording its
-    /// end: it reads as `unfinished`, as of its newest event, and the rules
-    /// it was running as cancelled, since its tasks end with their engine.
     pub fn markUnfinished(self: *Tracker) void {
         self.finished = true;
         self.final_status = "unfinished";
@@ -210,9 +160,6 @@ pub const Tracker = struct {
         };
     }
 
-    /// Whether the launch has ended: recorded, or with no engine left to
-    /// record it, in which case it is marked unfinished. A launch that ended
-    /// between the two reads has recorded its end.
     pub fn settleEnd(self: *Tracker) !bool {
         if (self.finished) return true;
         const dir = std.fs.path.dirname(self.events_path) orelse return false;
@@ -222,8 +169,6 @@ pub const Tracker = struct {
         return true;
     }
 
-    /// Reads and applies the events appended since the last call; true when
-    /// any was applied.
     pub fn update(self: *Tracker) !bool {
         const fd = sys.openRead(self.gpa, self.events_path) catch |err| switch (err) {
             error.FileNotFound => return false,
@@ -269,20 +214,15 @@ pub const Tracker = struct {
         return &self.shared.items[self.shared.items.len - 1];
     }
 
-    /// Applies one event line. Strings kept beyond the line are copied into
-    /// the tracker's arena; the parse itself uses a scratch arena.
     pub fn apply(self: *Tracker, line: []const u8) !void {
         if (line.len == 0) return;
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
-        // A line that does not parse is counted and skipped; running out of
-        // memory is not.
         const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| {
             if (err == error.OutOfMemory) return err;
             self.unreadable_lines += 1;
             return;
         };
-        // An event of a newer format is counted with the unreadable ones.
         if (fields.newer(v, event_version)) {
             self.unreadable_lines += 1;
             return;
@@ -301,7 +241,6 @@ pub const Tracker = struct {
             self.max_memory_mib = whole(u64, v, "max_memory_mib") orelse 0;
             self.max_jobs = whole(u32, v, "jobs") orelse 0;
             self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-            // Every selected rule is listed from the start, as pending.
             if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
                 const r = try self.rule(n.string);
                 r.status = .pending;
@@ -317,7 +256,6 @@ pub const Tracker = struct {
             self.previous_bytes += whole(u64, v, "bytes") orelse 0;
         } else if (eql(u8, ev, "sample")) {
             self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
-            // A damaged record's negative amounts read as none.
             self.cpu_cores = if (float(v, "cpu_cores_used")) |c| @max(c, 0) else null;
             try self.samples.append(a, .{
                 .ns = at,
@@ -343,7 +281,6 @@ pub const Tracker = struct {
             } else if (eql(u8, ev, "shared_loaded")) {
                 if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;
             } else if (eql(u8, ev, "shared_failed")) s.failed = true;
-            // Its memory is held from loading until release or failure.
             if (eql(u8, ev, "shared_loading")) {
                 s.held_since = at;
             } else if ((eql(u8, ev, "shared_released") or eql(u8, ev, "shared_failed")) and s.held_since > 0) {
@@ -353,15 +290,12 @@ pub const Tracker = struct {
         } else if (std.mem.startsWith(u8, ev, "task_")) if (str(v, "rule")) |name| {
             const r = try self.rule(name);
             const ri = self.index.get(name).?;
-            // A rule's wait for a resource group ends when it waits for
-            // something else or starts.
             if (eql(u8, ev, "task_waiting") or eql(u8, ev, "task_started")) {
                 if (self.open_wait.fetchRemove(ri)) |kv| self.group_waits.items[kv.value].to_ns = at;
             }
             if (eql(u8, ev, "task_waiting")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .waiting;
-                // Its request, for what the budget had room for while it waited.
                 if (whole(u32, v, "threads")) |n| r.threads = n;
                 if (whole(u64, v, "memory_mib")) |n| r.memory_mib = n;
                 r.reason = try a.dupe(u8, str(v, "reason") orelse "");
@@ -379,7 +313,6 @@ pub const Tracker = struct {
                 r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
-                // The shared inputs the attempt holds.
                 if (v.object.get("shared")) |list| if (list == .array) {
                     var names: std.ArrayList([]const u8) = .empty;
                     for (list.array.items) |item| if (item == .string) {
@@ -417,8 +350,6 @@ pub const Tracker = struct {
         };
     }
 
-    /// Threads and memory reserved by the running attempts (shared inputs
-    /// are not included).
     pub fn reserved(self: *const Tracker) struct { threads: u64, memory_mib: u64 } {
         var th: u64 = 0;
         var mem: u64 = 0;
@@ -436,7 +367,6 @@ pub const Tracker = struct {
     }
 };
 
-/// Parses "YYYY-MM-DDTHH:MM:SS.mmmZ" into nanoseconds since the epoch.
 pub fn parseTime(t: []const u8) ?i128 {
     if (t.len < 20) return null;
     const y = std.fmt.parseInt(i64, t[0..4], 10) catch return null;
@@ -446,7 +376,6 @@ pub fn parseTime(t: []const u8) ?i128 {
     const mi = std.fmt.parseInt(i64, t[14..16], 10) catch return null;
     const s = std.fmt.parseInt(i64, t[17..19], 10) catch return null;
     const ms: i64 = if (t.len >= 23 and t[19] == '.') std.fmt.parseInt(i64, t[20..23], 10) catch 0 else 0;
-    // Days from civil date (Howard Hinnant's algorithm).
     const yy = if (mo <= 2) y - 1 else y;
     const era = @divFloor(yy, 400);
     const yoe = yy - era * 400;

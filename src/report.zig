@@ -7,10 +7,8 @@ const units = @import("units.zig");
 const Allocator = std.mem.Allocator;
 const Attempt = model.Attempt;
 
-// ---- one row per attempt ----
+// --- One row per attempt ---
 
-/// One attempt as TSV and JSON show it. The JSON form keeps unrounded
-/// numbers and adds the start time and the attempt directory.
 const Row = struct {
     rule: []const u8,
     attempt: i64,
@@ -71,14 +69,10 @@ const Row = struct {
     }
 };
 
-// A missing number prints as NA, which R and pandas read as missing; a
-// missing text prints as -.
 fn opt(w: *std.Io.Writer, v: anytype, comptime fmt: []const u8) !void {
     if (v) |x| try w.print(fmt, .{x}) else try w.writeAll(if (comptime std.mem.eql(u8, fmt, "{s}")) "-" else "NA");
 }
 
-/// One row per attempt, tab-separated, with a header; NA for no number and
-/// `-` for no text.
 pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
     try w.writeAll("rule\tattempt\tstatus\twall_s\tcpu_s\tcpu_efficiency\tthreads\tmemory_mib\tpeak_mib\tmax_rss_mib\tpeak_per_request\toom_kills\tlimit_events\twaited_s\twait_reason\tcpu_stall\tmemory_stall\tio_stall\tidle\treason\tstep\tsample\tcategory\ttool\n");
     for (rows) |a| {
@@ -107,18 +101,14 @@ pub fn writeTsv(w: *std.Io.Writer, rows: []const Attempt) !void {
     }
 }
 
-/// The same attempts as a JSON array, with the TSV's field names.
 pub fn writeJson(a: Allocator, w: *std.Io.Writer, rows: []const Attempt) !void {
     const out = try a.alloc(Row, rows.len);
     for (out, rows) |*o, r| o.* = Row.of(r);
     try w.print("{f}\n", .{std.json.fmt(out, .{ .whitespace = .indent_2 })});
 }
 
-// ---- request suggestions ----
+// --- Request suggestions ---
 
-/// The suggested request of every step that has one, as TSV or JSON.
-/// How `writeSuggestions` prints: a TSV for scripts, JSON, or an aligned
-/// table with units for a terminal.
 pub const SuggestionFormat = enum { tsv, json, table };
 
 pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: SuggestionFormat) !void {
@@ -180,11 +170,8 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: Sugge
     for (list.items) |s| try w.print("{s}\t{d}\t{d:.0}\t{d:.2}\t{d:.0}\t{d:.0}\t{d:.0}\t{s}\t{d:.0}\t{d:.0}\t{s}\t{}\n", .{ s.step, s.runs, s.threads, s.threads_used, s.suggest_threads, s.memory_mib, s.used_mib, s.used_basis, s.peak_mib, s.suggest_mib, s.note, s.at_thread_limit });
 }
 
-// ---- comparing two launches ----
+// --- Comparing two launches ---
 
-/// The change from `was` to `now` as printed with `decimals` places, so two
-/// values that print alike show no change; `-` where either is below
-/// `floor`, too small for a share to mean anything.
 fn change(w: *std.Io.Writer, was: f64, now: f64, decimals: u8, floor: f64) !void {
     const scale = std.math.pow(f64, 10, @floatFromInt(decimals));
     const x = @round(was * scale) / scale;
@@ -194,15 +181,12 @@ fn change(w: *std.Io.Writer, was: f64, now: f64, decimals: u8, floor: f64) !void
     try w.print(" {d:>6.0}%", .{if (@abs(pct) < 0.5) 0 else pct});
 }
 
-/// Half the range of a step's wall times over their median: how much its
-/// runs differ among themselves; null with fewer than three runs.
 fn spread(s: model.Step) ?f64 {
     const xs = s.walls.items;
     if (xs.len < 3 or s.median_s <= 0) return null;
     return (xs[xs.len - 1] - xs[0]) / 2 / s.median_s;
 }
 
-/// Thread-seconds that a launch's attempts reserved: wall time times threads.
 fn reserved(rows: []const Attempt) f64 {
     var total: f64 = 0;
     for (rows) |r| total += r.wall_s * r.threads;
@@ -215,12 +199,6 @@ fn budget(w: *std.Io.Writer, l: *const model.Launch) !void {
     try w.print(", {d:.0} jobs", .{l.max_jobs});
 }
 
-/// Compares launch `now_dir` with the baseline `was_dir`: their budgets,
-/// engines and workflows, the launches' elapsed time, attempts and reserved
-/// thread-seconds, then each step's latest runs, this launch's or reused:
-/// median wall time, largest peak and total CPU time. One run of each is
-/// all there is, so a change inside the runs' own spread is marked. Records
-/// of either launch that do not parse are left out and added to `unread`.
 pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []const u8, now_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
     var was = try model.load(gpa, a, was_dir);
     defer was.deinit();
@@ -267,7 +245,6 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
             try w.print("  no completed run in the {s}\n", .{if (x.runs == 0) "baseline" else "launch"});
             continue;
         }
-        // Counters of idle runs size nothing, so they do not compare.
         const outside = x.mostlyIdle() or y.mostlyIdle();
         try w.print("  {d:>8.2} {d:>7.2}", .{ x.median_s, y.median_s });
         try change(w, x.median_s, y.median_s, 2, 0.1);
@@ -276,8 +253,6 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
         try w.print("  {d:>8.1} {d:>7.1}", .{ x.cpu_s, y.cpu_s });
         if (outside) try w.writeAll("       -") else try change(w, x.cpu_s, y.cpu_s, 1, 0.1);
         if (outside) try w.print("  idle in the {s}", .{if (x.mostlyIdle()) "baseline" else "launch"});
-        // A median that moved less than the runs differ among themselves
-        // has not shown a change.
         const noise = @max(spread(x) orelse 0, spread(y) orelse 0);
         if (noise > 0 and x.median_s >= 0.1 and @abs(y.median_s / x.median_s - 1) < noise) try w.writeAll("  wall time within its runs' spread");
         if (x.threads != y.threads) try w.print("  threads {d} against {d}", .{ x.threads, y.threads });
@@ -286,12 +261,8 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     }
 }
 
-// ---- what limited a launch ----
+// --- What limited a launch ---
 
-/// Prints what limited the launch (its critical path, waiting by reason,
-/// resource groups, budget use), then each step's requests against its
-/// runs, the time per category, tool and sample, and the shared inputs.
-/// Records that do not parse are left out and added to `unread`.
 pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
     var l = try model.load(gpa, a, launch_dir);
     defer l.deinit();
@@ -300,13 +271,11 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     try w.print("launch {s}: ", .{l.id});
     try units.duration(w, l.elapsed_s);
     try w.print(" elapsed; {d} {s} in this launch, {d:.0} thread-seconds reserved\n", .{ l.rows.len, if (l.rows.len == 1) "attempt" else "attempts", reserved(l.rows) });
-    // The answer first: what limited the launch, from the bounds below.
     if (l.binding != null) {
         try writeVerdict(w, &l);
         try w.writeAll("\n");
     }
     if (l.rows.len == 0) {
-        // An attempt writes its record when it ends.
         try w.writeAll(if (l.finished) "no rule started in this launch" else "no attempt of this launch has ended");
         if (l.@"error") |e| try w.print(": {s}", .{e});
         try w.writeAll("\n");
@@ -324,7 +293,6 @@ pub fn writeBottlenecks(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_
     try writeUtilization(w, &l);
 }
 
-/// What a bound is, in a few words: `threads`, `group disk`.
 pub fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
     switch (b.kind) {
         .chain => try w.writeAll("critical path"),
@@ -335,8 +303,6 @@ pub fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
     }
 }
 
-/// How hard a bound's limit was used: the average reserved over the
-/// elapsed time against the limit, or the critical path's rules.
 pub fn boundUse(w: *std.Io.Writer, l: *const model.Launch, b: model.Bound) !void {
     const avg = if (l.elapsed_s > 0) b.work / l.elapsed_s else 0;
     switch (b.kind) {
@@ -358,8 +324,6 @@ pub fn boundUse(w: *std.Io.Writer, l: *const model.Launch, b: model.Bound) !void
     }
 }
 
-/// The step whose rules reserved the most thread-seconds they did not use,
-/// and those seconds; null when none reserved more than one thread.
 fn idlestStep(l: *const model.Launch) ?struct { step: *const model.Step, unused: f64 } {
     var best: ?*const model.Step = null;
     var most: f64 = 0;
@@ -374,7 +338,6 @@ fn idlestStep(l: *const model.Launch) ?struct { step: *const model.Step, unused:
     return .{ .step = best orelse return null, .unused = most };
 }
 
-/// One sentence on what limited the launch, from the largest bound.
 pub fn writeVerdict(w: *std.Io.Writer, l: *const model.Launch) !void {
     const b = l.bounds[l.binding orelse return];
     const over = l.overBound() orelse {
@@ -397,9 +360,6 @@ pub fn writeVerdict(w: *std.Io.Writer, l: *const model.Launch) !void {
     switch (b.kind) {
         .chain => {
             try w.writeAll("the work on its critical path");
-            // Each delay names what would cut it: the path's own waits yield
-            // to a higher priority; a hold means producers off the path
-            // started late, which only more room in the budget changes.
             const notable = struct {
                 fn f(s: f64, work: f64) bool {
                     return s >= 0.5 and s >= 0.05 * work;
@@ -418,9 +378,6 @@ pub fn writeVerdict(w: *std.Io.Writer, l: *const model.Launch) !void {
         },
         .threads => {
             try w.writeAll("its rules' thread requests need at that limit");
-            // Requests, not use, fill the thread budget: say how much of
-            // what they reserved the rules kept busy, and where most went
-            // unused.
             const cpu = for (l.bounds) |x| {
                 if (x.kind == .cpu) break x.work;
             } else 0;
@@ -475,7 +432,6 @@ fn writePath(w: *std.Io.Writer, l: *const model.Launch) !void {
         }
         try w.writeAll("\n");
     }
-    // Together these terms make up the elapsed time.
     try w.print("  {d} {s}: ", .{ l.path.len, if (l.path.len == 1) "rule" else "rules" });
     try units.duration(w, l.path_ran_s);
     try w.writeAll(" of work, ");
@@ -550,7 +506,6 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
             try w.print(" {s:>10} {s:>10}", .{ "-", "-" });
         } else {
             try units.right(w, 10, units.duration, .{s.median_s});
-            // Counters of very short runs can add up past the threads.
             if (s.judged()) try w.print(" {d:>7.0}% {d:>8.0} ", .{ @min(s.efficiency() * 100, 100), s.threads }) else try w.print(" {s:>8} {d:>8.0} ", .{ "-", s.threads });
             try units.right(w, 10, units.size, .{s.request_mib});
             try w.writeAll(" ");
@@ -593,11 +548,8 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
     };
 }
 
-/// The legend of a USED figure marked `<=`.
 const bound_note = "  <=: at most this; a process started from the engine counts the engine's memory, which was larger\n";
 
-/// A USED figure, right-aligned in 10 columns, marked `<=` when it is only an
-/// upper bound.
 fn usedCell(w: *std.Io.Writer, mib: f64, bound: bool) !void {
     if (!bound) return units.right(w, 10, units.size, .{mib});
     var buf: [32]u8 = undefined;
@@ -607,11 +559,8 @@ fn usedCell(w: *std.Io.Writer, mib: f64, bound: bool) !void {
     try w.print("{s:>10}", .{cell.buffered()});
 }
 
-/// CPU time per category and per tool, and per sample with its slowest
-/// step; each section only when some rule has that label.
 fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
     const cpu = l.cpu();
-    // Shares of a total under a second are noise.
     const shares = cpu.all >= 1;
     inline for (.{ .category, .tool }) |by| {
         const list = try l.totals(a, by);
@@ -661,7 +610,6 @@ fn writeShared(w: *std.Io.Writer, l: *const model.Launch) !void {
         try units.right(w, 10, units.size, .{s.declared_mib});
         try w.writeAll(" ");
         if (peak > 0) try units.right(w, 10, units.size, .{peak}) else try w.print("{s:>10}", .{"-"});
-        // A service holds mostly what it loaded: its peak plus a twentieth.
         if (s.service and peak > 0) {
             const suggest = @ceil(peak * 1.05 / 64.0) * 64.0;
             try w.writeAll(" ");

@@ -19,11 +19,8 @@ const eql = std.mem.eql;
 const duration = units.duration;
 const size = units.size;
 
-/// Minimum interval between scheduled live page writes and browser reloads, in seconds.
 pub const REFRESH_SECONDS: u32 = 15;
 
-/// A bound's name as the text reports write it, escaped: a group's name
-/// comes from the workflow.
 fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
     var buf: [256]u8 = undefined;
     var name: std.Io.Writer = .fixed(&buf);
@@ -31,7 +28,6 @@ fn boundName(w: *std.Io.Writer, b: model.Bound) !void {
     try escape(w, name.buffered());
 }
 
-/// Writes `s` with HTML special characters escaped.
 pub fn escape(w: *std.Io.Writer, s: []const u8) !void {
     var start: usize = 0;
     for (s, 0..) |c, i| {
@@ -50,13 +46,11 @@ pub fn escape(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeAll(s[start..]);
 }
 
-/// `name` cut to `max` characters by dropping its middle.
 pub fn middle(a: Allocator, name: []const u8, max: usize) []const u8 {
     const chars = std.unicode.utf8CountCodepoints(name) catch return name;
     if (chars <= max or max < 5) return name;
     const keep = max - 3;
     const head = (keep + 1) / 2;
-    // Byte offsets of the first `head` and the last `keep - head` characters.
     var it = std.unicode.Utf8View.initUnchecked(name).iterator();
     var head_end: usize = 0;
     var tail_start: usize = 0;
@@ -69,16 +63,12 @@ pub fn middle(a: Allocator, name: []const u8, max: usize) []const u8 {
     return std.fmt.allocPrint(a, "{s}...{s}", .{ name[0..head_end], name[tail_start..] }) catch name;
 }
 
-/// A round step for axis ticks, giving at most `most` of them over `span`.
 fn tickStep(span: f64, most: f64) f64 {
     const steps = [_]f64{ 0.1, 0.2, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400 };
     for (steps) |s| if (span / s <= most) return s;
-    // Longer spans step by whole days, still at most `most` ticks.
     return 86400 * @ceil(span / 86400 / most);
 }
 
-/// An axis tick label: `0`, `0.5s`, `30s`, `2m`, `2m30s`, `1h`, `1h30m`; ticks
-/// less than a second apart keep a decimal.
 fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
     const r = if (s == 0)
         std.fmt.bufPrint(buf, "0", .{})
@@ -100,16 +90,6 @@ fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
     return r catch "";
 }
 
-// The page is drawn on paper with a faint grid: ink line work, hairline
-// frames, condensed capitals for labels and monospace figures. Categories
-// (or steps) take eight inks in a fixed order, validated for color vision
-// deficiency against each paper; magnitude uses one ink ramp. States are
-// drawn in ink, by form: done solid, reused hatched, running outlined,
-// waiting dashed; so no state takes a category's hue, and red is kept for
-// failure. Dark mode is a charcoal sheet with pale ink.
-// The sheet in light: ink on paper. Categories c1-c8 keep one hue each in
-// both themes; q1-q7 shade the samples matrix from fast to slow; --rule draws
-// frames and dividers, --tab the figure numbers.
 const light_theme =
     \\color-scheme:light;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#5f6b78;--hair:#cfd3d8;--pend:#7d8894;
     \\--rule:#1d2b3a;--tab:#1d2b3a;--tab-ink:#fbfaf6;--g1:rgba(29,43,58,.04);--g2:rgba(29,43,58,.08);--wash:rgba(29,43,58,.05);
@@ -118,9 +98,6 @@ const light_theme =
     \\--done:#1d2b3a;--fail:#c62828;--fail-ink:#fff;--cancel:#7f8a96
 ;
 
-// The sheet in dark: a neutral charcoal on which the same hues sit in a
-// darker band, so no color glares against another; frames are a soft slate
-// rather than bright ink.
 const dark_theme =
     \\color-scheme:dark;--paper:#0c0f13;--sheet:#1a1f26;--ink:#e2e6eb;--ink2:#a9b2be;--muted:#7c8796;--hair:#2a3038;--pend:#6e7a89;
     \\--rule:#6e7a89;--tab:#3a4452;--tab-ink:#e2e6eb;--g1:rgba(214,222,232,.03);--g2:rgba(214,222,232,.06);--wash:rgba(214,222,232,.045);
@@ -129,21 +106,14 @@ const dark_theme =
     \\--done:#c9d2dd;--fail:#e5605c;--fail-ink:#0c0f13;--cancel:#707c8c
 ;
 
-/// The choices of the theme switch; auto follows the reader's setting.
 const themes = [_][]const u8{ "auto", "light", "dark" };
 
-// The reader's color scheme decides, unless the theme switch on the page
-// picks one; print is always light. The switch is three radio buttons that
-// come before the sheet, `.page`, so the sheet takes its theme from the
-// checked one with a sibling selector and the page needs no script.
 const style = ".page{" ++ light_theme ++ "}\n" ++
     "@media (prefers-color-scheme:dark){#theme-auto:checked~.page{" ++ dark_theme ++ "}}\n" ++
     "#theme-dark:checked~.page{" ++ dark_theme ++ "}\n" ++
     "@media print{.page,#theme-auto:checked~.page,#theme-dark:checked~.page{" ++ light_theme ++ "}}\n" ++
     @embedFile("templates/report.css");
 
-/// Keeps the endpoints of straight horizontal and vertical runs. Samples
-/// remain in the records; only redundant vertices of the drawing disappear.
 const Points = struct {
     const Point = struct { x: f64, y: f64 };
     w: *std.Io.Writer,
@@ -171,12 +141,14 @@ const Points = struct {
     }
 };
 
-/// The page for one launch. Records that do not parse are left out; their
-/// paths are copied into `a` for `unread`. The loaded model is released here.
 pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
+    return writeWith(gpa, a, w, launch_dir, unread, null);
+}
+
+pub fn writeWith(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8), given: ?model.Snapshot) !void {
     var scratch: std.heap.ArenaAllocator = .init(gpa);
     defer scratch.deinit();
-    var l = try model.load(gpa, scratch.allocator(), launch_dir);
+    var l = try model.loadWith(gpa, scratch.allocator(), launch_dir, given);
     defer l.deinit();
     if (unread) |u| for (l.unreadable.items) |path| {
         const owned = try a.dupe(u8, path);
@@ -186,9 +158,11 @@ pub fn write(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []cons
     try writeLaunch(gpa, w, &l);
 }
 
-/// Streams a page through a bounded buffer, then replaces `path`. A failed
-/// render leaves the previous page intact. Unreadable record names live in `a`.
 pub fn writeFile(gpa: Allocator, a: Allocator, path: []const u8, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8)) !void {
+    return writeFileWith(gpa, a, path, launch_dir, unread, null);
+}
+
+pub fn writeFileWith(gpa: Allocator, a: Allocator, path: []const u8, launch_dir: []const u8, unread: ?*std.ArrayList([]const u8), given: ?model.Snapshot) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
     const fd = try sys.openWrite(gpa, tmp, .truncate);
@@ -198,7 +172,7 @@ pub fn writeFile(gpa: Allocator, a: Allocator, path: []const u8, launch_dir: []c
     const file: std.Io.File = .{ .handle = fd, .flags = .{ .nonblocking = false } };
     var buffer: [16 * 1024]u8 = undefined;
     var out = file.writerStreaming(io.io(), &buffer);
-    write(gpa, a, &out.interface, launch_dir, unread) catch |err| return writeError(out.err, err);
+    writeWith(gpa, a, &out.interface, launch_dir, unread, given) catch |err| return writeError(out.err, err);
     out.interface.flush() catch |err| return writeError(out.err, err);
     try sys.rename(gpa, tmp, path);
 }
@@ -210,8 +184,6 @@ fn writeError(cause: ?std.Io.File.Writer.Error, err: anyerror) anyerror {
     } else err;
 }
 
-/// The page for a launch already read, such as one a `model.Live` keeps.
-/// Rendering scratch is released before returning; the model is borrowed.
 pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
     var scratch: std.heap.ArenaAllocator = .init(a);
     defer scratch.deinit();
@@ -219,15 +191,12 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     const p: Page = .{ .a = temp, .w = w, .l = l, .groups = try groups(temp, l) };
 
     try w.writeAll("<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\">\n<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
-    // A running launch's page asks to be loaded again with its next state.
     if (!l.finished) try w.print("<meta http-equiv=\"refresh\" content=\"{d}\">\n", .{REFRESH_SECONDS});
     try w.writeAll("<title>");
     try escape(w, l.name);
     try w.writeAll(" - kanit launch ");
     try escape(w, l.id);
     try w.print("</title>\n<style>\n{s}</style></head><body>\n", .{style});
-    // The theme switch's buttons come before the sheet they restyle; its
-    // labels sit in the sheet's corner.
     for (themes) |t| try w.print("<input class=\"pick\" type=\"radio\" name=\"theme\" id=\"theme-{s}\" aria-label=\"{s} theme\"{s}>", .{ t, t, if (std.mem.eql(u8, t, "auto")) " checked" else "" });
     try w.writeAll("\n<div class=\"page\"><main>\n");
 
@@ -253,19 +222,11 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere</footer>\n</main></div></body></html>\n");
 }
 
-/// Colors go to categories when the workflow declares any, else to steps,
-/// in pipeline order, so a color stays with its group while a launch runs.
-/// With more than eight groups, the eighth and later share gray.
 const Groups = struct {
     names: []const []const u8,
+    of_step: []const usize,
 
-    fn index(self: Groups, name: []const u8) usize {
-        for (self.names, 0..) |n, i| if (eql(u8, n, name)) return i;
-        return 0;
-    }
-
-    fn slot(self: Groups, name: []const u8) usize {
-        const i = self.index(name);
+    fn slot(self: Groups, i: usize) usize {
         if (self.names.len <= 8) return i + 1;
         return if (i < 7) i + 1 else 0;
     }
@@ -278,13 +239,17 @@ fn groupName(l: *const model.Launch, step: usize) []const u8 {
 
 fn groups(a: Allocator, l: *const model.Launch) !Groups {
     var names: std.ArrayList([]const u8) = .empty;
-    for (l.steps, 0..) |_, i| {
-        const g = groupName(l, i);
-        for (names.items) |x| {
-            if (eql(u8, x, g)) break;
-        } else try names.append(a, g);
+    var index: std.StringHashMapUnmanaged(usize) = .empty;
+    const of_step = try a.alloc(usize, l.steps.len);
+    for (of_step, 0..) |*o, i| {
+        const gop = try index.getOrPut(a, groupName(l, i));
+        if (!gop.found_existing) {
+            gop.value_ptr.* = names.items.len;
+            try names.append(a, gop.key_ptr.*);
+        }
+        o.* = gop.value_ptr.*;
     }
-    return .{ .names = names.items };
+    return .{ .names = names.items, .of_step = of_step };
 }
 
 const Page = struct {
@@ -294,7 +259,7 @@ const Page = struct {
     groups: Groups,
 
     fn slotOfStep(self: Page, step: usize) usize {
-        return self.groups.slot(groupName(self.l, step));
+        return self.groups.slot(self.groups.of_step[step]);
     }
 
     fn slotOfRule(self: Page, name: []const u8) usize {
@@ -319,11 +284,8 @@ const Page = struct {
         try self.w.writeAll("</div></section>\n");
     }
 
-    // ---- title block ----
+    // --- Title block ---
 
-    /// Under the status stamp of a launch that did not complete, why: the
-    /// reason it was refused or stopped, or its first failure and how many
-    /// more there were.
     fn whyNotCompleted(self: Page) !void {
         const w = self.w;
         const l = self.l;
@@ -372,7 +334,6 @@ const Page = struct {
         try escape(w, if (l.engine.len > 0) l.engine else "kanit");
         try w.writeAll("</div></div>\n<div class=\"row r2\">");
 
-        // Elapsed, and what limited it: the largest lower bound.
         try w.writeAll("<div class=\"cell\"><span class=\"k\">elapsed</span><div class=\"big\">");
         try duration(w, l.elapsed_s);
         try w.writeAll("</div><div class=\"sub\">");
@@ -385,7 +346,6 @@ const Page = struct {
         } else try w.writeAll(if (l.finished) "nothing ran in this launch" else "starting");
         try w.writeAll("</div></div>\n");
 
-        // Rules, by outcome.
         const c = l.counts;
         try w.print("<div class=\"cell\"><span class=\"k\">rules done</span><div class=\"big\">{d} of {d}</div><div class=\"sub\">", .{ c.completed + c.reused, l.selected });
         try w.print("{d} ran, {d} reused", .{ c.completed, c.reused });
@@ -397,7 +357,6 @@ const Page = struct {
         if (eql(u8, l.status, "refused")) try w.writeAll("; the launch was refused, so none ran");
         try w.writeAll("</div></div>\n");
 
-        // The pipeline's shape.
         try w.writeAll("<div class=\"cell\"><span class=\"k\">pipeline</span><div class=\"big\">");
         if (l.samples.len > 0) {
             try w.print("{d} &times; {d}</div><div class=\"sub\">samples by steps", .{ l.samples.len, l.steps.len });
@@ -408,7 +367,6 @@ const Page = struct {
         if (l.by_category) try w.print(", {d} {s}", .{ self.groups.names.len, if (self.groups.names.len == 1) "category" else "categories" });
         try w.writeAll("</div></div>\n");
 
-        // CPU and memory against the budget.
         var cores: f64 = 0;
         var cores_n: f64 = 0;
         var mem: f64 = 0;
@@ -454,9 +412,6 @@ const Page = struct {
         try w.print("<a href=\"#failures\"><b>T2</b>Failures ({d})</a><a href=\"#attempts\"><b>T3</b>Attempts ({d})</a></nav>\n", .{ failedCount(self.l), self.l.rows.len });
     }
 
-    /// The theme switch, a tag at the sheet's corner: radio buttons the
-    /// stylesheet reads with :has(), so the page needs no script. Auto
-    /// follows the reader's color scheme.
     fn themeSwitch(self: Page) !void {
         const w = self.w;
         try w.writeAll("<div class=\"corner\"><span class=\"theme\"><span class=\"k\">theme</span>");
@@ -464,7 +419,7 @@ const Page = struct {
         try w.writeAll("</span></div>\n");
     }
 
-    // ---- FIG. 1: the pipeline ----
+    // --- FIG. 1: the pipeline ---
 
     fn pipeline(self: Page) !void {
         const w = self.w;
@@ -478,8 +433,6 @@ const Page = struct {
             } else try w.writeAll("<p class=\"muted\">No rule was selected.</p>");
             return self.endFigure();
         }
-        // Columns by graph depth; within a column, steps follow their
-        // producers' rows so wires cross less.
         var cols: std.ArrayList(std.ArrayList(usize)) = .empty;
         for (l.steps, 0..) |s, i| {
             while (cols.items.len <= s.depth) try cols.append(self.a, .empty);
@@ -491,7 +444,6 @@ const Page = struct {
                 const ps = l.steps[si].parents.items;
                 var sum: f64 = 0;
                 for (ps) |pi| sum += row[pi];
-                // A step without producers keeps its pipeline order.
                 row[si] = if (ps.len > 0) sum / @as(f64, @floatFromInt(ps.len)) else @as(f64, @floatFromInt(si)) * 1e-3;
             }
             std.mem.sort(usize, col.items, row, struct {
@@ -506,9 +458,6 @@ const Page = struct {
         for (cols.items) |col| most_rows = @max(most_rows, col.items.len);
         const n_cols: f64 = @floatFromInt(cols.items.len);
         const gap: f64 = 40;
-        // One width for every box: what the sheet leaves for each column,
-        // widened to fit the longest step name beside its count; a wider
-        // drawing scales down to the sheet.
         var need: f64 = 0;
         for (l.steps) |s| {
             var count_buf: [24]u8 = undefined;
@@ -519,8 +468,6 @@ const Page = struct {
         const box_h: f64 = 66;
         const vgap: f64 = 18;
         const margin: f64 = 6;
-        // Shared inputs sit in a row under the pipeline; a pad on the left
-        // gives wires into the first column a gap to run in.
         const boxes = try self.sharedBoxes();
         const lpad: f64 = if (boxes.len > 0) 22 else 0;
         var width = lpad + margin * 2 + n_cols * box_w + (n_cols - 1) * gap;
@@ -529,8 +476,6 @@ const Page = struct {
         const rw: f64 = @min(box_w, 220);
         const rh: f64 = 44;
         const res_top = bottom + 46 + @as(f64, @floatFromInt(boxes.len)) * 5;
-        // Rows line up across columns, so the gaps between them form
-        // channels that wires can follow past other boxes.
         const xs = try self.a.alloc(f64, l.steps.len);
         const ys = try self.a.alloc(f64, l.steps.len);
         const cs = try self.a.alloc(usize, l.steps.len);
@@ -539,7 +484,6 @@ const Page = struct {
             ys[si] = margin + @as(f64, @floatFromInt(k)) * (box_h + vgap);
             cs[si] = c;
         };
-        // Each shared box under its first user, left to right, apart.
         if (boxes.len > 0) {
             var next_x: f64 = margin;
             for (boxes) |*b| {
@@ -558,11 +502,6 @@ const Page = struct {
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" style=\"min-width:{d:.0}px\" role=\"img\" aria-label=\"The pipeline: {d} steps\">\n", .{ width, height, @min(width, 900), l.steps.len });
         try w.writeAll("<defs><pattern id=\"hatch\" width=\"4\" height=\"4\" patternUnits=\"userSpaceOnUse\" patternTransform=\"rotate(45)\"><line class=\"hatch\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"4\"/></pattern>");
         try w.writeAll("<marker id=\"arrow\" viewBox=\"0 0 6 6\" refX=\"6\" refY=\"3\" markerWidth=\"6\" markerHeight=\"6\" orient=\"auto\"><path class=\"arrow\" d=\"M0,0 L6,3 L0,6 z\"/></marker></defs>\n");
-        // Wires first, under the boxes, at right angles from the right side
-        // of the producer to the left side of the consumer. A wire to the
-        // next column turns in the gap between them; one that skips columns
-        // runs along the channel above its consumer's row (below it, for the
-        // first row), past the boxes in between.
         for (l.steps, 0..) |s, si| for (s.parents.items) |pi| {
             const x1 = xs[pi] + box_w;
             const y1 = ys[pi] + box_h / 2;
@@ -588,8 +527,6 @@ const Page = struct {
         try self.endFigure();
     }
 
-    /// A shared input under FIG. 1: the steps that use it and the steps
-    /// writing what a service loads, as indices into the launch's steps.
     const SharedBox = struct {
         name: []const u8,
         service: bool,
@@ -620,11 +557,6 @@ const Page = struct {
         return out.items;
     }
 
-    /// The resource layer of FIG. 1: each shared input as a box below the
-    /// pipeline, a dashed wire into each step that maps or joins it, and a
-    /// dotted wire from each step writing what a service loads. Wires run
-    /// along the channel under the pipeline and up the gap left of a
-    /// column, past no box.
     fn sharedLayer(self: Page, boxes: []const SharedBox, xs: []const f64, ys: []const f64, box_w: f64, box_h: f64, gap: f64, bottom: f64, top: f64, rw: f64, rh: f64) !void {
         const w = self.w;
         const l = self.l;
@@ -636,8 +568,6 @@ const Page = struct {
                 const n: f64 = @floatFromInt(b.users.len);
                 const sx = b.x + rw / 2 + (kf - (n - 1) / 2) * @min(8, (rw - 24) / @max(n, 1));
                 const chan = bottom + 10 + off * 5;
-                // In the right part of the gap left of the column, apart from
-                // the step wires in its middle and the loads in its left part.
                 const gx = xs[si] - gap / 2 + 7 + off * 3;
                 try w.print("<path class=\"wire wire-shared\" marker-end=\"url(#arrow)\" d=\"M{d:.1},{d:.1} V{d:.1} H{d:.1} V{d:.1} H{d:.1}\"/>", .{ sx, top, chan, gx, ys[si] + box_h * 0.72, xs[si] - 1 });
             }
@@ -699,15 +629,12 @@ const Page = struct {
         try w.writeAll("</title>");
         try w.print("<rect class=\"box{s}\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"{d:.1}\" height=\"{d:.1}\"/>", .{ if (bad) " bad" else if (active) " active" else "", x, y, bw, bh });
         try w.print("<rect class=\"g{d}\" x=\"{d:.1}\" y=\"{d:.1}\" width=\"4\" height=\"{d:.1}\"/>", .{ self.slotOfStep(si), x + 0.6, y + 0.6, bh - 1.2 });
-        // The name takes the width left of the count, at about 7.2 px a
-        // character.
         var count_buf: [24]u8 = undefined;
         const count_text = std.fmt.bufPrint(&count_buf, "{d}/{d}", .{ done, s.selected() }) catch "";
         const chars: usize = @intFromFloat(@max((bw - 12 - 8 - 10 - @as(f64, @floatFromInt(count_text.len)) * 6.8) / 7.2, 6));
         try w.print("<text class=\"t-name\" x=\"{d:.1}\" y=\"{d:.1}\">", .{ x + 12, y + 18 });
         try escape(w, middle(self.a, s.name, chars));
         try w.print("</text><text class=\"t-count\" x=\"{d:.1}\" y=\"{d:.1}\" text-anchor=\"end\">{d}/{d}</text>", .{ x + bw - 8, y + 18, done, s.selected() });
-        // The tool and the median run under the name.
         try w.print("<text class=\"t-sub\" x=\"{d:.1}\" y=\"{d:.1}\">", .{ x + 12, y + 34 });
         if (s.tool) |t| try escape(w, middle(self.a, t, 18));
         if (s.runs > 0) {
@@ -715,7 +642,6 @@ const Page = struct {
             try duration(w, s.median_s);
         }
         try w.writeAll("</text>");
-        // A cell per rule while they fit, else one bar split by state.
         const left = x + 12;
         const right = x + bw - 8;
         const cy = y + 44;
@@ -749,7 +675,7 @@ const Page = struct {
         try w.writeAll("</g>\n");
     }
 
-    // ---- FIG. 2: CPU time ----
+    // --- FIG. 2: CPU time ---
 
     fn time(self: Page) !void {
         const w = self.w;
@@ -767,27 +693,24 @@ const Page = struct {
             try duration(w, cpu.here);
             try w.writeAll("; the rest is from earlier launches, whose outputs it reused.</p>\n");
         } else try w.writeAll(" in all.</p>\n");
-        // By group, in pipeline order so the colors read left to right.
         const by = try self.a.alloc(f64, self.groups.names.len);
         @memset(by, 0);
         for (l.rules) |r| if (r.selected) if (r.run) |run| {
-            by[self.groups.index(groupName(l, r.step))] += run.cpu_s;
+            by[self.groups.of_step[r.step]] += run.cpu_s;
         };
         try w.print("<div class=\"split\" role=\"img\" aria-label=\"CPU time by {s}\">", .{self.groupLabel()});
-        for (self.groups.names, by) |g, v| {
+        for (self.groups.names, by, 0..) |g, v, gi| {
             if (v <= 0) continue;
-            try w.print("<i class=\"g{d}\" style=\"flex:{d:.3} 1 0\" title=\"", .{ self.groups.slot(g), v });
+            try w.print("<i class=\"g{d}\" style=\"flex:{d:.3} 1 0\" title=\"", .{ self.groups.slot(gi), v });
             try escape(w, g);
             try w.writeAll(": ");
             try duration(w, v);
             try w.writeAll(" CPU\"></i>");
         }
         try w.writeAll("</div>\n<ul class=\"legend\">");
-        // The legend names what the bar shows: a group with no completed run
-        // yet has no CPU time to show.
-        for (self.groups.names, by) |g, v| {
+        for (self.groups.names, by, 0..) |g, v, gi| {
             if (v <= 0) continue;
-            try w.print("<li><i class=\"g{d}\"></i><b>", .{self.groups.slot(g)});
+            try w.print("<li><i class=\"g{d}\"></i><b>", .{self.groups.slot(gi)});
             try escape(w, g);
             try w.writeAll("</b>&nbsp; ");
             try duration(w, v);
@@ -817,7 +740,7 @@ const Page = struct {
         try self.endFigure();
     }
 
-    // ---- FIG. 3: samples by step ----
+    // --- FIG. 3: samples by step ---
 
     fn matrix(self: Page) !void {
         const w = self.w;
@@ -923,7 +846,7 @@ const Page = struct {
         }
     }
 
-    // ---- TABLE 1: steps ----
+    // --- TABLE 1: steps ---
 
     fn stepsTable(self: Page) !void {
         const w = self.w;
@@ -982,7 +905,6 @@ const Page = struct {
                     try size(w, s.sizing.memory_mib);
                     if (s.sizing.note == .out_of_memory) try w.writeAll("<small class=\"sub\" style=\"color:var(--fail)\">out of memory: a guess above the request</small>");
                     if (s.sizing.at_thread_limit) try w.writeAll("<small class=\"sub\">kept all its threads busy: it may use more if given them</small>");
-                    // A suggestion from few runs covers only the inputs measured.
                     if (s.runs < 3) try w.print("<small class=\"sub\">from {d} {s}</small>", .{ s.runs, if (s.runs == 1) "run" else "runs" });
                 },
             }
@@ -992,8 +914,6 @@ const Page = struct {
         try self.endFigure();
     }
 
-    /// A step's runs as dots on its own wall-time scale, with the median as
-    /// a line and the scale's end labelled.
     fn strip(self: Page, s: model.Step) !void {
         const w = self.w;
         const l = self.l;
@@ -1019,7 +939,7 @@ const Page = struct {
         try w.print("<text x=\"{d:.0}\" y=\"16\">{s}</text></svg>", .{ x0 + width + 10, fw.buffered() });
     }
 
-    // ---- FIG. 4: timeline ----
+    // --- FIG. 4: timeline ---
 
     fn timeline(self: Page) !void {
         const w = self.w;
@@ -1034,7 +954,6 @@ const Page = struct {
             const crit = if (l.rule_index.get(r.rule)) |ri| critical[ri] else false;
             try bars.append(self.a, .{ .name = r.rule, .attempt = r.attempt, .start = l.at(r.started_ns), .wall = r.wall_s, .waited = r.waited_s, .status = r.status, .slot = self.slotOfRule(r.rule), .open = false, .crit = crit });
         };
-        // Attempts still running have no record yet; they run up to now.
         for (l.rules) |r| if (r.selected and r.state.active() and r.started_ns > 0) {
             const start = l.at(r.started_ns);
             try bars.append(self.a, .{ .name = r.name, .attempt = r.attempts, .start = start, .wall = @max(l.elapsed_s - start, 0.1), .waited = 0, .status = "running", .slot = self.slotOfRule(r.name), .open = true, .crit = false });
@@ -1062,7 +981,6 @@ const Page = struct {
         try w.print("<div class=\"drawing\" style=\"aspect-ratio:{d:.0}/{d:.0}\">", .{ width, height });
         try w.print("<svg viewBox=\"0 0 {d:.0} {d:.0}\" role=\"img\" aria-label=\"Timeline of {d} attempts\">\n", .{ width, height, n });
         try w.writeAll("<defs><marker id=\"dim\" viewBox=\"0 0 8 8\" refX=\"7\" refY=\"4\" markerWidth=\"8\" markerHeight=\"8\" orient=\"auto-start-reverse\"><path class=\"arrow\" d=\"M0,1 L8,4 L0,7 z\"/></marker></defs>");
-        // The elapsed time as a dimension line over the plot.
         var buf: [32]u8 = undefined;
         var fw: std.Io.Writer = .fixed(&buf);
         try duration(&fw, l.elapsed_s);
@@ -1108,13 +1026,12 @@ const Page = struct {
             try duration(w, b.wall);
             try w.writeAll("</title></rect>\n");
         }
-        // The legend names only the groups this launch's attempts belong to.
         try w.writeAll("</svg></div>\n<ul class=\"legend\">");
         var other: usize = 0;
         const present = try self.a.alloc(bool, self.groups.names.len);
         @memset(present, false);
         for (bars.items) |b| if (self.stepOfRule(b.name)) |si| {
-            present[self.groups.index(groupName(l, si))] = true;
+            present[self.groups.of_step[si]] = true;
         };
         for (self.groups.names, 0..) |g, i| {
             if (!present[i]) continue;
@@ -1122,7 +1039,7 @@ const Page = struct {
                 other += 1;
                 continue;
             }
-            try w.print("<li><i class=\"g{d}\"></i>", .{self.groups.slot(g)});
+            try w.print("<li><i class=\"g{d}\"></i>", .{self.groups.slot(i)});
             try escape(w, g);
             try w.writeAll("</li>");
         }
@@ -1131,7 +1048,7 @@ const Page = struct {
         try self.endFigure();
     }
 
-    // ---- FIG. 5: the budget ----
+    // --- FIG. 5: the budget ---
 
     fn budget(self: Page) !void {
         const w = self.w;
@@ -1195,8 +1112,6 @@ const Page = struct {
             try points.add(left + pw, top + ph);
             try points.finish();
             try w.writeAll("\"/>\n");
-            // Under the in-use area, the part of the reserved memory that
-            // shared inputs hold once.
             if (memory and !used) {
                 var any = false;
                 for (samples) |s| any = any or s.shared_reserved_mib > 0;
@@ -1211,7 +1126,6 @@ const Page = struct {
                 }
             }
         }
-        // The in-use line on top.
         try w.writeAll("<polyline style=\"fill:none;stroke:var(--ink);stroke-width:2;stroke-linejoin:round\" points=\"");
         var line: Points = .{ .w = w };
         for (samples) |s| {
@@ -1227,7 +1141,7 @@ const Page = struct {
         try w.writeAll("</svg></div></div>\n");
     }
 
-    // ---- FIG. 6: what limited the launch ----
+    // --- FIG. 6: what limited the launch ---
 
     fn limits(self: Page) !void {
         const w = self.w;
@@ -1238,8 +1152,6 @@ const Page = struct {
             return self.endFigure();
         }
         const span = @max(l.elapsed_s, 0.001);
-        // The bounds: the launch could not take less than any of them, so
-        // the largest is what limited it.
         try w.writeAll("<p class=\"lead\">");
         var verdict: std.Io.Writer.Allocating = .init(self.a);
         try report.writeVerdict(&verdict.writer, l);
@@ -1301,7 +1213,6 @@ const Page = struct {
                 const held_from = @max(ready - p.held_s, 0) / span * 100;
                 const wait_from = ready / span * 100;
                 const at = p.start_s / span * 100;
-                // With retries the run spans its attempts and the time between them.
                 const run_w = @max((p.end_s - p.start_s) / span * 100, 0.5);
                 try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-held\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"b-wait\" style=\"left:{d:.2}%;width:{d:.2}%\"></i><i class=\"g{d}\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ held_from, wait_from - held_from, wait_from, at - wait_from, self.slotOfStep(r.step), at, run_w });
             }
@@ -1313,7 +1224,6 @@ const Page = struct {
                 try duration(w, l.path_after_s);
                 try w.print("</td><td><div class=\"bar\" style=\"border-color:var(--hair)\"><i class=\"b-cache\" style=\"left:{d:.2}%;width:{d:.2}%\"></i></div></td></tr>\n", .{ last / span * 100, l.path_after_s / span * 100 });
             }
-            // The running swatch in the first rule's color, as its bar has.
             try w.print("</tbody></table></div>\n<ul class=\"legend\"><li><i class=\"b-held\"></i>held for producers off the path</li><li><i class=\"b-wait\"></i>ready, waiting for resources</li><li><i class=\"g{d}\"></i>running, in the color of its category</li></ul>\n", .{self.slotOfStep(l.rules[l.path[0].rule].step)});
         }
         try w.writeAll("<div class=\"k\" style=\"margin-top:18px\">waiting for resources</div>");
@@ -1353,7 +1263,7 @@ const Page = struct {
         try self.endFigure();
     }
 
-    // ---- TABLE 2: failures ----
+    // --- TABLE 2: failures ---
 
     fn failures(self: Page) !void {
         const w = self.w;
@@ -1394,8 +1304,6 @@ const Page = struct {
         try self.endFigure();
     }
 
-    /// The last forty lines of file `path`, within its last 8 KiB, as a
-    /// preformatted block, or `none` when it is missing or blank.
     fn tail(self: Page, path: []const u8, none: []const u8) !void {
         const w = self.w;
         try w.writeAll("<pre>");
@@ -1412,7 +1320,7 @@ const Page = struct {
         try w.writeAll("</pre>");
     }
 
-    // ---- TABLE 3: attempts ----
+    // --- TABLE 3: attempts ---
 
     fn attemptsTable(self: Page) !void {
         const w = self.w;
@@ -1475,8 +1383,6 @@ fn stateText(s: model.State) []const u8 {
     };
 }
 
-/// The shade of a run, 1 to 7, by its wall time against its step's median:
-/// under 0.9x, 1x, 1.1x, 1.25x, 1.5x, 2x, and 2x or more.
 fn shade(wall: f64, median: f64) usize {
     if (median <= 0) return 3;
     const bounds = [_]f64{ 0.9, 1.0, 1.1, 1.25, 1.5, 2.0 };

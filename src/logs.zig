@@ -20,7 +20,6 @@ pub const Options = struct {
     follow: bool = false,
 };
 
-/// The attempt directory to show, or null when the rule never ran.
 pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, opts: Options) !?[]const u8 {
     const rec = try records.recordsDir(a, root);
     const launches = if (opts.launch) |id| try a.dupe([]const u8, &.{id}) else try records.launchNames(gpa, a, rec);
@@ -43,11 +42,6 @@ pub fn find(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8, op
     return if (sys.exists(gpa, e.attempt)) try a.dupe(u8, e.attempt) else null;
 }
 
-/// For `--follow` without `--launch` or `--attempt`: while the newest launch
-/// runs and has yet to start `rule`, waits for it, so the logs followed are
-/// that launch's and not the last recorded ones. The attempt's directory, or
-/// null when the launch does not run the rule, ends first, or ends the rule
-/// without an attempt, as for a reused or blocked rule.
 pub fn awaitAttempt(gpa: Allocator, a: Allocator, root: []const u8, rule: []const u8) !?[]const u8 {
     const rec = try records.recordsDir(a, root);
     const launch = (try records.latestLaunch(gpa, a, rec)) orelse return null;
@@ -55,7 +49,6 @@ pub fn awaitAttempt(gpa: Allocator, a: Allocator, root: []const u8, rule: []cons
     defer tr.deinit();
     while (records.launchActive(gpa, launch)) {
         _ = try tr.update();
-        // A launch still checking its inputs has not named its rules yet.
         if (tr.started_ns != 0) {
             const i = tr.index.get(rule) orelse return null;
             const r = tr.rules.items[i];
@@ -68,9 +61,6 @@ pub fn awaitAttempt(gpa: Allocator, a: Allocator, root: []const u8, rule: []cons
     return null;
 }
 
-/// Writes the attempt's logs. With `follow`, keeps writing what is appended
-/// until the attempt's record exists or its launch is no longer active,
-/// then writes the rest and returns.
 pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, opts: Options) !void {
     const names: []const []const u8 = switch (opts.stream) {
         .both => &.{ "stdout.log", "stderr.log" },
@@ -85,12 +75,10 @@ pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, op
         if (opts.stream == .both) try diagnostics(gpa, a, w, dir);
         return;
     }
-    // Following both streams interleaves them as they grow.
     var offsets = [_]u64{ 0, 0 };
     const record = try std.fs.path.join(a, &.{ dir, "record.json" });
     var paths: [2][]const u8 = undefined;
     for (names, 0..) |n, k| paths[k] = try std.fs.path.join(a, &.{ dir, n });
-    // <launch>/attempts/<rule>/<NNN>
     const launch_dir = std.fs.path.dirname(std.fs.path.dirname(std.fs.path.dirname(dir) orelse dir) orelse dir) orelse dir;
     while (true) {
         const done = sys.exists(gpa, record) or !records.launchActive(gpa, launch_dir);
@@ -105,7 +93,6 @@ pub fn show(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8, op
     }
 }
 
-/// Writes the diagnostics a failed attempt kept, each under its path.
 fn diagnostics(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8) !void {
     for (try records.keptDiagnostics(gpa, a, dir)) |p| {
         try w.print("==> {s} <==\n", .{p});
@@ -113,7 +100,6 @@ fn diagnostics(gpa: Allocator, a: Allocator, w: *std.Io.Writer, dir: []const u8)
     }
 }
 
-/// Writes `path` from `offset` on; returns the new end offset.
 fn copy(gpa: Allocator, w: *std.Io.Writer, path: []const u8, offset: u64) !u64 {
     const fd = sys.openRead(gpa, path) catch |err| switch (err) {
         error.FileNotFound => return offset,

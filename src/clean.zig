@@ -20,9 +20,6 @@ pub const Options = struct {
     dry_run: bool = false,
 };
 
-/// What `clean` removed, or would remove with `dry_run`; `kept_for_recovery`
-/// counts launches and `previous/` directories kept because they hold the
-/// only copy of an output that a killed launch moved aside.
 pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, kept_for_recovery: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, failed: usize = 0 };
 
 fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
@@ -31,9 +28,6 @@ fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
     return @intCast(try sys.check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0)));
 }
 
-/// Removes `name` below the open directory `parent` and everything in it,
-/// without following symlinks; returns the bytes of the files removed.
-/// With `dry`, only counts.
 pub fn removeAt(gpa: Allocator, parent: sys.Fd, name: [:0]const u8, dry: bool, depth: usize) !u64 {
     if (depth > 64) return error.DirectoryTooDeep;
     var st: linux.Statx = undefined;
@@ -44,8 +38,6 @@ pub fn removeAt(gpa: Allocator, parent: sys.Fd, name: [:0]const u8, dry: bool, d
     }
     const fd: sys.Fd = @intCast(try sys.check(linux.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0)));
     defer sys.close(fd);
-    // A directory kept read-only, such as an output directory moved aside
-    // whole, is the user's own: it is made writable to empty it.
     if (!dry) _ = linux.fchmod(fd, 0o700);
     var total: u64 = 0;
     var names: std.ArrayList([:0]u8) = .empty;
@@ -55,7 +47,6 @@ pub fn removeAt(gpa: Allocator, parent: sys.Fd, name: [:0]const u8, dry: bool, d
     }
     var entries: sys.DirEntries = .{ .fd = fd };
     while (try entries.next()) |e| try names.append(gpa, try gpa.dupeZ(u8, e.name));
-    // Entries are collected first: removing while reading would skip some.
     for (names.items) |entry| total += try removeAt(gpa, fd, entry, dry, depth + 1);
     if (!dry) _ = try sys.check(linux.unlinkat(parent, name, linux.AT.REMOVEDIR));
     return total;
@@ -71,11 +62,9 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
     };
     defer sys.close(lock);
 
-    // Containers of earlier launches in this working directory.
     if (try container.findPodman(gpa, a, environ.get("PATH") orelse "/usr/bin:/bin")) |podman| {
         const devnull = try sys.openRead(gpa, "/dev/null");
         defer sys.close(devnull);
-        // Podman sees the environment a run gives it.
         const envp = try process.Vec.init(a, try state.hostEnv(a, environ, &.{}));
         result.containers = if (opts.dry_run)
             (try container.listLeftovers(gpa, a, podman, root, &envp, devnull)).len
@@ -83,19 +72,13 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             try container.removeLeftovers(gpa, a, podman, root, &envp, devnull);
     }
 
-    // A killed launch's unfinished attempts may hold the only copy of an
-    // output in their previous/, which the next launch moves back: both steps
-    // keep them.
     const pending = try records.pendingAttempts(gpa, a, rec, null);
     if (opts.previous) try removePrevious(gpa, a, rec, pending, opts.dry_run, &result, w);
 
     const keep = opts.keep orelse return result;
     const names = try records.launchNames(gpa, a, rec);
     if (names.len <= keep) return result;
-    // Launches that hold the recorded attempt of a rule stay.
     var held: std.StringHashMapUnmanaged(void) = .empty;
-    // The plain file, without the journal's corrections: a record that the
-    // next launch will drop still keeps its launch until then.
     var st = try state.load(gpa, rec);
     defer st.deinit();
     const prefix = try std.fs.path.join(a, &.{ rec, "launches" });
@@ -118,8 +101,6 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
             result.kept_for_recovery += 1;
             continue;
         }
-        // One launch that cannot be removed, such as one holding a file of
-        // another owner, leaves the others to remove.
         result.bytes += removeAt(gpa, launches_fd, try a.dupeZ(u8, name), opts.dry_run, 0) catch |err| switch (err) {
             error.OutOfMemory => return err,
             else => {
@@ -134,15 +115,12 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, enviro
     return result;
 }
 
-/// The directory `name` below the open directory `parent`, or null when it
-/// is absent, not a directory, or a symlink, which is never followed.
 fn openBelow(parent: sys.Fd, name: [:0]const u8) ?sys.Fd {
     const rc = linux.openat(parent, name, .{ .ACCMODE = .RDONLY, .DIRECTORY = true, .NOFOLLOW = true, .CLOEXEC = true }, 0);
     if (linux.errno(rc) != .SUCCESS) return null;
     return @intCast(rc);
 }
 
-/// The names in the open directory `fd`, without hidden ones.
 fn namesIn(a: Allocator, fd: sys.Fd) ![]const [:0]const u8 {
     var names: std.ArrayList([:0]const u8) = .empty;
     var entries: sys.DirEntries = .{ .fd = fd };
@@ -150,10 +128,6 @@ fn namesIn(a: Allocator, fd: sys.Fd) ![]const [:0]const u8 {
     return names.items;
 }
 
-/// Removes the `previous/` directory of every attempt in every launch,
-/// with a line for each launch that had any. Each directory is opened below
-/// the one before without following a symlink, so a link planted among the
-/// records cannot lead the removal elsewhere.
 fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, pending: []const records.Pending, dry: bool, result: *Result, w: *std.Io.Writer) !void {
     const launches_fd = openDir(gpa, try std.fs.path.join(a, &.{ rec, "launches" })) catch return;
     defer sys.close(launches_fd);

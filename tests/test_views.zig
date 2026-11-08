@@ -3,9 +3,12 @@
 const std = @import("std");
 const testing = std.testing;
 const workz = @import("workz");
+const workflow = workz.workflow;
 const sys = workz.sys;
 const helpers = @import("helpers.zig");
 const Scratch = helpers.Scratch;
+const loadText = helpers.loadText;
+const head = helpers.head;
 
 test "event times parse back to the epoch nanoseconds they were written from" {
     const ns: i128 = 1_792_782_446_812_000_000;
@@ -28,7 +31,6 @@ const ev_rules =
 test "the watch tracker applies only complete lines and keeps reading where it stopped" {
     var s = try Scratch.init();
     defer s.deinit();
-    // The last line is cut in the middle, as while the engine writes it.
     const cut = ev_rules.len - 30;
     _ = try s.file("events.jsonl", ev_start ++ ev_rules[0..cut]);
     var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
@@ -56,7 +58,6 @@ test "watch keys decode from raw terminal input" {
     try testing.expectEqual(tui.Key.interrupt, tui.decode("\x03", &used).?);
     try testing.expectEqual(tui.Key.escape, tui.decode("\x1b", &used).?);
     try testing.expectEqual(tui.Key{ .char = 'q' }, tui.decode("q", &used).?);
-    // An unused sequence is skipped whole; an incomplete one waits.
     try testing.expectEqual(@as(?tui.Key, null), tui.decode("\x1b[1;5Pq", &used));
     try testing.expectEqual(@as(usize, 6), used);
     try testing.expectEqual(@as(?tui.Key, null), tui.decode("\x1b[1;", &used));
@@ -80,7 +81,6 @@ test "the watch selection moves, scrolls and survives filters" {
     ui.key(.{ .char = 'q' }, &rows, 2);
     try testing.expectEqual(tui.Mode.table, ui.mode);
     try testing.expect(!ui.quit);
-    // A selected rule that left the view gives way to a visible one.
     const fewer = [_]usize{ 4, 0 };
     ui.settle(&fewer, 2);
     try testing.expectEqual(@as(?usize, 0), ui.selected);
@@ -91,7 +91,6 @@ test "the watch selection moves, scrolls and survives filters" {
 test "[regression] - [watch]: S then R act on the same rule after its row moves" {
     const tui = workz.tui;
     var ui: tui.Ui = .{};
-    // Rules a (0) and b (1) run; the top row is selected without a key.
     const running = [_]usize{ 0, 1 };
     ui.settle(&running, 10);
     try testing.expectEqual(@as(?usize, 0), ui.selected);
@@ -99,7 +98,6 @@ test "[regression] - [watch]: S then R act on the same rule after its row moves"
     ui.key(.{ .char = 'S' }, &running, 10);
     try testing.expectEqualStrings("stop", ui.action.?.cmd);
     try testing.expectEqual(@as(?usize, 0), ui.action.?.rule);
-    // a stops and sorts below b, which keeps running.
     const after = [_]usize{ 1, 0 };
     ui.settle(&after, 10);
     ui.key(.{ .char = 'R' }, &after, 10);
@@ -125,7 +123,6 @@ test "[unit] - [watch]: a frame fits the terminal width, shortens long names in 
     var order: [3]usize = undefined;
     var found: usize = 0;
     while (lines.next()) |line| : (n += 1) {
-        // Columns: everything outside escape sequences.
         var cols: usize = 0;
         var i: usize = 0;
         while (i < line.len) : (i += 1) {
@@ -149,7 +146,6 @@ test "[unit] - [watch]: a frame fits the terminal width, shortens long names in 
     ui.mode = .timeline;
     out.clearRetainingCapacity();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 60, 10, now, false);
-    // trim ran from 2 s to 4 s of a 5 s launch and failed.
     try testing.expect(std.mem.indexOf(u8, out.written(), "!!!!") != null);
 }
 
@@ -168,7 +164,6 @@ test "the watch lists every selected rule and searches and sorts them" {
     defer arena.deinit();
     const tui = workz.tui;
     const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
-    // Running first, then pending in launch order.
     try testing.expectEqualSlices(usize, &.{ 2, 0, 1 }, try tui.visible(arena.allocator(), &t, .all, .status, "", now));
     try testing.expectEqualSlices(usize, &.{ 1, 2, 0 }, try tui.visible(arena.allocator(), &t, .all, .name, "", now));
     try testing.expectEqualSlices(usize, &.{ 2, 1 }, try tui.visible(arena.allocator(), &t, .all, .status, "alpha", now));
@@ -191,7 +186,6 @@ test "the watch lists every selected rule and searches and sorts them" {
     try testing.expectEqual(tui.Mode.details, ui.mode);
 }
 
-/// Columns of `line` outside escape sequences.
 fn visibleColumns(line: []const u8) usize {
     var cols: usize = 0;
     var i: usize = 0;
@@ -219,14 +213,12 @@ test "[unit] - [watch]: without color a frame has no SGR sequences and draws bar
     const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 120, 20, now, false);
     const frame = out.written();
-    // Only cursor, clear and erase sequences: no color (SGR ends in 'm').
     var i: usize = 0;
     while (std.mem.indexOfScalarPos(u8, frame, i, 0x1b)) |at| : (i = at + 1) {
         var j = at + 2;
         while (j < frame.len and (frame[j] < 0x40 or frame[j] > 0x7e)) j += 1;
         try testing.expect(frame[j] != 'm');
     }
-    // The progress bar: one of three rules done is none here; one failed.
     try testing.expect(std.mem.indexOf(u8, frame, " progress  [") != null);
     try testing.expect(std.mem.indexOf(u8, frame, "!") != null);
     try testing.expect(std.mem.indexOf(u8, frame, "1 failed") != null);
@@ -294,12 +286,10 @@ test "[unit] - [watch]: the selection follows the top row until a key moves it" 
     var ui: tui.Ui = .{};
     ui.settle(&.{ 3, 1, 2 }, 5);
     try testing.expectEqual(@as(?usize, 3), ui.selected);
-    // Rows reorder as rules finish: the untouched selection stays on top.
     ui.settle(&.{ 1, 2, 3 }, 5);
     try testing.expectEqual(@as(?usize, 1), ui.selected);
     ui.key(.down, &.{ 1, 2, 3 }, 5);
     try testing.expectEqual(@as(?usize, 2), ui.selected);
-    // Once moved, it stays on its rule.
     ui.settle(&.{ 2, 3, 1 }, 5);
     try testing.expectEqual(@as(?usize, 2), ui.selected);
     ui.settle(&.{ 3, 1, 2 }, 5);
@@ -387,13 +377,11 @@ test "[edge] - [run]: program output becomes valid UTF-8 and cuts never split a 
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const a = arena.allocator();
-    // Each byte that starts no valid sequence is replaced on its own.
     try testing.expectEqualStrings("ok \u{FFFD} done \u{FFFD}\u{FFFD}", try sys.utf8Text(a, "ok \xff done \xe2\x82"));
     const valid = "caf\u{e9}";
     try testing.expect((try sys.utf8Text(a, valid)).ptr == valid.ptr);
     try testing.expectEqualStrings("caf", sys.utf8Prefix("caf\u{e9}", 4));
     try testing.expectEqualStrings("caf\u{e9}", sys.utf8Prefix("caf\u{e9}", 5));
-    // 30 characters of two bytes each, shown as 20: 9, "...", 8.
     const name = "\u{e9}" ** 30;
     const short = workz.html.middle(a, name, 20);
     try testing.expect(std.unicode.utf8ValidateSlice(short));
@@ -450,8 +438,9 @@ test "[edge] - [watch]: an Alt key is no key of the view, and two escapes are tw
 test "[failure] - [watch]: the interactive view of a launch with no readable event shows an unknown start, not 1970" {
     var s = try Scratch.init();
     defer s.deinit();
-    _ = try s.file("events.jsonl", "garbage\n");
-    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    const launch = try s.dir("launch");
+    _ = try s.file("launch/events.jsonl", "garbage\n");
+    var t = try workz.tracker.Tracker.init(testing.allocator, launch);
     defer t.deinit();
     _ = try t.update();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -488,4 +477,163 @@ test "[failure] - [watch]: C1 control characters in a log line or a reason reach
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 14, workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?, false);
     try testing.expect(std.mem.indexOf(u8, out.written(), "\xc2\x9b") == null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "31m news") != null);
+}
+
+test "[unit] - [views]: graph --why prints one path with the file each rule reads" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"write\"\noutput = [\"d/x.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"read\"\ninput = [\"d\"]\noutput = [\"n.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const path = try workz.views.whyPath(a, &wf, &g, mask, "write", "read");
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.views.writeWhy(&out.writer, &wf, &g, path);
+    try testing.expectEqualStrings("write\n  -> read  (reads d)\n", out.written());
+}
+
+const service_graph = head ++
+    "[shared.ix]\npath = \"idx\"\ncontainer = \"img\"\ncommand = \"cat idx/data\"\nmemory = \"64M\"\n\n" ++
+    "[[rules]]\nname = \"build\"\noutput = [\"idx/data\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+    "[[rules]]\nname = \"use\"\ninput = [\"idx\"]\noutput = [\"u.txt\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"ix\"]\n";
+
+test "[unit] - [views]: graph --users prints a shared input with the rule that loads it and the rules that use it" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, service_graph, &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const v = try workz.views.build(a, &wf, &g, mask, .{ .users = "ix" });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.views.writeText(a, &out.writer, v);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "shared ix  service, 64 MiB held once, idx\n  loaded from build\n  used by use\n") != null);
+}
+
+test "[unit] - [views]: graph --layer all as JSON has the edge kinds of a shared input and its files, and no others" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, service_graph, &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    const v = try workz.views.build(a, &wf, &g, mask, .{ .layer = .all });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.views.writeJson(&out.writer, v);
+    const want = [_][]const u8{ "consumes", "joins", "loads", "produces", "within" };
+    inline for (std.meta.fields(workz.views.EdgeKind)) |f| {
+        var expected = false;
+        for (want) |k| expected = expected or std.mem.eql(u8, k, f.name);
+        try testing.expectEqual(expected, std.mem.indexOf(u8, out.written(), "\"kind\":\"" ++ f.name ++ "\"") != null);
+    }
+}
+
+fn lineWith(text: []const u8, part: []const u8) ?[]const u8 {
+    var lines = std.mem.splitSequence(u8, text, "\r\n");
+    while (lines.next()) |line| if (std.mem.indexOf(u8, line, part) != null) return line;
+    return null;
+}
+
+fn startedLaunch(s: *Scratch, a: std.mem.Allocator) !void {
+    const dir = try s.dir("slow");
+    _ = try s.file("slow/stderr.log", "to-stderr\n");
+    _ = try s.file("slow/stdout.log", "to-stdout\n");
+    _ = try s.file("events.jsonl", try std.fmt.allocPrint(a, "{{\"v\":1,\"time\":\"2026-01-01T00:00:00.000Z\",\"event\":\"launch_started\",\"selected\":2,\"max_threads\":4,\"max_memory_mib\":2048,\"rules\":[\"slow\",\"quick\"]}}\n" ++
+        "{{\"v\":1,\"time\":\"2026-01-01T00:00:01.000Z\",\"event\":\"task_started\",\"rule\":\"slow\",\"attempt\":1,\"directory\":\"{s}\",\"threads\":1,\"memory_mib\":64}}\n", .{dir}));
+}
+
+test "[unit] - [watch]: enter follows the selected attempt's stderr, and o switches the follow to stdout" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try startedLaunch(&s, arena.allocator());
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    const rows = [_]usize{ 0, 1 };
+    var ui: workz.tui.Ui = .{};
+    ui.settle(&rows, 10);
+    ui.key(.enter, &rows, 10);
+    const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
+    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  running  stderr ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") != null);
+    ui.key(.{ .char = 'o' }, &rows, 10);
+    out.clearRetainingCapacity();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
+    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  running  stdout ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "to-stdout") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") == null);
+}
+
+test "[unit] - [watch]: t shows the timeline, with a running rule's bar running up to now" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try startedLaunch(&s, arena.allocator());
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    const rows = [_]usize{ 0, 1 };
+    var ui: workz.tui.Ui = .{};
+    ui.settle(&rows, 10);
+    ui.key(.{ .char = 't' }, &rows, 10);
+    const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
+    const row = lineWith(out.written(), "slow") orelse return error.TestUnexpectedResult;
+    const name_at = std.mem.indexOf(u8, row, "slow").? + "slow".len;
+    try testing.expect(std.mem.startsWith(u8, std.mem.trimStart(u8, row[name_at..], " "), ">>>"));
+}
+
+test "[unit] - [watch]: i shows the selected rule's request and its live memory" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    try startedLaunch(&s, arena.allocator());
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    t.rules.items[0].live_memory = 202 << 20;
+    const rows = [_]usize{ 0, 1 };
+    var ui: workz.tui.Ui = .{};
+    ui.settle(&rows, 10);
+    ui.key(.{ .char = 'i' }, &rows, 10);
+    const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 12, now, true);
+    const request = lineWith(out.written(), "request") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, request, "1 threads, 64M") != null);
+    const memory = lineWith(out.written(), "  memory  ") orelse return error.TestUnexpectedResult;
+    try testing.expect(std.mem.indexOf(u8, memory, "202M now") != null);
 }

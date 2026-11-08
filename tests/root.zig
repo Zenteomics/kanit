@@ -19,7 +19,6 @@ test {
     testing.refAllDecls(workz.fields);
     testing.refAllDecls(workz.report);
     testing.refAllDecls(workz.sys);
-    // Every module, so code the command line does not reach still compiles.
     testing.refAllDecls(workz.run);
     testing.refAllDecls(workz.container);
     testing.refAllDecls(workz.clean);
@@ -34,11 +33,15 @@ test {
     testing.refAllDecls(workz.lint);
     testing.refAllDecls(workz.schema);
     testing.refAllDecls(workz.prepare);
+    testing.refAllDecls(workz.cli);
+    testing.refAllDecls(workz.schedule);
     _ = @import("test_workflow.zig");
     _ = @import("test_reuse.zig");
     _ = @import("test_engine.zig");
     _ = @import("test_views.zig");
     _ = @import("test_reports.zig");
+    _ = @import("test_cli.zig");
+    _ = @import("test_schedule.zig");
 }
 
 test "the version is a semantic version" {

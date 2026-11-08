@@ -1,57 +1,48 @@
 #!/usr/bin/env bash
-# Measures workz, with and without isolation, against Nextflow with zebrac.
-# Each batch runs its commands in interleaved rounds, so all see the same
-# machine load. PREPARED_WORKFLOW is a real prepared workflow, such as the
-# rnaFusion graph, replayed with commands that only create their outputs.
-# Usage: bench/bench.sh WORKZ NEXTFLOW PREPARED_WORKFLOW OUT_DIR
+# Measures kanit against an earlier kanit with zebrac on generated workflows:
+# dispatch of many short rules from a fresh directory, with and without
+# isolation; a resume in which every rule is reused; and validate and plan of
+# a large graph. Each batch runs both binaries in interleaved rounds, so both
+# see the same machine load; the first binary named is the baseline. Run it
+# after the release checks pass.
+# Usage: bench/bench.sh KANIT_BASELINE KANIT OUT_DIR
+# DISPATCH (default 500), RESUME (5000) and PLAN (20000) set the number of
+# rules of each workload. Each batch writes its JSON report to OUT_DIR.
 set -euo pipefail
-workz=$(realpath "$1") nextflow=$(realpath "$2") prepared=$(realpath "$3") out=$4
+[ $# = 3 ] || { echo "usage: bench/bench.sh KANIT_BASELINE KANIT OUT_DIR" >&2; exit 2; }
+old=$(realpath "$1") new=$(realpath "$2") out=$3
 here=$(cd "$(dirname "$0")" && pwd)
 [ -e "$out" ] && { echo "output directory exists: $out" >&2; exit 2; }
 mkdir -p "$out"
 out=$(realpath "$out")
 cold="$here/cold.sh"
+dispatch=${DISPATCH:-500} resume=${RESUME:-5000} plan=${PLAN:-20000}
+budget="--max-threads 8 --max-memory 4G -j 8 -q"
 
-# Dispatch: 32 independent tasks that each write their number.
-t="$out/tpl-dispatch"; mkdir -p "$t"
-{ printf '[workflow]\nname = "dispatch"\nversion = "1"\n'
-  for i in $(seq 0 31); do printf '\n[[rules]]\nname = "w%s"\ninput = []\noutput = ["%s.txt"]\nshell = "echo %s > %s.txt"\n[rules.resources]\nthreads = 1\nmemory = "64M"\n' $i $i $i $i; done
-} > "$t/workflow.toml"
-n="$out/tpl-nextflow"; mkdir -p "$n"
-cat > "$n/main.nf" <<'NF'
-nextflow.enable.dsl=2
-process WRITE {
-    cpus 1
-    memory '64 MB'
-    input:
-    val item
-    output:
-    path "${item}.txt"
-    script:
-    """
-    printf '%s\n' '${item}' > '${item}.txt'
-    """
-}
-workflow { WRITE(Channel.fromList((0..31).toList())) }
-NF
-printf "executor { name='local'; cpus=4; memory='2 GB'; queueSize=4 }\n" > "$n/nextflow.config"
-mkdir -p "$out/runs"
-export NXF_OFFLINE=true NXF_HOME="$out/nextflow-home" NXF_ANSI_LOG=false
-zebrac -w 1 -i 5 -a 5 --json "$out/dispatch-32.json" -- \
-  "$cold $out/runs $t $workz run workflow.toml -j 4 --max-threads 4 --max-memory 2G -q" \
-  "$cold $out/runs $t $workz run workflow.toml -j 4 --max-threads 4 --max-memory 2G -q --no-isolation" \
-  "$cold $out/runs $n $nextflow run main.nf -c nextflow.config"
+t="$out/tpl-dispatch"
+mkdir -p "$t" "$out/runs"
+bash "$here/graph.sh" "$dispatch" "$dispatch" "$t/workflow.toml"
+zebrac -w 1 -i 5 -a 5 --json "$out/dispatch-$dispatch.json" -- \
+  "$cold $out/runs $t $old run workflow.toml $budget --no-isolation" \
+  "$cold $out/runs $t $new run workflow.toml $budget --no-isolation"
+zebrac -w 1 -i 5 -a 5 --json "$out/dispatch-$dispatch-isolated.json" -- \
+  "$cold $out/runs $t $old run workflow.toml $budget" \
+  "$cold $out/runs $t $new run workflow.toml $budget"
 
-# The real rnaFusion graph, with each command replaced by one that creates its outputs.
-r="$out/tpl-replay"; mkdir -p "$r"
-bash "$here/replay.sh" "$prepared" "$r/workflow.toml"
-zebrac -w 1 -i 5 -a 5 --json "$out/replay-561-cold.json" -- \
-  "$cold $out/runs $r $workz run workflow.toml --max-threads 8 --max-memory 20G -q" \
-  "$cold $out/runs $r $workz run workflow.toml --max-threads 8 --max-memory 20G -q --no-isolation"
+for b in old new; do
+  mkdir -p "$out/resume-$b"
+  bash "$here/graph.sh" "$resume" 100 "$out/resume-$b/workflow.toml"
+done
+"$old" run "$out/resume-old/workflow.toml" $budget --no-isolation > /dev/null
+"$new" run "$out/resume-new/workflow.toml" $budget --no-isolation > /dev/null
+zebrac -w 1 -i 3 -a 3 --json "$out/resume-$resume.json" -- \
+  "$old run $out/resume-old/workflow.toml $budget --no-isolation" \
+  "$new run $out/resume-new/workflow.toml $budget --no-isolation"
 
-# Full resume of the replay: every rule reusable. The warmup round
-# completes each directory with the binary being measured.
-for e in iso noiso; do mkdir -p "$out/resume-$e"; cp "$r/workflow.toml" "$out/resume-$e/"; done
-zebrac -w 1 -i 3 -a 3 --json "$out/replay-561-resume.json" -- \
-  "$workz run $out/resume-iso/workflow.toml --max-threads 8 --max-memory 20G -q" \
-  "$workz run $out/resume-noiso/workflow.toml --max-threads 8 --max-memory 20G -q --no-isolation"
+bash "$here/graph.sh" "$plan" 200 "$out/plan.toml"
+zebrac -w 1 -i 3 -a 3 --json "$out/validate-$plan.json" -- \
+  "$old validate $out/plan.toml" \
+  "$new validate $out/plan.toml"
+zebrac -w 1 -i 3 -a 3 --json "$out/plan-$plan.json" -- \
+  "$old plan $out/plan.toml --summary" \
+  "$new plan $out/plan.toml --summary"

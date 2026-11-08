@@ -11,19 +11,15 @@ const process = @import("process.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
-/// The Podman executable on PATH, or null.
 pub fn findPodman(gpa: Allocator, a: Allocator, path_env: []const u8) !?[]const u8 {
     return process.findProgram(gpa, a, path_env, "podman");
 }
 
-/// An image reference that could not be resolved: missing from local
-/// storage, or Podman failed while looking (`status` is its exit status).
 pub const Unresolved = struct {
     ref: []const u8,
     missing: bool,
     status: u32 = 0,
 
-    /// What a launch says when it refuses for this image.
     pub fn text(self: Unresolved, a: Allocator) ![]const u8 {
         if (self.missing) return std.fmt.allocPrint(a, "container image {s} is not available locally; kanit does not pull images", .{self.ref});
         if (linux.W.IFEXITED(self.status)) return std.fmt.allocPrint(a, "podman image inspect {s} failed with status {d}; run it to see why", .{ self.ref, linux.W.EXITSTATUS(self.status) });
@@ -31,8 +27,6 @@ pub const Unresolved = struct {
     }
 };
 
-/// Resolves each distinct image reference to its local image ID; the first
-/// that cannot be resolved is reported in `unresolved`.
 pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []const []const u8, envp: *const process.Vec, devnull: sys.Fd, unresolved: *?Unresolved) !std.StringHashMapUnmanaged([]const u8) {
     var ids: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (refs) |ref| {
@@ -40,8 +34,6 @@ pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []c
         var status: u32 = 0;
         const out = process.capture(gpa, a, &.{ podman, "image", "inspect", "--format", "{{.Id}}", ref }, envp, devnull, &status) catch |err| switch (err) {
             error.CommandFailed => {
-                // `podman image exists` exits 1 for a missing image alone; any
-                // other failure is Podman's own.
                 var exists_status: u32 = 0;
                 _ = process.capture(gpa, a, &.{ podman, "image", "exists", ref }, envp, devnull, &exists_status) catch {};
                 const gone = linux.W.IFEXITED(exists_status) and linux.W.EXITSTATUS(exists_status) == 1;
@@ -60,10 +52,6 @@ pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []c
     return ids;
 }
 
-/// Removes containers left by an earlier launch in this working directory.
-/// Right after a crash Podman can still hold a container whose processes
-/// are gone, and one removal may not take; the list is checked again, up to
-/// three times. Returns the number of containers found.
 pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) !usize {
     var status: u32 = 0;
     var found: usize = 0;
@@ -84,8 +72,6 @@ pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: [
     return found;
 }
 
-/// IDs of the containers that launches in working directory `root` started
-/// and that still exist.
 pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) ![]const []const u8 {
     var status: u32 = 0;
     const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
@@ -96,11 +82,6 @@ pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []c
     return ids.items;
 }
 
-/// Starts removing one container, whatever its state; used after an attempt
-/// that did not end by itself. The engine does not wait for `podman rm`, so
-/// a slow or stuck Podman cannot hold up signals, timeouts or other
-/// attempts; the engine reaps it as it reaps every child, and `kanit clean`
-/// removes a container it left.
 pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *const process.Vec, devnull: sys.Fd) ?linux.pid_t {
     const argv = process.Vec.init(a, &.{ podman, "rm", "--force", "--ignore", "--time", "0", name }) catch return null;
     const path = a.dupeZ(u8, podman) catch return null;
@@ -108,12 +89,6 @@ pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *co
     return process.spawn(&spec) catch null;
 }
 
-/// Directory bind mounts for a container rule: the working directory and the
-/// directories of outside inputs and shared paths read-only, then each
-/// output's directory read-write. A directory below one already listed with
-/// the same access is skipped; a directory needed both ways is read-write
-/// (outputs at the top of the working directory make it writable, but
-/// never the engine's records in it).
 pub const Mount = struct { dir: []const u8, write: bool };
 
 pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro: []const []const u8) ![]Mount {
@@ -130,7 +105,6 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
     const ro_min = try minimal(a, ro.items);
     const rw_min = try minimal(a, rw.items);
     var out: std.ArrayList(Mount) = .empty;
-    // A directory that must be writable for an output is mounted once, read-write.
     for (ro_min) |d| {
         const also_rw = for (rw_min) |w| {
             if (std.mem.eql(u8, w, d)) break true;
@@ -138,8 +112,6 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
         if (!also_rw) try out.append(a, .{ .dir = d, .write = false });
     }
     for (rw_min) |d| try out.append(a, .{ .dir = d, .write = true });
-    // A writable working directory would expose the engine's records, which
-    // decide reuse: they are mounted over it read-only.
     const rec = try std.fs.path.join(a, &.{ root, ".workz" });
     for (rw_min) |d| if (workflow.within(d, rec)) {
         try out.append(a, .{ .dir = rec, .write = false });
@@ -148,14 +120,11 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
     return out.items;
 }
 
-/// Sorted, without duplicates and without directories below another one.
 fn minimal(a: Allocator, dirs: []const []const u8) ![]const []const u8 {
     const sorted = try a.dupe([]const u8, dirs);
     std.mem.sort([]const u8, sorted, {}, lessThan);
     var out: std.ArrayList([]const u8) = .empty;
     for (sorted) |d| {
-        // A sibling such as "/a-b" can sort between "/a" and "/a/c", so every
-        // kept directory is checked, not only the last.
         const below = for (out.items) |k| {
             if (workflow.within(k, d)) break true;
         } else false;
@@ -175,24 +144,16 @@ pub const RunSpec = struct {
     image_id: []const u8,
     root: []const u8,
     launch: []const u8,
-    /// Relative cgroup path of the attempt, or null without isolation.
     cgroup_parent: ?[]const u8,
     mounts: []const Mount,
     env: []const []const u8,
-    /// IPC namespace of a shared service to join, by container name.
     ipc_service: ?[]const u8 = null,
-    /// A shared service: its IPC namespace can be joined and it works in its
-    /// private /tmp.
     service: bool = false,
-    /// Host paths mounted read-only over paths in the image.
     image_mounts: []const workflow.ImageMount = &.{},
-    /// Directory the command starts in, when not the working directory.
     workdir: ?[]const u8 = null,
-    /// Path of the script `/bin/sh` runs.
     script: []const u8,
 };
 
-/// The `podman run` argument vector for one attempt.
 pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
     var v: std.ArrayList([]const u8) = .empty;
     try v.appendSlice(a, &.{
@@ -209,8 +170,6 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
         "/bin/sh",
     });
     if (s.service) try v.append(a, "--ipc=shareable");
-    // The container's processes go into the attempt's group, which holds
-    // only them: its limit, OOM group and counters describe the tool.
     if (s.cgroup_parent) |cg| try v.appendSlice(a, &.{ "--cgroup-manager=cgroupfs", try std.fmt.allocPrint(a, "--cgroup-parent={s}", .{cg}) });
     if (s.ipc_service) |svc| try v.append(a, try std.fmt.allocPrint(a, "--ipc=container:{s}", .{svc}));
     for (s.mounts) |m| try v.appendSlice(a, &.{ "--volume", try std.fmt.allocPrint(a, "{s}:{s}:{s}", .{ m.dir, m.dir, if (m.write) "rw" else "ro" }) });
@@ -220,21 +179,14 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
     return v.items;
 }
 
-/// Body of command.sh for a container rule: POSIX sh with errexit, nounset
-/// and pipefail where the shell has it.
 pub fn script(a: Allocator, shell: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{s}\n", .{shell});
 }
 
-/// Script of a shared service: the command with its standard output sent to
-/// standard error, then `ready` on standard output, then a wait for end of
-/// file on the FIFO `$WORKZ_SERVICE_STOP`, whose only writer is the engine:
-/// the service ends when the engine stops it or dies.
 pub fn serviceScript(a: Allocator, command: []const u8) ![]const u8 {
     return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{{\n{s}\n}} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n", .{command});
 }
 
-/// Image references used by the selected rules and the services they join.
 pub fn imageRefs(a: Allocator, wf: *const workflow.Workflow, mask: []const bool) ![]const []const u8 {
     var refs: std.ArrayList([]const u8) = .empty;
     for (wf.rules, 0..) |r, i| {
@@ -245,8 +197,6 @@ pub fn imageRefs(a: Allocator, wf: *const workflow.Workflow, mask: []const bool)
     return refs.items;
 }
 
-/// Key text per rule beyond its command: the image ID of a container rule
-/// and the identity of the service it joins (image ID, command and path).
 pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std.StringHashMapUnmanaged([]const u8)) ![]const []const u8 {
     const out = try a.alloc([]const u8, wf.rules.len);
     for (wf.rules, out) |r, *e| {
@@ -271,9 +221,6 @@ pub fn ruleExtras(a: Allocator, wf: *const workflow.Workflow, images: *const std
     return out;
 }
 
-/// Starts `podman stop --time <grace>` without waiting: the container gets
-/// SIGTERM, and SIGKILL for all its processes after the grace period. The
-/// engine's reaper collects the process.
 pub fn stopAsync(a: Allocator, podman: []const u8, name: []const u8, grace_s: u64, envp: *const process.Vec, devnull: sys.Fd) ?linux.pid_t {
     const argv = process.Vec.init(a, &.{ podman, "stop", "--ignore", "--time", std.fmt.allocPrint(a, "{d}", .{grace_s}) catch return null, name }) catch return null;
     const path = a.dupeZ(u8, podman) catch return null;

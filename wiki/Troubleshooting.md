@@ -91,7 +91,7 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 - `cannot read input manifest PATH: ...` or `input manifest PATH must be a JSON object of absolute paths`, then `the input manifest cannot be used`: The file given with `--input-manifest` is missing or not a manifest. The launch exits with status 2.
 
-- `PATH has a format version this kanit cannot read` or `PATH cannot be read: it is not a valid kanit state`, for `.workz/state.json`: The resume state was written by another version of kanit, usually a newer one, or is damaged. Use the kanit that wrote it, or move the file aside: the next launch runs every rule, and the launch directories keep every earlier attempt. `run` refuses with exit status 2; `plan` exits 1.
+- `PATH has a format version this kanit cannot read` or `PATH cannot be read: it is not a valid kanit state`, for `.workz/state.json`: The resume state was written by another version of kanit, usually a newer one, or is damaged. Use the kanit that wrote it, or move the file aside: the next launch runs every rule, and the launch directories keep every earlier attempt. A `.workz/state.log` of a newer version, or with a damaged complete line, gives the same messages, naming `state.json`: moving `state.json` aside also makes kanit ignore the log. `run` refuses with exit status 2; `plan` exits 1.
 
 ## Rules that fail
 

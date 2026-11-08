@@ -30,7 +30,6 @@ nav a:hover{color:var(--ink);background:var(--wash)}nav a b{color:var(--muted);m
 #theme-auto:focus-visible~.page label[for=theme-auto],#theme-light:focus-visible~.page label[for=theme-light],#theme-dark:focus-visible~.page label[for=theme-dark]{outline:2px solid var(--ink);outline-offset:-2px}
 .fig{background:var(--sheet);border:1.5px solid var(--rule);margin:26px 0 0}
 @media screen{.fig{contain:layout paint}}
-/* The wrapper keeps the SVG's exact viewBox ratio while its drawing is skipped. */
 .drawing{width:100%}
 @media screen{.drawing{content-visibility:auto}}
 .fig-h{display:flex;align-items:center;gap:14px;border-bottom:1px solid var(--rule);padding:0 14px 0 0;flex-wrap:wrap}

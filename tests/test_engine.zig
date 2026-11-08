@@ -26,8 +26,6 @@ test "container mounts list each directory once with the access it needs" {
     rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
     const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});
-    // /w must be writable for top.txt, which also covers /w/out; the
-    // records below it stay read-only.
     try testing.expectEqual(@as(usize, 4), ms.len);
     try testing.expectEqualStrings("/data/reads", ms[0].dir);
     try testing.expect(!ms[0].write);
@@ -61,11 +59,10 @@ test "a rule that joins a service depends on the rules writing what the service 
     try testing.expectEqualSlices(usize, &.{0}, g.parents[1]);
     try testing.expect(g.produces(wf.rules[1].input_abs[0]));
 
-    // A rule joining the service cannot write what it loads.
     var s2 = try Scratch.init();
     defer s2.deinit();
     const writes = "[[rules]]\nname = \"use\"\noutput = [\"idx/extra\"]\ncontainer = \"img\"\nshell = \"true\"\n[rules.resources]\nmemory = \"1M\"\nshared = [\"idx\"]\n";
-    var wf2 = try loadText(&s2, head ++ svc ++ writes, &problem);
+    var wf2 = try helpers.loadTextLines(&s2, head ++ svc ++ writes, &problem);
     defer wf2.deinit();
     try testing.expectError(error.Invalid, workz.graph.build(testing.allocator, &wf2, &problem));
     defer testing.allocator.free(problem.message);
@@ -139,7 +136,6 @@ test "removing a launch directory does not follow symlinks out of it" {
     const a = arena.allocator();
     _ = try s.dir("keep");
     _ = try s.file("keep/precious", "data");
-    // `gone` is removed below; the scratch cleanup then finds nothing.
     const gone = try std.fs.path.join(testing.allocator, &.{ s.path, "gone" });
     defer testing.allocator.free(gone);
     try sys.mkdir(testing.allocator, gone);
@@ -213,7 +209,6 @@ test "[unit] - [views]: steps collapse samples, and a shared input shows what lo
     try testing.expectEqual(@as(usize, 3), path.len);
     try testing.expectEqualStrings("report", wf.rules[path[2]].name);
     try testing.expectError(error.NoPath, workz.views.whyPath(a, &wf, &g, mask, "report", "index"));
-    // A path runs through the selected rules only.
     const narrow = try a.dupe(bool, mask);
     narrow[wf.ruleIndex("report").?] = false;
     try testing.expectError(error.NotSelected, workz.views.whyPath(a, &wf, &g, narrow, "index", "report"));
@@ -222,7 +217,6 @@ test "[unit] - [views]: steps collapse samples, and a shared input shows what lo
 test "[unit] - [run]: a rule's budget need counts its request, its client and each shared input once" {
     var s = try Scratch.init();
     defer s.deinit();
-    // 5000 bytes take two 4 KiB pages: 1 MiB once rounded up.
     _ = try s.file("ref.fa", "x" ** 5000);
     const text = head ++ "[shared.ref]\npath = \"ref.fa\"\n\n[shared.svc]\ncontainer = \"img\"\ncommand = \"load\"\nmemory = \"100M\"\n\n[shared.gone]\npath = \"missing-ref\"\n\n" ++
         "[[rules]]\nname = \"host\"\noutput = [\"h\"]\nshell = \"true\"\n[rules.resources]\nmemory = \"10M\"\nshared = [\"ref\"]\n" ++
@@ -237,7 +231,6 @@ test "[unit] - [run]: a rule's budget need counts its request, its client and ea
     const a = arena.allocator();
     var failure: []const u8 = "";
 
-    // `far` does not run, so its missing shared input is never measured.
     const sizes = try workz.run.sharedSizes(testing.allocator, a, &wf, &.{ true, true, false }, &failure);
 
     try testing.expectEqual(@as(u64, 1), sizes[0].?.mib);
@@ -340,7 +333,6 @@ test "[failure] - [cgroup]: a group whose events cannot be read counts as still 
     try testing.expect(workz.cgroup.populated(testing.allocator, gone));
 }
 
-/// Runs `clean` on scratch records without Podman: PATH names an empty directory.
 fn cleanScratch(s: *Scratch, a: std.mem.Allocator, opts: workz.clean.Options, out: *std.Io.Writer) !workz.clean.Result {
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
@@ -394,4 +386,48 @@ test "[failure] - [clean]: --previous does not follow a launch directory that is
     try testing.expect(sys.exists(testing.allocator, kept));
     try testing.expect(!sys.exists(testing.allocator, own));
     try testing.expectEqual(@as(usize, 1), r.previous);
+}
+
+fn launchesFixture(s: *Scratch, a: std.mem.Allocator) !void {
+    for ([_][]const u8{ ".workz", ".workz/launches", ".workz/launches/L1", ".workz/launches/L2", ".workz/launches/L3", ".workz/launches/L4" }) |d| _ = try s.dir(d);
+    for ([_][]const u8{ "L1", "L2", "L3", "L4" }) |n| _ = try s.file(try std.fmt.allocPrint(a, ".workz/launches/{s}/f", .{n}), "data");
+    _ = try s.file(".workz/lock", "");
+    _ = try s.file(".workz/state.json", try std.fmt.allocPrint(a, "{{\"format_version\": 4, \"files\": {{}}, \"envs\": {{}}, \"manifest\": {{}}, \"rules\": {{\"a\": {{\"key\": \"k\", \"command\": \"c\", \"env\": \"e\", \"request\": \"r\", \"writes\": \"w\", \"inputs\": \"i\", \"parents\": \"p\", \"engine\": \"g\", \"outputs\": [], \"attempt\": \"{s}/.workz/launches/L4/attempts/a/001\", \"finished\": \"f\"}}, \"b\": {{\"key\": \"k\", \"command\": \"c\", \"env\": \"e\", \"request\": \"r\", \"writes\": \"w\", \"inputs\": \"i\", \"parents\": \"p\", \"engine\": \"g\", \"outputs\": [], \"attempt\": \"{s}/.workz/launches/L1/attempts/b/001\", \"finished\": \"f\"}}}}}}", .{ s.path, s.path }));
+}
+
+test "[unit] - [clean]: --dry-run lists the launches --keep would remove and removes none" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try launchesFixture(&s, a);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    const r = try cleanScratch(&s, a, .{ .keep = 1, .dry_run = true }, &out.writer);
+
+    try testing.expectEqual(@as(usize, 2), r.launches);
+    try testing.expectEqual(@as(usize, 1), r.kept_for_records);
+    try testing.expectEqualStrings("would remove launch L2\nwould remove launch L3\n", out.written());
+    for ([_][]const u8{ "L1", "L2", "L3", "L4" }) |n| try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".workz/launches", n })));
+}
+
+test "[unit] - [clean]: --keep removes the older launches and keeps one that holds a recorded attempt" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try launchesFixture(&s, a);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+
+    const r = try cleanScratch(&s, a, .{ .keep = 1 }, &out.writer);
+
+    try testing.expectEqual(@as(usize, 2), r.launches);
+    try testing.expectEqual(@as(usize, 1), r.kept_for_records);
+    try testing.expectEqualStrings("removed launch L2\nremoved launch L3\n", out.written());
+    for ([_]struct { name: []const u8, kept: bool }{ .{ .name = "L1", .kept = true }, .{ .name = "L2", .kept = false }, .{ .name = "L3", .kept = false }, .{ .name = "L4", .kept = true } }) |c|
+        try testing.expectEqual(c.kept, sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".workz/launches", c.name })));
 }

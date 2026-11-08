@@ -11,544 +11,42 @@ const state = workz.state;
 const monitor = workz.monitor;
 const report = workz.report;
 const term = workz.term;
-
-// --- Help ---
-
-const Group = enum { write, run, watch, maintain };
-
-/// Which common options a command takes: the working directory, and the
-/// target selection that only commands reading the workflow use.
-const CommonOptions = enum { none, workdir, all };
-
-/// One option as `help` lists it: its spellings and argument, and what it
-/// does. The spellings before the argument also serve typo hints.
-const Opt = struct { flag: []const u8, desc: []const u8 };
-
-/// One command as `help` shows it; `examples` holds one command per line.
-const Command = struct {
-    name: []const u8,
-    args: []const u8,
-    summary: []const u8,
-    group: Group,
-    about: []const u8,
-    options: []const Opt = &.{},
-    examples: []const u8 = "",
-    common: CommonOptions = .all,
-};
-
-const workdir_opt: Opt = .{ .flag = "-d, --workdir DIR", .desc = "working directory (default: the workflow's directory)" };
-const target_opt: Opt = .{ .flag = "-t, --target RULE", .desc = "select RULE and the rules it depends on (repeatable)" };
-const rerun_opts = [_]Opt{
-    .{ .flag = "--rerun", .desc = "decide as 'run --rerun' would" },
-    .{ .flag = "--rerun-rule RULE", .desc = "decide as 'run --rerun-rule RULE' would (repeatable)" },
-    .{ .flag = "--input-manifest FILE", .desc = "decide as 'run --input-manifest FILE' would" },
-    .{ .flag = "--pass-env NAME", .desc = "decide as 'run --pass-env NAME' would (repeatable)" },
-    .{ .flag = "--threads STEP=N", .desc = "decide as 'run --threads STEP=N' would (repeatable)" },
-};
-
-const commands = [_]Command{
-    .{
-        .name = "init",
-        .args = "[FILE] [--template]",
-        .summary = "write a commented starter workflow or pipeline template",
-        .group = .write,
-        .common = .none,
-        .about =
-        \\Writes a commented starter workflow to FILE (default: workflow.toml) in the
-        \\current directory. With --template, writes a pipeline template instead
-        \\(default: pipeline.toml) and a samples.tsv beside it, for kanit prepare. It
-        \\never overwrites a file that exists.
-        ,
-        .options = &.{.{ .flag = "--template", .desc = "write a pipeline template and samples.tsv instead" }},
-        .examples =
-        \\kanit init
-        \\kanit init rnaseq.toml
-        \\kanit init --template
-        ,
-    },
-    .{
-        .name = "prepare",
-        .args = "[TEMPLATE] [--params FILE] [-o WORKFLOW] [--check]",
-        .summary = "write the workflow a pipeline template describes",
-        .group = .write,
-        .common = .none,
-        .about =
-        \\Compiles a pipeline template (default: pipeline.toml) into the explicit
-        \\workflow the engine runs (default: workflow.toml beside it). Each [[steps]]
-        \\entry is one rule, or with for_each = "sample" one rule per row of the
-        \\sample sheet, named SAMPLE__STEP and labelled with its step and sample.
-        \\{name} takes a sample-sheet column, a [params] value or the step name; in
-        \\shell, {input}, {output} and {threads} name the rule's own, and {name:q}
-        \\quotes the value for the shell. Other braces, and ${name}, stay as written.
-        \\--params FILE is a run file: its [workflow] keys and [params] take the place
-        \\of the template's, its [samples] replaces the template's with a sheet read
-        \\beside it, and the workflow goes beside it. The result is checked as validate
-        \\would before it replaces the workflow; --check prints the rules it would add,
-        \\remove and change, and exits 1 if any, without writing.
-        ,
-        .options = &.{
-            .{ .flag = "--params FILE", .desc = "a run file: the run's workflow keys, samples and params" },
-            .{ .flag = "-o, --output FILE", .desc = "the workflow to write (default: workflow.toml)" },
-            .{ .flag = "--check", .desc = "compare with the current workflow; write nothing" },
-        },
-        .examples =
-        \\kanit prepare
-        \\kanit prepare ../pipeline/pipeline.toml --params run.toml
-        \\kanit prepare --check
-        \\kanit prepare rnaseq.pipeline.toml -o rnaseq.toml
-        ,
-    },
-    .{
-        .name = "schema",
-        .args = "",
-        .summary = "print a JSON Schema of the workflow format, for editors",
-        .group = .write,
-        .common = .none,
-        .about =
-        \\Prints a JSON Schema of the workflow format: every table and key validate
-        \\accepts, with its type and a line of help, and no other key. Editors that
-        \\check TOML against a schema, such as Taplo and the Even Better TOML
-        \\extension, then complete keys and mark mistakes as you type.
-        ,
-        .examples = "kanit schema > kanit.schema.json",
-    },
-    .{
-        .name = "validate",
-        .args = "[WORKFLOW]",
-        .summary = "check a workflow: every key, every value and the graph",
-        .group = .write,
-        .about =
-        \\Checks every key and value of WORKFLOW, the rule names, the declared outputs
-        \\and the graph, lists every problem at once, and prints a one-line summary
-        \\with notes on what is valid but likely a mistake. With --inputs it also lists
-        \\the inputs that no rule writes and that do not exist; plan --budget checks
-        \\the requests against the budget.
-        ,
-        .options = &.{.{ .flag = "--inputs", .desc = "also list inputs that exist nowhere; exit 1 if any" }},
-        .examples =
-        \\kanit validate workflow.toml
-        \\kanit validate --inputs
-        ,
-    },
-    .{
-        .name = "plan",
-        .args = "[WORKFLOW] [options]",
-        .summary = "show which rules a run would run or reuse, and why",
-        .group = .write,
-        .about =
-        \\Prints, for every selected rule, whether a run would run it or reuse it and
-        \\why, then how many of each. Nothing runs. It exits 1 when run would refuse
-        \\the launch: a missing input, an output changed outside kanit, or an input
-        \\that does not match --input-manifest.
-        \\'dry-run' is another name for it.
-        ,
-        .options = &([_]Opt{ .{ .flag = "--summary", .desc = "count the decisions by reason instead" }, .{ .flag = "--budget", .desc = "check every request against the budget, as run does" }, .{ .flag = "--max-threads N", .desc = "the budget --budget checks (default: every online CPU)" }, .{ .flag = "--max-memory SIZE", .desc = "the budget --budget checks (default: 3/4 of RAM)" } } ++ rerun_opts),
-        .examples =
-        \\kanit plan workflow.toml
-        \\kanit plan workflow.toml --summary
-        \\kanit plan workflow.toml --rerun-rule align_s1
-        ,
-    },
-    .{
-        .name = "explain",
-        .args = "[WORKFLOW] RULE [options]",
-        .summary = "show why one rule would run, part by part",
-        .group = .write,
-        .about =
-        \\Shows the decision for RULE. For a rule with a record whose producers do not
-        \\run, it also compares each part of its key with the record (command,
-        \\environment, request, writes, inputs, producers, engine key) and says what
-        \\changed.
-        ,
-        .options = &rerun_opts,
-        .examples = "kanit explain workflow.toml align_s1",
-    },
-    .{
-        .name = "graph",
-        .args = "[WORKFLOW] [options]",
-        .summary = "show the rule graph in layers: rules, files, resources",
-        .group = .write,
-        .about =
-        \\Shows the selected rules and what links them: as text on a terminal, as
-        \\Graphviz DOT otherwise, or as JSON. The rules layer shows which rule feeds
-        \\which and through what file; the files layer puts the files between them; the
-        \\resources layer adds each shared input, held once, with the rules that write
-        \\what it loads and the rules that use it, and the resource groups.
-        ,
-        .options = &.{
-            .{ .flag = "--layer LAYER", .desc = "rules, files, resources or all (default: rules)" },
-            .{ .flag = "--by step", .desc = "one node per step instead of per rule" },
-            .{ .flag = "--focus EXPR", .desc = "+RULE up, RULE+ down, +RULE+ both, 2+RULE two levels" },
-            .{ .flag = "--why FROM:TO", .desc = "one path of rules from FROM to TO" },
-            .{ .flag = "--users NAME", .desc = "a shared input, what writes it and what uses it" },
-            .{ .flag = "--format FORMAT", .desc = "text, dot or json (default: text on a terminal)" },
-        },
-        .examples =
-        \\kanit graph --layer resources --by step
-        \\kanit graph --users genome
-        \\kanit graph --why trim_S1:report
-        \\kanit graph --focus +report --format dot > report.dot
-        ,
-    },
-    .{
-        .name = "run",
-        .args = "[WORKFLOW] [options]",
-        .summary = "run the rules that need to run",
-        .group = .run,
-        .about =
-        \\Runs the selected rules that are not reusable, within a budget of threads,
-        \\memory and jobs, each attempt in its own cgroup inside a systemd user scope.
-        \\Progress goes to standard error and the summary to standard output, as text
-        \\on a terminal and as JSON otherwise. Every attempt is recorded in .workz/ in
-        \\the working directory.
-        ,
-        .options = &.{
-            .{ .flag = "--max-threads N", .desc = "CPU budget in threads (default: every online CPU)" },
-            .{ .flag = "--max-memory SIZE", .desc = "memory budget, such as 60G (default: 3/4 of RAM)" },
-            .{ .flag = "-j, --jobs N", .desc = "at most N rules at once (default: --max-threads)" },
-            .{ .flag = "-k, --keep-going", .desc = "keep running independent rules after a failure" },
-            .{ .flag = "-r, --retry N", .desc = "retries of rules that set none, 0 to 3 (default: 0)" },
-            .{ .flag = "--timeout DURATION", .desc = "time limit of rules that set none, such as 2h" },
-            .{ .flag = "--rerun", .desc = "run every selected rule, even when reusable" },
-            .{ .flag = "--rerun-rule RULE", .desc = "run RULE even when reusable (repeatable)" },
-            .{ .flag = "--input-manifest FILE", .desc = "check external inputs against digests first" },
-            .{ .flag = "--pass-env NAME", .desc = "pass and key a variable; recorded, so not for secrets" },
-            .{ .flag = "--threads STEP=N", .desc = "N threads for STEP's rules, this launch (repeatable)" },
-            .{ .flag = "--grace DURATION", .desc = "wait before killing a stopped rule (default: 10s)" },
-            .{ .flag = "--slice NAME.slice", .desc = "place the run's scope in this systemd slice" },
-            .{ .flag = "--no-isolation", .desc = "no scope, cgroups or network namespace" },
-            .{ .flag = "-q, --quiet", .desc = "no progress lines; failures still print" },
-            .{ .flag = "--json", .desc = "print the summary as JSON, also on a terminal" },
-            .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
-        },
-        .examples =
-        \\kanit run workflow.toml --max-threads 16 --max-memory 60G
-        \\kanit run workflow.toml --target align_s1 --keep-going
-        \\kanit run workflow.toml --rerun-rule align_s1
-        ,
-    },
-    .{
-        .name = "control",
-        .args = "[WORKFLOW] stop RULE | retry RULE | cancel",
-        .summary = "stop or retry a rule, or cancel, in the running launch",
-        .group = .run,
-        .common = .workdir,
-        .about =
-        \\Sends a command to the newest launch of the working directory while it runs.
-        \\'stop' cancels RULE and blocks the rules that depend on it; 'retry' runs a
-        \\failed or stopped RULE again with its blocked dependents; 'cancel' stops the
-        \\launch like an interrupt.
-        ,
-        .examples =
-        \\kanit control stop align_s3
-        \\kanit control retry align_s3
-        \\kanit control cancel
-        ,
-    },
-    .{
-        .name = "watch",
-        .args = "[WORKFLOW] [options]",
-        .summary = "follow the newest launch in a live view",
-        .group = .watch,
-        .common = .workdir,
-        .about =
-        \\Shows the newest launch of the working directory, or --launch ID, while it
-        \\runs and after it ends. On a terminal the view is interactive; press ? there
-        \\for its keys.
-        \\Elsewhere it prints a plain view every --interval until the launch ends;
-        \\with --once it prints one and exits.
-        ,
-        .options = &.{
-            .{ .flag = "--once", .desc = "print one plain view and exit" },
-            .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
-            .{ .flag = "--interval MS", .desc = "refresh period in ms, at least 100 (default: 1000)" },
-            .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
-        },
-        .examples =
-        \\kanit watch
-        \\kanit watch path/to/workflow.toml
-        ,
-    },
-    .{
-        .name = "status",
-        .args = "[WORKFLOW] [options]",
-        .summary = "summarize the newest launch, or the recent ones",
-        .group = .watch,
-        .common = .workdir,
-        .about =
-        \\Prints the summary of the newest launch, or of --launch ID, once it has
-        \\ended. On a terminal the summary is a short readable report; elsewhere,
-        \\and with --json, it is the launch's summary.json. While the launch runs, it
-        \\prints a plain view, or as JSON the counts so far with status "running".
-        \\
-        \\--history counts, per launch, the rules DONE (completed or reused),
-        \\FAILED (failed or blocked) and CANCELLED (stopped or never started).
-        \\
-        \\status exits 0 for any outcome it shows, and 1 when it has none to show: no
-        \\launch, a summary that cannot be read, or a launch whose engine died.
-        ,
-        .options = &.{
-            .{ .flag = "--history [N]", .desc = "one line for each of the last N launches (default: 10)" },
-            .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
-            .{ .flag = "--json", .desc = "print summary.json, also on a terminal" },
-            .{ .flag = "--no-color", .desc = "no colors on a terminal (as does NO_COLOR)" },
-        },
-        .examples =
-        \\kanit status
-        \\kanit status --history 5
-        ,
-    },
-    .{
-        .name = "logs",
-        .args = "[WORKFLOW] RULE [options]",
-        .summary = "print the output of a rule's newest attempt",
-        .group = .watch,
-        .common = .workdir,
-        .about =
-        \\Prints the standard output and error of RULE's newest attempt: in the newest
-        \\launch that ran it, else the attempt recorded for it.
-        ,
-        .options = &.{
-            .{ .flag = "--stdout", .desc = "standard output only" },
-            .{ .flag = "--stderr", .desc = "standard error only" },
-            .{ .flag = "--attempt N", .desc = "attempt N instead of the newest" },
-            .{ .flag = "--launch ID", .desc = "look in this launch" },
-            .{ .flag = "-f, --follow", .desc = "print the output as it grows, until it ends" },
-        },
-        .examples =
-        \\kanit logs align_s1
-        \\kanit logs align_s1 --stderr --follow
-        \\kanit logs trim_s4 --attempt 1
-        ,
-    },
-    .{
-        .name = "report",
-        .args = "[WORKFLOW] [options]",
-        .summary = "show what each attempt used and what limited a launch",
-        .group = .watch,
-        .common = .workdir,
-        .about =
-        \\Reports on the newest launch, or on --launch ID. Without a report option it
-        \\prints one row per attempt: TSV by default, JSON with --format json, or the
-        \\launch as one self-contained HTML page with --format html. --suggest prints
-        \\a table on a terminal, TSV to a file or a pipe, or JSON; --bottlenecks and
-        \\--compare print text. --methods describes the results recorded in the
-        \\working directory, across the launches that made them: workflow, engine,
-        \\each tool with its version and image, and each step's request and command;
-        \\text, or JSON with --format json.
-        ,
-        .options = &.{
-            .{ .flag = "--bottlenecks", .desc = "critical path, waiting, request sizing, utilization" },
-            .{ .flag = "--suggest", .desc = "suggested threads and memory per step" },
-            .{ .flag = "--compare OTHER", .desc = "compare with a launch ID, launch directory or workdir" },
-            .{ .flag = "--methods", .desc = "tools, versions, images and commands of the results" },
-            .{ .flag = "--format FORMAT", .desc = "tsv, json or html, a self-contained page (default: tsv)" },
-            .{ .flag = "--json", .desc = "the same as --format json" },
-            .{ .flag = "--launch ID", .desc = "a launch other than the newest" },
-            .{ .flag = "-o, --output FILE", .desc = "write to FILE instead of standard output" },
-        },
-        .examples =
-        \\kanit report --bottlenecks
-        \\kanit report --format html -o report.html
-        \\kanit report --compare 20261026T033653.780-bb9b10ee
-        \\kanit report --methods -o methods.txt
-        ,
-    },
-    .{
-        .name = "verify",
-        .args = "[WORKFLOW] [--content]",
-        .summary = "check that recorded outputs are unchanged",
-        .group = .maintain,
-        .about =
-        \\Checks that every recorded output of the selected rules still has the
-        \\identity kanit recorded. With --content it also compares the bytes with
-        \\stored digests, and stores a digest for every output that has none. It
-        \\exits 1 on a difference, or when a selected rule has no record to check.
-        ,
-        .options = &.{.{ .flag = "--content", .desc = "also compare and store content digests" }},
-        .examples = "kanit verify workflow.toml --content",
-    },
-    .{
-        .name = "clean",
-        .args = "[WORKFLOW] [options]",
-        .summary = "remove leftover containers, old launches and replaced outputs",
-        .group = .maintain,
-        .common = .workdir,
-        .about =
-        \\Removes the containers that earlier launches of the working directory left
-        \\behind. With --keep N it also removes all but the newest N launch
-        \\directories, keeping every launch that holds a rule's recorded attempt.
-        \\With --previous it removes the earlier outputs that reruns moved into
-        \\previous/, the only copy of those bytes.
-        ,
-        .options = &.{
-            .{ .flag = "--keep N", .desc = "keep the newest N launches and the recorded ones" },
-            .{ .flag = "--previous", .desc = "remove the replaced outputs kept in previous/" },
-            .{ .flag = "--dry-run", .desc = "show what would be removed" },
-        },
-        .examples =
-        \\kanit clean --keep 5 --dry-run
-        \\kanit clean --previous --dry-run
-        ,
-    },
-    .{
-        .name = "completion",
-        .args = "bash",
-        .summary = "print a bash completion script",
-        .group = .maintain,
-        .common = .none,
-        .about =
-        \\Prints a bash completion script for commands, options and rule names. Load it
-        \\in the current shell with: source <(kanit completion bash)
-        ,
-    },
-    .{
-        .name = "help",
-        .args = "[COMMAND]",
-        .summary = "show help for kanit or for one command",
-        .group = .maintain,
-        .common = .none,
-        .about = "Shows the commands of kanit, or the options and examples of COMMAND.",
-    },
-    .{
-        .name = "version",
-        .args = "",
-        .summary = "print the version",
-        .group = .maintain,
-        .common = .none,
-        .about = "Prints the version of kanit.",
-    },
-};
-
-const group_titles = [_][]const u8{ "Write and check a workflow", "Run", "Watch and inspect", "Maintain" };
-
-fn command(name: []const u8) ?*const Command {
-    const eql = std.mem.eql;
-    const want = if (eql(u8, name, "dry-run")) "plan" else name;
-    for (&commands) |*c| if (eql(u8, c.name, want)) return c;
-    return null;
-}
-
-/// The closest of `allowed` to a mistyped `word`, if it is close enough to
-/// be the one meant: at most a third of the word's letters differ.
-fn didYouMean(allowed: []const []const u8, word: []const u8) ?[]const u8 {
-    var best: ?[]const u8 = null;
-    var best_d: usize = @max(word.len / 3, 1) + 1;
-    for (allowed) |cand| {
-        // One-letter flags are too short for a typo to point anywhere.
-        if (word.len <= 2 and cand.len <= 2) continue;
-        const d = workflow.editDistance(cand, word);
-        if (d < best_d) {
-            best_d = d;
-            best = cand;
-        }
-    }
-    return best;
-}
-
-/// The option spellings of a command, with the common ones it takes.
-fn optionNames(a: std.mem.Allocator, c: *const Command) ![]const []const u8 {
-    var names: std.ArrayList([]const u8) = .empty;
-    const common: []const Opt = switch (c.common) {
-        .none => &.{},
-        .workdir => &.{workdir_opt},
-        .all => &.{ workdir_opt, target_opt },
-    };
-    for ([_][]const Opt{ c.options, common }) |list| for (list) |o| {
-        var it = std.mem.tokenizeAny(u8, o.flag, ", ");
-        while (it.next()) |word| if (word[0] == '-') try names.append(a, word);
-    };
-    return names.items;
-}
-
-/// The list of commands, grouped by job.
-fn writeOverview(w: *std.Io.Writer, s: term.Style) !void {
-    try w.print("{s}kanit {s}{s} runs a prepared graph of file-producing rules on one Linux\nworkstation.\n\n", .{ s.bold(), workz.version, s.reset() });
-    try w.print("{s}usage:{s} kanit <command> [options]\n", .{ s.bold(), s.reset() });
-    for (group_titles, 0..) |title, gi| {
-        try w.print("\n{s}{s}:{s}\n", .{ s.bold(), title, s.reset() });
-        for (commands) |c| {
-            if (@intFromEnum(c.group) != gi) continue;
-            try w.print("  {s}{s:<12}{s}{s}\n", .{ s.cyan(), c.name, s.reset(), c.summary });
-        }
-    }
-    try w.print("\nWORKFLOW, where a command takes one, defaults to {s} in the current\ndirectory.\n", .{default_workflow});
-    try w.print("Run '{s}kanit help COMMAND{s}' for a command's usage, options and examples.\n", .{ s.bold(), s.reset() });
-}
-
-fn writeOptions(w: *std.Io.Writer, title: []const u8, list: []const Opt, s: term.Style) !void {
-    if (list.len == 0) return;
-    try w.print("\n{s}{s}:{s}\n", .{ s.bold(), title, s.reset() });
-    for (list) |o| try w.print("  {s}{s:<23}{s}{s}\n", .{ s.cyan(), o.flag, s.reset(), o.desc });
-}
-
-/// The usage, options and examples of one command.
-fn writeCommandHelp(w: *std.Io.Writer, c: *const Command, s: term.Style) !void {
-    try w.print("{s}usage:{s} kanit {s}{s}{s}\n\n{s}\n", .{ s.bold(), s.reset(), c.name, if (c.args.len > 0) " " else "", c.args, c.about });
-    try writeOptions(w, "options", c.options, s);
-    try writeOptions(w, "common options", switch (c.common) {
-        .none => &.{},
-        .workdir => &.{workdir_opt},
-        .all => &.{ workdir_opt, target_opt },
-    }, s);
-    if (c.examples.len > 0) {
-        try w.print("\n{s}examples:{s}\n", .{ s.bold(), s.reset() });
-        var it = std.mem.splitScalar(u8, c.examples, '\n');
-        while (it.next()) |line| try w.print("  {s}\n", .{line});
-    }
-}
+const cli = workz.cli;
 
 fn cmdHelp(c: Ctx, args: []const []const u8) !Exit {
     const s: term.Style = .{ .on = term.colorOn(1, c.env) };
     var buf: [8192]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     if (args.len == 0) {
-        try writeOverview(&w.interface, s);
+        try cli.writeOverview(&w.interface, s);
     } else {
-        const cmd = command(args[0]) orelse return unknownCommand(args[0]);
-        try writeCommandHelp(&w.interface, cmd, s);
+        const cmd = cli.command(args[0]) orelse return (cli.Parser{ .a = c.a, .err = c.err, .name = args[0] }).unknownCommand();
+        try cli.writeCommandHelp(&w.interface, cmd, s);
     }
     try w.interface.flush();
     return .ok;
 }
 
-fn unknownCommand(name: []const u8) Exit {
-    var names: [commands.len + 1][]const u8 = undefined;
-    for (commands, 0..) |c, i| names[i] = c.name;
-    names[commands.len] = "dry-run";
-    if (didYouMean(&names, name)) |hint| {
-        std.debug.print("kanit: unknown command '{s}'; did you mean '{s}'?\nRun 'kanit help' for the commands.\n", .{ name, hint });
-    } else std.debug.print("kanit: unknown command '{s}'\nRun 'kanit help' for the commands.\n", .{name});
-    return .usage;
-}
-
 // --- Errors ---
 
-const Exit = enum(u8) { ok = 0, failed = 1, usage = 2, interrupted = 130, _ };
+const Exit = cli.Exit;
 
-/// An invalid command line or workflow: exit status 2.
 fn fail(comptime fmt: []const u8, args: anytype) Exit {
     std.debug.print("kanit: " ++ fmt ++ "\n", args);
     return .usage;
 }
 
-/// Nothing to show or act on, or a state that stops the command: exit
-/// status 1.
 fn failed(comptime fmt: []const u8, args: anytype) Exit {
     std.debug.print("kanit: " ++ fmt ++ "\n", args);
     return .failed;
 }
 
-/// A `state.json` that cannot be used stops the command with what to do,
-/// exit status 1; any other error goes on.
 fn stateFailed(c: Ctx, err: anyerror, root: []const u8) !Exit {
     const path = try std.fs.path.join(c.a, &.{ root, ".workz", "state.json" });
     const why = (try state.loadErrorText(c.a, err, path)) orelse return err;
     return failed("{s}", .{why});
 }
 
-/// An input whose identity cannot be read is a workflow problem, exit
-/// status 2; any other error goes on.
 fn unreadable(err: anyerror, ids: *const state.Identities) !Exit {
     if (err == error.Unreadable) return fail("{s}", .{ids.problem});
     return err;
@@ -560,6 +58,11 @@ const Ctx = struct {
     io: std.Io,
     env: *const std.process.Environ.Map,
     argv: []const [:0]const u8,
+    err: *std.Io.Writer,
+
+    fn parser(c: Ctx) cli.Parser {
+        return .{ .a = c.a, .err = c.err, .name = c.argv[1] };
+    }
 };
 
 pub fn main(init: std.process.Init) !u8 {
@@ -568,25 +71,24 @@ pub fn main(init: std.process.Init) !u8 {
     if (args.len < 2) {
         var buf: [8192]u8 = undefined;
         var w = std.Io.File.stderr().writerStreaming(init.io, &buf);
-        try writeOverview(&w.interface, .{ .on = false });
+        try cli.writeOverview(&w.interface, .{ .on = false });
         try w.interface.flush();
         return @intFromEnum(Exit.usage);
     }
-    // Debug builds keep the leak-checking allocator; shipped builds use the
-    // caching SMP allocator, which avoids a map and unmap per allocation.
     const gpa = if (@import("builtin").mode == .Debug) init.gpa else std.heap.smp_allocator;
-    const ctx: Ctx = .{ .gpa = gpa, .a = a, .io = init.io, .env = init.environ_map, .argv = args };
+    var err_buf: [4096]u8 = undefined;
+    var err_w = std.Io.File.stderr().writerStreaming(init.io, &err_buf);
+    const ctx: Ctx = .{ .gpa = gpa, .a = a, .io = init.io, .env = init.environ_map, .argv = args, .err = &err_w.interface };
     const cmd = args[1];
     const rest = args[2..];
     const eq = std.mem.eql;
-    // `COMMAND --help` and `COMMAND -h` show that command's help.
-    if (command(cmd) != null) for (rest) |arg| {
+    if (cli.command(cmd) != null) for (rest) |arg| {
         if (eq(u8, arg, "--help") or eq(u8, arg, "-h")) return @intFromEnum(try cmdHelp(ctx, &.{cmd}));
     };
     const code: Exit = if ((eq(u8, cmd, "version") or eq(u8, cmd, "--version")) and rest.len > 0) fail("version takes no arguments; run kanit version", .{}) else if (eq(u8, cmd, "version") or eq(u8, cmd, "--version")) blk: {
         try out(init.io, "kanit {s}\n", .{workz.version});
         break :blk .ok;
-    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "prepare")) try cmdPrepare(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else unknownCommand(cmd);
+    } else if (eq(u8, cmd, "help") or eq(u8, cmd, "--help") or eq(u8, cmd, "-h")) try cmdHelp(ctx, rest) else if (eq(u8, cmd, "validate")) try cmdValidate(ctx, rest) else if (eq(u8, cmd, "graph")) try cmdGraph(ctx, rest) else if (eq(u8, cmd, "plan") or eq(u8, cmd, "dry-run")) try cmdPlan(ctx, rest, null) else if (eq(u8, cmd, "explain")) try cmdExplain(ctx, rest) else if (eq(u8, cmd, "verify")) try cmdVerify(ctx, rest) else if (eq(u8, cmd, "run")) try cmdRun(ctx, rest) else if (eq(u8, cmd, "watch")) try cmdWatch(ctx, rest, false) else if (eq(u8, cmd, "status")) try cmdWatch(ctx, rest, true) else if (eq(u8, cmd, "report")) try cmdReport(ctx, rest) else if (eq(u8, cmd, "clean")) try cmdClean(ctx, rest) else if (eq(u8, cmd, "logs")) try cmdLogs(ctx, rest) else if (eq(u8, cmd, "init")) try cmdInit(ctx, rest) else if (eq(u8, cmd, "schema")) try cmdSchema(ctx, rest) else if (eq(u8, cmd, "prepare")) try cmdPrepare(ctx, rest) else if (eq(u8, cmd, "control")) try cmdControl(ctx, rest) else if (eq(u8, cmd, "completion")) try cmdCompletion(ctx, rest) else if (eq(u8, cmd, "__rules")) try cmdRules(ctx, rest) else if (eq(u8, cmd, "__hold")) hold(rest) else if (eq(u8, cmd, "__netns")) netns(rest) else if (eq(u8, cmd, "__guard")) guard() else ctx.parser().unknownCommand();
     return @intFromEnum(code);
 }
 
@@ -596,125 +98,6 @@ fn out(io: std.Io, comptime fmt: []const u8, args: anytype) !void {
     try w.interface.print(fmt, args);
     try w.interface.flush();
 }
-
-const Common = struct {
-    workflow: ?[]const u8 = null,
-    workdir: ?[]const u8 = null,
-    targets: std.ArrayList([]const u8) = .empty,
-    positional: std.ArrayList([]const u8) = .empty,
-};
-
-/// Parses common options; `extra` handles command-specific options and
-/// returns how many arguments it consumed (0 when not its option). An
-/// option's value is the next word, or follows `=` as in `--launch=ID`;
-/// after `--`, every word is a workflow or an argument.
-fn parseArgs(ctx: Ctx, args: []const [:0]const u8, c: *Common, extra: anytype) !?Exit {
-    var i: usize = 0;
-    var words_only = false;
-    while (i < args.len) : (i += 1) {
-        const word = args[i];
-        if (!words_only and std.mem.eql(u8, word, "--")) {
-            words_only = true;
-            continue;
-        }
-        if (words_only or !(word.len > 1 and word[0] == '-')) {
-            if (c.workflow == null) c.workflow = word else try c.positional.append(ctx.a, word);
-            continue;
-        }
-        const eq_at = if (std.mem.startsWith(u8, word, "--")) std.mem.indexOfScalar(u8, word, '=') else null;
-        const arg = if (eq_at) |k| word[0..k] else word;
-        // The next word is this option's value unless it is an option
-        // itself: `--launch --format html` lacks the launch. A lone `-` and a
-        // negative number are values; an empty word is none.
-        const next: ?[]const u8 = if (i + 1 < args.len) args[i + 1] else null;
-        const value: ?[]const u8 = if (eq_at) |k|
-            (if (word.len > k + 1) word[k + 1 ..] else null)
-        else if (next) |n|
-            (if (n.len == 0 or (n.len > 1 and n[0] == '-' and !std.ascii.isDigit(n[1]))) null else n)
-        else
-            null;
-        var used: usize = 2;
-        if (std.mem.eql(u8, arg, "-d") or std.mem.eql(u8, arg, "--workdir")) {
-            c.workdir = value orelse return fail("{s} needs a value", .{arg});
-        } else if ((std.mem.eql(u8, arg, "-t") or std.mem.eql(u8, arg, "--target")) and takesTargets(ctx)) {
-            try c.targets.append(ctx.a, value orelse return fail("{s} needs a value", .{arg}));
-        } else {
-            used = try extra.option(arg, value);
-            if (used == 0) return try unknownOption(ctx, arg);
-            if (used == std.math.maxInt(usize)) return .usage;
-        }
-        if (eq_at == null) {
-            i += used - 1;
-        } else if (used == 1) return fail("{s} takes no value", .{arg});
-    }
-    return null;
-}
-
-/// Whether the command selects rules with `--target`.
-fn takesTargets(ctx: Ctx) bool {
-    const cmd = command(ctx.argv[1]) orelse return true;
-    return cmd.common == .all;
-}
-
-/// An option the command does not take, with the one probably meant.
-fn unknownOption(ctx: Ctx, arg: []const u8) !Exit {
-    const name = ctx.argv[1];
-    const cmd = command(name) orelse return fail("unknown option '{s}'", .{arg});
-    if (didYouMean(try optionNames(ctx.a, cmd), arg)) |hint| {
-        std.debug.print("kanit: unknown option '{s}' for {s}; did you mean '{s}'?\n", .{ arg, cmd.name, hint });
-    } else std.debug.print("kanit: unknown option '{s}' for {s}\n", .{ arg, cmd.name });
-    std.debug.print("Run 'kanit help {s}' for its options.\n", .{cmd.name});
-    return .usage;
-}
-
-/// A word left after a command that takes no more than WORKFLOW.
-fn extraArgs(ctx: Ctx, common: *const Common) ?Exit {
-    if (common.positional.items.len == 0) return null;
-    return fail("unexpected argument '{s}'; run 'kanit help {s}' for the usage", .{ common.positional.items[0], ctx.argv[1] });
-}
-
-/// A name `--pass-env` can pass: a letter or `_`, then letters, digits and `_`.
-fn envName(name: []const u8) bool {
-    if (name.len == 0 or std.ascii.isDigit(name[0])) return false;
-    for (name) |ch| if (!std.ascii.isAlphanumeric(ch) and ch != '_') return false;
-    return true;
-}
-
-/// An option given without the value it takes.
-fn missingValue(arg: []const u8) usize {
-    std.debug.print("kanit: {s} needs a value\n", .{arg});
-    return std.math.maxInt(usize);
-}
-
-/// A duration of zero, as `0` or `0s`: `--grace` takes it to kill at once.
-fn zeroDuration(text: []const u8) bool {
-    const digits = if (text.len > 1 and std.mem.indexOfScalar(u8, "smhd", text[text.len - 1]) != null) text[0 .. text.len - 1] else text;
-    if (digits.len == 0) return false;
-    for (digits) |ch| if (ch != '0') return false;
-    return true;
-}
-
-/// `--launch ID`: a launch's directory name, never a path, so it cannot
-/// name a directory outside `.workz/launches`.
-fn launchValue(arg: []const u8, value: ?[]const u8, launch: *?[]const u8) usize {
-    const v = value orelse return missingValue(arg);
-    if (std.mem.eql(u8, v, ".") or std.mem.eql(u8, v, "..") or std.mem.indexOfScalar(u8, v, '/') != null)
-        return invalidValue(arg, v, "use a launch ID, as status --history lists them");
-    launch.* = v;
-    return 2;
-}
-
-/// An option value that does not parse; `hint` says what is expected.
-fn invalidValue(arg: []const u8, value: []const u8, hint: []const u8) usize {
-    std.debug.print("kanit: {s}: invalid value '{s}' ({s})\n", .{ arg, value, hint });
-    return std.math.maxInt(usize);
-}
-
-const NoExtra = struct {
-    fn option(_: NoExtra, _: []const u8, _: ?[]const u8) !usize {
-        return 0;
-    }
-};
 
 const Loaded = struct {
     wf: workflow.Workflow,
@@ -727,9 +110,8 @@ const Loaded = struct {
     }
 };
 
-fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
+fn rootOf(c: Ctx, common: *const cli.Common) !?[]const u8 {
     const here = try sys.cwd(c.a);
-    // A WORKFLOW names its working directory, so it must exist, as a file.
     if (common.workflow) |w| {
         const id = (try sys.stat(c.gpa, w)) orelse {
             if (common.workdir == null) {
@@ -751,7 +133,6 @@ fn rootOf(c: Ctx, common: *const Common) !?[]const u8 {
     };
 }
 
-/// The real path of the working directory `-d` names, which must be one.
 fn workdirOf(c: Ctx, here: []const u8, dir: []const u8) !?[]const u8 {
     const given = try sys.absolute(c.a, here, dir);
     const real = (try sys.realpath(c.a, given)) orelse {
@@ -765,7 +146,6 @@ fn workdirOf(c: Ctx, here: []const u8, dir: []const u8) !?[]const u8 {
     return real;
 }
 
-/// Shows the source line of a rejected workflow on stderr.
 fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
     if (problem.line == 0) return;
     const source = sys.readFile(c.gpa, path, 64 << 20) catch return;
@@ -776,8 +156,6 @@ fn showSnippet(c: Ctx, path: []const u8, problem: workflow.Problem) void {
     w.interface.flush() catch {};
 }
 
-/// Prints what is wrong with a workflow: one problem as one line, several
-/// under their count, then the source line of the first.
 fn printProblems(c: Ctx, wpath: []const u8, wf_abs: []const u8, problem: workflow.Problem) void {
     if (problem.count <= 1) {
         std.debug.print("kanit: {s}: {s}\n", .{ wpath, problem.message });
@@ -790,8 +168,7 @@ fn printProblems(c: Ctx, wpath: []const u8, wf_abs: []const u8, problem: workflo
     showSnippet(c, wf_abs, problem);
 }
 
-/// Loads, checks and selects; prints the reason and returns null when invalid.
-fn load(c: Ctx, common: *const Common) !?Loaded {
+fn load(c: Ctx, common: *const cli.Common) !?Loaded {
     const wpath = common.workflow orelse default: {
         if (sys.exists(c.gpa, default_workflow)) break :default default_workflow;
         std.debug.print("kanit: no workflow file given, and no {s} in this directory\n", .{default_workflow});
@@ -811,8 +188,9 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     errdefer wf.deinit();
     var g = graph.build(c.gpa, &wf, &problem) catch |err| switch (err) {
         error.Cycle, error.Invalid => {
-            printProblems(c, wpath, wf_abs, problem);
-            c.gpa.free(problem.message);
+            const lined = try graphProblem(c, wf_abs, root, problem);
+            printProblems(c, wpath, wf_abs, lined);
+            c.gpa.free(lined.message);
             wf.deinit();
             return null;
         },
@@ -836,23 +214,10 @@ fn load(c: Ctx, common: *const Common) !?Loaded {
     return .{ .wf = wf, .g = g, .mask = mask };
 }
 
-const ValidateExtra = struct {
-    inputs: *bool,
-    fn option(self: ValidateExtra, arg: []const u8, _: ?[]const u8) !usize {
-        if (std.mem.eql(u8, arg, "--inputs")) {
-            self.inputs.* = true;
-            return 1;
-        }
-        return 0;
-    }
-};
-
 fn cmdValidate(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var inputs = false;
-    if (try parseArgs(c, args, &common, ValidateExtra{ .inputs = &inputs })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    var l = (try load(c, &common)) orelse return .usage;
+    var v: cli.Validate = .{};
+    if (try v.parse(c.parser(), args)) |e| return e;
+    var l = (try load(c, &v.common)) orelse return .usage;
     defer l.deinit();
     var selected: usize = 0;
     for (l.mask) |m| selected += @intFromBool(m);
@@ -862,68 +227,19 @@ fn cmdValidate(c: Ctx, args: []const [:0]const u8) !Exit {
     try w.print("valid: {s} ({d} rules, {d} selected, {d} groups, {d} shared)\n", .{ l.wf.name, l.wf.rules.len, selected, l.wf.groups.len, l.wf.shared.len });
     try workz.lint.notes(c.a, w, &l.wf, l.mask);
     var missing: usize = 0;
-    if (inputs) missing = try workz.lint.missingInputs(c.gpa, w, &l.wf, &l.g, l.mask);
+    if (v.inputs) missing = try workz.lint.missingInputs(c.gpa, w, &l.wf, &l.g, l.mask);
     try sys.writeAll(1, text.written());
     return if (missing > 0) .failed else .ok;
 }
 
-const GraphExtra = struct {
-    opts: *workz.views.Options,
-    format: *?workz.views.Format,
-    /// `--focus` as written, read again against the rule names once loaded.
-    focus: *?[]const u8,
-    fn option(self: GraphExtra, arg: []const u8, value: ?[]const u8) !usize {
-        const eq = std.mem.eql;
-        if (eq(u8, arg, "--by")) {
-            const v = value orelse return missingValue(arg);
-            if (!eq(u8, v, "step")) return invalidValue(arg, v, "use step");
-            self.opts.by_step = true;
-            return 2;
-        }
-        if (eq(u8, arg, "--layer")) {
-            const v = value orelse return missingValue(arg);
-            self.opts.layer = std.meta.stringToEnum(workz.views.Layer, v) orelse return invalidValue(arg, v, "use rules, files, resources or all");
-            return 2;
-        }
-        if (eq(u8, arg, "--format")) {
-            const v = value orelse return missingValue(arg);
-            self.format.* = std.meta.stringToEnum(workz.views.Format, v) orelse return invalidValue(arg, v, "use dot, json or text");
-            return 2;
-        }
-        if (eq(u8, arg, "--focus")) {
-            const v = value orelse return missingValue(arg);
-            self.opts.focus = workz.views.Focus.parse(v, null) orelse return invalidValue(arg, v, "use +RULE, RULE+, +RULE+, or a depth such as 2+RULE");
-            self.focus.* = v;
-            return 2;
-        }
-        if (eq(u8, arg, "--why")) {
-            const v = value orelse return missingValue(arg);
-            const colon = std.mem.indexOfScalar(u8, v, ':') orelse return invalidValue(arg, v, "use FROM:TO, two rule names");
-            self.opts.why = .{ v[0..colon], v[colon + 1 ..] };
-            return 2;
-        }
-        if (eq(u8, arg, "--users")) {
-            self.opts.users = value orelse return missingValue(arg);
-            return 2;
-        }
-        return 0;
-    }
-};
-
 fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var opts: workz.views.Options = .{};
-    var format: ?workz.views.Format = null;
-    var focus: ?[]const u8 = null;
-    if (try parseArgs(c, args, &common, GraphExtra{ .opts = &opts, .format = &format, .focus = &focus })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    if (@as(u8, @intFromBool(opts.focus != null)) + @intFromBool(opts.why != null) + @intFromBool(opts.users != null) > 1)
-        return fail("choose one of --focus, --why and --users", .{});
-    var l = (try load(c, &common)) orelse return .usage;
+    var ga: cli.Graph = .{};
+    if (try ga.parse(c.parser(), args)) |e| return e;
+    var opts = ga.opts;
+    var l = (try load(c, &ga.common)) orelse return .usage;
     defer l.deinit();
-    if (focus) |text| opts.focus = workz.views.Focus.parse(text, &l.wf);
-    // A terminal gets text; a file or a pipe gets DOT, for Graphviz.
-    const kind = format orelse if (term.isTerminal(1)) workz.views.Format.text else .dot;
+    if (ga.focus) |text| opts.focus = workz.views.Focus.parse(text, &l.wf);
+    const kind = ga.format orelse if (term.isTerminal(1)) workz.views.Format.text else .dot;
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const v = workz.views.build(c.a, &l.wf, &l.g, l.mask, opts) catch |err| switch (err) {
@@ -945,76 +261,13 @@ fn cmdGraph(c: Ctx, args: []const [:0]const u8) !Exit {
     return .ok;
 }
 
-const PlanExtra = struct {
-    rerun: *bool,
-    summary: ?*bool = null,
-    /// `--budget` and the budget it checks, for `plan` only.
-    budget: ?*bool = null,
-    max_threads: ?*?u32 = null,
-    max_memory: ?*?u64 = null,
-    /// `--input-manifest`, for `plan` only.
-    manifest: ?*?[]const u8 = null,
-    pass: *std.ArrayList([]const u8),
-    threads: *std.ArrayList([]const u8),
-    reruns: *std.ArrayList([]const u8),
-    a: std.mem.Allocator,
-    fn option(self: PlanExtra, arg: []const u8, value: ?[]const u8) !usize {
-        if (std.mem.eql(u8, arg, "--rerun-rule")) {
-            try self.reruns.append(self.a, value orelse return missingValue(arg));
-            return 2;
-        }
-        if (self.summary) |s| if (std.mem.eql(u8, arg, "--summary")) {
-            s.* = true;
-            return 1;
-        };
-        if (std.mem.eql(u8, arg, "--rerun")) {
-            self.rerun.* = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--threads")) {
-            try self.threads.append(self.a, value orelse return missingValue(arg));
-            return 2;
-        }
-        if (self.budget) |b| if (std.mem.eql(u8, arg, "--budget")) {
-            b.* = true;
-            return 1;
-        };
-        if (self.max_threads) |t| if (std.mem.eql(u8, arg, "--max-threads")) {
-            const v = value orelse return missingValue(arg);
-            t.* = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
-            if (t.*.? == 0) return invalidValue(arg, v, "use a whole number above 0");
-            return 2;
-        };
-        if (self.max_memory) |m| if (std.mem.eql(u8, arg, "--max-memory")) {
-            const v = value orelse return missingValue(arg);
-            m.* = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size from 1M to 1024T, such as 512M or 60G");
-            return 2;
-        };
-        if (self.manifest) |m| if (std.mem.eql(u8, arg, "--input-manifest")) {
-            m.* = value orelse return missingValue(arg);
-            return 2;
-        };
-        if (std.mem.eql(u8, arg, "--pass-env")) {
-            const v = value orelse return missingValue(arg);
-            if (!envName(v)) return invalidValue(arg, v, "use a variable name such as HOME");
-            try self.pass.append(self.a, v);
-            return 2;
-        }
-        return 0;
-    }
-};
-
-/// Checks `--input-manifest` as `run` would, without writing the digests it
-/// computes: they decide the keys of the inputs they cover. Whether every
-/// input matches; null when the manifest cannot be used.
 fn checkPlanManifest(c: Ctx, st: *state.State, ids: *state.Identities, manifest: ?[]const u8) !?bool {
     const m = manifest orelse return true;
-    const check = try run.checkManifest(c.gpa, st, ids, try sys.absolute(c.a, try sys.cwd(c.a), m), false);
+    const check = try run.checkManifest(c.gpa, st, ids, try sys.absolute(c.a, try sys.cwd(c.a), m), false, c.err);
+    try c.err.flush();
     return if (check.usable) check.ok else null;
 }
 
-/// Decisions read the records as they are; a launch still running records
-/// each rule only once it ends.
 fn noteLiveLaunch(c: Ctx, root: []const u8) !void {
     const rec = try workz.records.recordsDir(c.a, root);
     if (workz.records.running(c.gpa, rec)) std.debug.print("kanit: a launch is running in {s}; rules it has not finished show their earlier records\n", .{root});
@@ -1027,40 +280,26 @@ fn planContext(c: Ctx, l: *Loaded, st: *state.State, ids: *state.Identities, pas
 }
 
 fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
-    var common: Common = .{};
-    var rerun = false;
-    var pass: std.ArrayList([]const u8) = .empty;
-    var reruns: std.ArrayList([]const u8) = .empty;
-    var summary = false;
-    var threads: std.ArrayList([]const u8) = .empty;
-    var budget = false;
-    var max_threads: ?u32 = null;
-    var max_memory: ?u64 = null;
-    var manifest: ?[]const u8 = null;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .summary = &summary, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .budget = &budget, .max_threads = &max_threads, .max_memory = &max_memory, .manifest = &manifest })) |e| return e;
-    if (!budget and (max_threads != null or max_memory != null))
-        return fail("{s} sets the budget --budget checks; give --budget too", .{if (max_threads != null) "--max-threads" else "--max-memory"});
-    if (extraArgs(c, &common)) |e| return e;
-    var l = (try load(c, &common)) orelse return .usage;
+    var pa: cli.Plan = .{};
+    if (try pa.parse(c.parser(), args)) |e| return e;
+    var l = (try load(c, &pa.common)) orelse return .usage;
     defer l.deinit();
-    if (applyThreads(&l.wf, threads.items)) |e| return e;
+    if (try c.parser().applyThreads(&l.wf, pa.threads.items)) |e| return e;
     var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    var ctx = planContext(c, &l, &st, &ids, pa.pass.items) catch |err| return unreadable(err, &ids);
     try noteLiveLaunch(c, l.wf.root);
-    ctx.rerun = rerun;
-    ctx.rerun_rules = reruns.items;
-    if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
-    const manifest_ok = (try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage;
+    ctx.rerun = pa.rerun;
+    ctx.rerun_rules = pa.reruns.items;
+    if (try c.parser().knownRules(&l.wf, pa.reruns.items)) |e| return e;
+    const manifest_ok = (try checkPlanManifest(c, &st, &ids, pa.manifest)) orelse return .usage;
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const ds = ctx.decideAll(l.mask) catch |err| return unreadable(err, &ids);
-    try (if (summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
+    try (if (pa.summary) plan.printSummary(&w.interface, &ctx, ds, l.mask) else plan.printPlan(&w.interface, &ctx, ds, l.mask));
     var refused: usize = 0;
-    // What `run` would refuse makes the plan fail too, so `plan && run`
-    // stops at the plan.
     var missing: usize = 0;
     var changed: usize = 0;
     for (ds, l.mask) |d, m| if (m and d.run) {
@@ -1075,7 +314,7 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
         refused += 1;
         std.debug.print("kanit: run would refuse this launch: inputs do not match the input manifest\n", .{});
     }
-    if (budget) {
+    if (pa.budget) {
         const runs = try c.a.alloc(bool, l.wf.rules.len);
         var reused: usize = 0;
         for (runs, ds, l.mask) |*r, d, m| {
@@ -1083,9 +322,9 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
             reused += @intFromBool(m and !d.run);
         }
         refused += try plan.printBudget(c.gpa, c.a, &w.interface, &l.wf, runs, reused, .{
-            .threads = max_threads orelse run.defaultThreads(),
-            .memory_mib = max_memory orelse run.defaultMemoryMib(c.gpa),
-            .defaults = max_threads == null and max_memory == null,
+            .threads = pa.max_threads orelse run.defaultThreads(),
+            .memory_mib = pa.max_memory orelse run.defaultMemoryMib(c.gpa),
+            .defaults = pa.max_threads == null and pa.max_memory == null,
         });
     }
     try w.interface.flush();
@@ -1093,66 +332,38 @@ fn cmdPlan(c: Ctx, args: []const [:0]const u8, _: ?void) !Exit {
 }
 
 fn cmdExplain(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var rerun = false;
-    var pass: std.ArrayList([]const u8) = .empty;
-    var reruns: std.ArrayList([]const u8) = .empty;
-    var threads: std.ArrayList([]const u8) = .empty;
-    var manifest: ?[]const u8 = null;
-    if (try parseArgs(c, args, &common, PlanExtra{ .rerun = &rerun, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a, .manifest = &manifest })) |e| return e;
-    // `explain RULE` reads workflow.toml; `explain WORKFLOW RULE` names the file.
-    if (common.positional.items.len == 0) if (common.workflow) |name| {
-        try common.positional.append(c.a, name);
-        common.workflow = null;
-    };
-    if (common.positional.items.len == 0) return fail("explain needs a rule name", .{});
-    if (common.positional.items.len > 1) return fail("explain takes one rule name", .{});
-    var l = (try load(c, &common)) orelse return .usage;
+    var pa: cli.Plan = .{ .explain = true };
+    if (try pa.parse(c.parser(), args)) |e| return e;
+    var l = (try load(c, &pa.common)) orelse return .usage;
     defer l.deinit();
-    if (applyThreads(&l.wf, threads.items)) |e| return e;
+    if (try c.parser().applyThreads(&l.wf, pa.threads.items)) |e| return e;
     var st = plan.loadState(c.gpa, l.wf.root, c.a) catch |err| return stateFailed(c, err, l.wf.root);
     defer st.deinit();
     var ids = state.Identities.init(c.gpa);
     defer ids.deinit();
-    var ctx = planContext(c, &l, &st, &ids, pass.items) catch |err| return unreadable(err, &ids);
+    var ctx = planContext(c, &l, &st, &ids, pa.pass.items) catch |err| return unreadable(err, &ids);
     try noteLiveLaunch(c, l.wf.root);
-    ctx.rerun = rerun;
-    ctx.rerun_rules = reruns.items;
-    if (!try knownRules(c.a, &l.wf, reruns.items)) return .usage;
-    if (!((try checkPlanManifest(c, &st, &ids, manifest)) orelse return .usage)) std.debug.print("kanit: run would refuse this launch: inputs do not match the input manifest\n", .{});
+    ctx.rerun = pa.rerun;
+    ctx.rerun_rules = pa.reruns.items;
+    if (try c.parser().knownRules(&l.wf, pa.reruns.items)) |e| return e;
+    if (!((try checkPlanManifest(c, &st, &ids, pa.manifest)) orelse return .usage)) std.debug.print("kanit: run would refuse this launch: inputs do not match the input manifest\n", .{});
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    const found = plan.explain(&w.interface, &ctx, l.mask, common.positional.items[0]) catch |err| return unreadable(err, &ids);
+    const found = plan.explain(&w.interface, &ctx, l.mask, pa.rule) catch |err| return unreadable(err, &ids);
     try w.interface.flush();
     if (!found) {
-        const name = common.positional.items[0];
-        if (try closestRule(c.a, &l.wf, name)) |hint| return fail("unknown rule '{s}'; did you mean '{s}'?", .{ name, hint });
-        return fail("unknown rule '{s}'", .{name});
+        if (try cli.closestRule(c.a, &l.wf, pa.rule)) |hint| return fail("unknown rule '{s}'; did you mean '{s}'?", .{ pa.rule, hint });
+        return fail("unknown rule '{s}'", .{pa.rule});
     }
     return .ok;
 }
 
-const VerifyExtra = struct {
-    content: *bool,
-    fn option(self: VerifyExtra, arg: []const u8, _: ?[]const u8) !usize {
-        if (std.mem.eql(u8, arg, "--content")) {
-            self.content.* = true;
-            return 1;
-        }
-        return 0;
-    }
-};
-
 fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var content = false;
-    if (try parseArgs(c, args, &common, VerifyExtra{ .content = &content })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    var l = (try load(c, &common)) orelse return .usage;
+    var va: cli.Verify = .{};
+    if (try va.parse(c.parser(), args)) |e| return e;
+    var l = (try load(c, &va.common)) orelse return .usage;
     defer l.deinit();
     const rec = try workz.records.recordsDir(c.a, l.wf.root);
-    // Without records every selected rule is unrecorded; verify leaves no
-    // `.workz/` behind to say so.
     const lock: ?sys.Fd = if (!sys.exists(c.gpa, rec)) null else workz.records.lock(c.gpa, rec) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; verify after it ends", .{l.wf.root}),
         else => return err,
@@ -1164,29 +375,15 @@ fn cmdVerify(c: Ctx, args: []const [:0]const u8) !Exit {
     defer ids.deinit();
     var buf: [16384]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, content);
+    const ok = try plan.verify(&w.interface, c.gpa, &st, &ids, &l.wf, l.mask, va.content);
     try w.interface.flush();
     return if (ok) .ok else .failed;
 }
 
-/// Appends a command to the running launch's control file; the engine
-/// applies it and records the result as a `control` event.
 fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    if (try parseArgs(c, args, &common, NoExtra{})) |e| return e;
-    // The first word is a workflow file only when it is not a command.
-    var words: std.ArrayList([]const u8) = .empty;
-    if (common.workflow) |wfp| {
-        if (std.mem.eql(u8, wfp, "stop") or std.mem.eql(u8, wfp, "retry") or std.mem.eql(u8, wfp, "cancel")) {
-            try words.append(c.a, wfp);
-            common.workflow = null;
-        }
-    }
-    try words.appendSlice(c.a, common.positional.items);
-    const ok = words.items.len >= 1 and ((std.mem.eql(u8, words.items[0], "cancel") and words.items.len == 1) or
-        ((std.mem.eql(u8, words.items[0], "stop") or std.mem.eql(u8, words.items[0], "retry")) and words.items.len == 2));
-    if (!ok) return fail("control needs: stop RULE, retry RULE, or cancel", .{});
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    var ca: cli.Control = .{};
+    if (try ca.parse(c.parser(), args)) |e| return e;
+    const root = (try rootOf(c, &ca.common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     const dir = (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; kanit run starts one", .{rec});
     if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "summary.json" }))) return failed("the newest launch has ended: {s}; kanit run starts another", .{dir});
@@ -1195,8 +392,8 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     defer tr.deinit();
     _ = try tr.update();
     if (tr.ending) return failed("the newest launch is ending and applies no more commands: {s}", .{dir});
-    if (words.items.len == 2 and !tr.index.contains(words.items[1])) return failed("rule {s} is not part of the running launch", .{words.items[1]});
-    const line = if (words.items.len == 2) try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ words.items[0], words.items[1] }) else "cancel\n";
+    if (ca.rule) |name| if (!tr.index.contains(name)) return failed("rule {s} is not part of the running launch", .{name});
+    const line = if (ca.rule) |name| try std.fmt.allocPrint(c.a, "{s} {s}\n", .{ ca.verb, name }) else "cancel\n";
     const fd = try sys.openWrite(c.gpa, try std.fs.path.join(c.a, &.{ dir, "control" }), .append);
     defer sys.close(fd);
     try sys.writeAll(fd, line);
@@ -1204,27 +401,16 @@ fn cmdControl(c: Ctx, args: []const [:0]const u8) !Exit {
     return .ok;
 }
 
-/// The workflow file of commands given none, and the file `init` writes.
-const default_workflow = "workflow.toml";
+const default_workflow = cli.default_workflow;
 const starter_workflow = @embedFile("templates/workflow.toml");
 const starter_pipeline = @embedFile("templates/pipeline.toml");
 const bash_completion = @embedFile("templates/completion.bash");
 
 fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
-    var template = false;
-    var file: ?[]const u8 = null;
-    for (args) |arg| {
-        if (std.mem.eql(u8, arg, "--template")) {
-            template = true;
-        } else if (arg.len > 1 and arg[0] == '-') {
-            return try unknownOption(c, arg);
-        } else if (file == null) {
-            // A file name, not standard output: init writes a file to edit.
-            if (arg.len == 0 or std.mem.eql(u8, arg, "-")) return fail("init needs a file name, not '{s}'", .{arg});
-            file = arg;
-        } else return fail("init takes at most one file name", .{});
-    }
-    if (template) {
+    var ia: cli.Init = .{};
+    if (try ia.parse(c.parser(), args)) |e| return e;
+    const file = ia.file;
+    if (ia.template) {
         const path = file orelse "pipeline.toml";
         const sheet = if (std.fs.path.dirname(path)) |d| try std.fs.path.join(c.a, &.{ d, "samples.tsv" }) else "samples.tsv";
         for ([_][]const u8{ path, sheet }) |p| if (sys.exists(c.gpa, p)) return fail("{s} exists; init does not overwrite", .{p});
@@ -1241,45 +427,17 @@ fn cmdInit(c: Ctx, args: []const [:0]const u8) !Exit {
 }
 
 fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
-    var template: ?[]const u8 = null;
-    var output: ?[]const u8 = null;
-    var run_file: ?[]const u8 = null;
-    var check = false;
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        const arg = args[i];
-        if (std.mem.eql(u8, arg, "--check")) {
-            check = true;
-        } else if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
-            // As for every option, the value is not another option.
-            const next = if (i + 1 < args.len) args[i + 1] else "";
-            if (next.len == 0 or (next.len > 1 and next[0] == '-')) return fail("{s} needs a value", .{arg});
-            i += 1;
-            output = next;
-        } else if (std.mem.startsWith(u8, arg, "--output=")) {
-            output = arg["--output=".len..];
-            if (output.?.len == 0) return fail("--output needs a value", .{});
-        } else if (std.mem.eql(u8, arg, "--params")) {
-            const next = if (i + 1 < args.len) args[i + 1] else "";
-            if (next.len == 0 or (next.len > 1 and next[0] == '-')) return fail("{s} needs a value", .{arg});
-            i += 1;
-            run_file = next;
-        } else if (std.mem.startsWith(u8, arg, "--params=")) {
-            run_file = arg["--params=".len..];
-            if (run_file.?.len == 0) return fail("--params needs a value", .{});
-        } else if (arg.len > 1 and arg[0] == '-') {
-            return try unknownOption(c, arg);
-        } else if (template == null) {
-            template = arg;
-        } else return fail("prepare takes one template file", .{});
-    }
+    var pa: cli.Prepare = .{};
+    if (try pa.parse(c.parser(), args)) |e| return e;
+    const output = pa.output;
+    const run_file = pa.params;
+    const check = pa.check;
     const cwd = try sys.cwd(c.a);
-    const shown = template orelse "pipeline.toml";
+    const shown = pa.template orelse "pipeline.toml";
     const path = try sys.absolute(c.a, cwd, shown);
     if (!sys.exists(c.gpa, path)) return fail("no template {s}; a template is a pipeline file with [[steps]] (see kanit help prepare)", .{shown});
     const run_spec: ?workz.prepare.RunFile = if (run_file) |r| .{ .path = try sys.absolute(c.a, cwd, r), .shown = r } else null;
     if (run_spec) |r| if (!sys.exists(c.gpa, r.path)) return fail("no run file {s}", .{r.shown});
-    // The workflow goes beside the run file, which belongs to the run, or else beside the template.
     const beside = if (run_spec) |r| r.path else path;
     const out_path = if (output) |o| try sys.absolute(c.a, cwd, o) else try std.fs.path.join(c.a, &.{ std.fs.path.dirname(beside) orelse ".", default_workflow });
     if (std.mem.eql(u8, out_path, path)) return fail("the template and the workflow it prepares are the same file: give another with -o", .{});
@@ -1289,19 +447,12 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
         else => return err,
     };
     for (problem.notes.items) |note| std.debug.print("kanit: note: {s}\n", .{note});
-    // The prepared workflow passes the same checks as any other before it
-    // replaces the current one.
-    // A check leaves the directory alone: its copy goes to the temporary
-    // directory, so it also works where the workflow cannot be written.
     const tmp = if (check) name: {
         var rnd: [8]u8 = undefined;
         sys.randomBytes(&rnd);
         break :name try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{s}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", &std.fmt.bytesToHex(rnd, .lower) });
     } else try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
     if (check) {
-        // A shared temporary directory: the file is created anew under a
-        // random name, so a file or symlink planted there is refused, not
-        // followed.
         const fd = sys.openWrite(c.gpa, tmp, .exclusive) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
         defer sys.close(fd);
         sys.writeAll(fd, text) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
@@ -1320,7 +471,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     defer wf.deinit();
     var g = graph.build(c.gpa, &wf, &wproblem) catch |err| switch (err) {
         error.Cycle, error.Invalid => {
-            notValid(c, shown, tmp, check, &keep_tmp, wproblem);
+            notValid(c, shown, tmp, check, &keep_tmp, try graphProblem(c, tmp, root, wproblem));
             return .usage;
         },
         else => return err,
@@ -1349,8 +500,6 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     return .ok;
 }
 
-/// Reports a prepared workflow that is not valid. With `--check` the
-/// file is removed, as a check writes nothing; otherwise it is kept to read.
 fn notValid(c: Ctx, shown: []const u8, tmp: []const u8, check: bool, keep_tmp: *bool, problem: workflow.Problem) void {
     if (check) {
         std.debug.print("kanit: the workflow {s} prepares is not valid\n", .{shown});
@@ -1363,8 +512,7 @@ fn notValid(c: Ctx, shown: []const u8, tmp: []const u8, check: bool, keep_tmp: *
 }
 
 fn cmdSchema(c: Ctx, args: []const [:0]const u8) !Exit {
-    for (args) |arg| if (arg.len > 1 and arg[0] == '-') return try unknownOption(c, arg);
-    if (args.len > 0) return fail("schema takes no arguments", .{});
+    if (try cli.noArguments(c.parser(), args)) |e| return e;
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     try workz.schema.write(&text.writer);
@@ -1373,18 +521,18 @@ fn cmdSchema(c: Ctx, args: []const [:0]const u8) !Exit {
 }
 
 fn cmdCompletion(c: Ctx, args: []const [:0]const u8) !Exit {
-    if (args.len != 1 or !std.mem.eql(u8, args[0], "bash")) return fail("completion supports: bash", .{});
+    if (cli.completionShell(c.parser(), args)) |e| return e;
     try out(c.io, "{s}", .{bash_completion});
     return .ok;
 }
 
-/// Internal, for completion: the rule names of a workflow, one per line.
 fn cmdRules(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    if (try parseArgs(c, args, &common, NoExtra{})) |e| return e;
+    var ra: cli.Plain = .{};
+    if (try ra.parse(c.parser(), args)) |e| return e;
+    const common = &ra.common;
     if (common.workflow == null) common.workflow = default_workflow;
     var problem: workflow.Problem = .{};
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    const root = (try rootOf(c, common)) orelse return .usage;
     var wf = workflow.load(c.gpa, try sys.absolute(c.a, try sys.cwd(c.a), common.workflow.?), root, &problem) catch return .failed;
     defer wf.deinit();
     var buf: [16384]u8 = undefined;
@@ -1394,48 +542,12 @@ fn cmdRules(c: Ctx, args: []const [:0]const u8) !Exit {
     return .ok;
 }
 
-const LogsExtra = struct {
-    opts: *workz.logs.Options,
-    fn option(self: LogsExtra, arg: []const u8, value: ?[]const u8) !usize {
-        const eq = std.mem.eql;
-        if (eq(u8, arg, "--stdout") or eq(u8, arg, "--stderr")) {
-            const want: @TypeOf(self.opts.stream) = if (eq(u8, arg, "--stdout")) .stdout else .stderr;
-            if (self.opts.stream != .both and self.opts.stream != want) {
-                std.debug.print("kanit: give --stdout or --stderr; without either, logs prints both\n", .{});
-                return std.math.maxInt(usize);
-            }
-            self.opts.stream = want;
-            return 1;
-        }
-        if (eq(u8, arg, "-f") or eq(u8, arg, "--follow")) {
-            self.opts.follow = true;
-            return 1;
-        }
-        if (eq(u8, arg, "--launch")) return launchValue(arg, value, &self.opts.launch);
-        if (eq(u8, arg, "--attempt")) {
-            const v = value orelse return missingValue(arg);
-            self.opts.attempt = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number");
-            return 2;
-        }
-        return 0;
-    }
-};
-
 fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var opts: workz.logs.Options = .{};
-    if (try parseArgs(c, args, &common, LogsExtra{ .opts = &opts })) |e| return e;
-    // `logs RULE` in the working directory (or -d DIR), or `logs WORKFLOW RULE`.
-    const rule = switch (common.positional.items.len) {
-        0 => blk: {
-            const r = common.workflow orelse return fail("logs needs a rule name", .{});
-            common.workflow = null;
-            break :blk r;
-        },
-        1 => common.positional.items[0],
-        else => return fail("logs takes one rule name", .{}),
-    };
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    var la: cli.Logs = .{};
+    if (try la.parse(c.parser(), args)) |e| return e;
+    const opts = la.opts;
+    const rule = la.rule;
+    const root = (try rootOf(c, &la.common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (opts.launch) |id| if (!sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ rec, "launches", id }))) return failed("no launch {s} recorded in {s}", .{ id, rec });
     const fresh = if (opts.follow and opts.launch == null and opts.attempt == null) try workz.logs.awaitAttempt(c.gpa, c.a, root, rule) else null;
@@ -1451,32 +563,11 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
     return .ok;
 }
 
-const CleanExtra = struct {
-    opts: *workz.clean.Options,
-    fn option(self: CleanExtra, arg: []const u8, value: ?[]const u8) !usize {
-        if (std.mem.eql(u8, arg, "--dry-run")) {
-            self.opts.dry_run = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--previous")) {
-            self.opts.previous = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--keep")) {
-            const v = value orelse return missingValue(arg);
-            self.opts.keep = std.fmt.parseInt(usize, v, 10) catch return invalidValue(arg, v, "use a whole number");
-            return 2;
-        }
-        return 0;
-    }
-};
-
 fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var opts: workz.clean.Options = .{};
-    if (try parseArgs(c, args, &common, CleanExtra{ .opts = &opts })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    var ca: cli.Clean = .{};
+    if (try ca.parse(c.parser(), args)) |e| return e;
+    const opts = ca.opts;
+    const root = (try rootOf(c, &ca.common)) orelse return .usage;
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
@@ -1499,68 +590,19 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     return if (r.failed > 0) .failed else .ok;
 }
 
-/// Options of `watch` (once, interval) or of `status` (history, json); both
-/// take --launch and --no-color.
-const WatchExtra = struct {
-    once: ?*bool = null,
-    interval: ?*u64 = null,
-    history: ?*?usize = null,
-    json: ?*bool = null,
-    color: *bool,
-    launch: *?[]const u8,
-    fn option(self: WatchExtra, arg: []const u8, value: ?[]const u8) !usize {
-        if (self.history) |h| if (std.mem.eql(u8, arg, "--history")) {
-            // An optional count follows; a word that is not a number is the
-            // next argument.
-            if (value) |v| if (v.len > 0 and std.ascii.isDigit(v[0])) {
-                h.* = std.fmt.parseInt(usize, v, 10) catch return invalidValue(arg, v, "use a whole number of launches");
-                return 2;
-            };
-            h.* = 10;
-            return 1;
-        };
-        if (self.json) |j| if (std.mem.eql(u8, arg, "--json")) {
-            j.* = true;
-            return 1;
-        };
-        if (self.once) |o| if (std.mem.eql(u8, arg, "--once")) {
-            o.* = true;
-            return 1;
-        };
-        if (self.interval) |iv| if (std.mem.eql(u8, arg, "--interval")) {
-            const v = value orelse return missingValue(arg);
-            const ms = std.fmt.parseInt(u64, v, 10) catch return invalidValue(arg, v, "use milliseconds as a whole number");
-            if (ms < 100) return invalidValue(arg, v, "use 100 ms or more");
-            iv.* = ms;
-            return 2;
-        };
-        if (std.mem.eql(u8, arg, "--no-color")) {
-            self.color.* = false;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--launch")) return launchValue(arg, value, self.launch);
-        return 0;
-    }
-};
-
 fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
-    var common: Common = .{};
-    var once = summary;
-    var interval: u64 = 1000;
-    var history: ?usize = null;
-    var json = false;
-    var color = true;
-    var launch: ?[]const u8 = null;
-    const extra: WatchExtra = if (summary) .{ .history = &history, .json = &json, .color = &color, .launch = &launch } else .{ .once = &once, .interval = &interval, .color = &color, .launch = &launch };
-    if (try parseArgs(c, args, &common, extra)) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    if (history != null and json) return fail("--history prints text; --json applies to the summary", .{});
-    if (history != null and launch != null) return fail("--history lists the recent launches; --launch names one", .{});
-    color = color and term.colorOn(1, c.env);
-    // `--history N` takes a count; any other word after it is the workflow.
+    var wa: cli.Watch = .{ .summary = summary };
+    if (try wa.parse(c.parser(), args)) |e| return e;
+    const history = wa.history;
+    const json = wa.json;
+    const once = wa.once;
+    const interval = wa.interval_ms;
+    const launch = wa.launch;
+    const color = wa.color and term.colorOn(1, c.env);
+    const common = &wa.common;
     if (history != null and common.workdir == null) if (common.workflow) |w| if (!sys.exists(c.gpa, w))
         return fail("--history takes a whole number of launches, and no workflow file {s} exists", .{w});
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    const root = (try rootOf(c, common)) orelse return .usage;
     if (history) |n| {
         const rec = try workz.records.recordsDir(c.a, root);
         if (try workz.records.latestLaunch(c.gpa, c.a, rec) == null) return failed("no launch recorded in {s}; kanit run starts one", .{rec});
@@ -1575,63 +617,7 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
     return if (ok) .ok else .failed;
 }
 
-const ReportFormat = enum { tsv, json, html };
-
-const ReportExtra = struct {
-    launch: *?[]const u8,
-    format: *?ReportFormat,
-    bottlenecks: *bool,
-    compare: *?[]const u8,
-    suggest: *bool,
-    methods: *bool,
-    output: *?[]const u8,
-    /// One format: a second that differs, as `--json --format tsv`, is refused
-    /// rather than left to win.
-    fn setFormat(self: ReportExtra, f: ReportFormat, used: usize) usize {
-        if (self.format.*) |had| if (had != f) {
-            std.debug.print("kanit: give one format; --json is --format json\n", .{});
-            return std.math.maxInt(usize);
-        };
-        self.format.* = f;
-        return used;
-    }
-    fn option(self: ReportExtra, arg: []const u8, value: ?[]const u8) !usize {
-        if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "--output")) {
-            self.output.* = value orelse return missingValue(arg);
-            return 2;
-        }
-        if (std.mem.eql(u8, arg, "--suggest")) {
-            self.suggest.* = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--methods")) {
-            self.methods.* = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--compare")) {
-            self.compare.* = value orelse return missingValue(arg);
-            return 2;
-        }
-        if (std.mem.eql(u8, arg, "--bottlenecks")) {
-            self.bottlenecks.* = true;
-            return 1;
-        }
-        if (std.mem.eql(u8, arg, "--launch")) return launchValue(arg, value, self.launch);
-        if (std.mem.eql(u8, arg, "--format")) {
-            const v = value orelse return missingValue(arg);
-            return self.setFormat(std.meta.stringToEnum(ReportFormat, v) orelse return invalidValue(arg, v, "use tsv, json or html"), 2);
-        }
-        // As `run --json` and `status --json` print JSON.
-        if (std.mem.eql(u8, arg, "--json")) return self.setFormat(.json, 1);
-        return 0;
-    }
-};
-
-/// A launch named by ID (in `rec`), by its directory, or by a working
-/// directory, meaning its newest launch.
 fn resolveLaunch(c: Ctx, rec: []const u8, name: []const u8) !?[]const u8 {
-    // A launch ID names a launch with events; any other word is a path, so
-    // `.` and a relative working directory work too.
     if (std.mem.indexOfScalar(u8, name, '/') == null) {
         const dir = try std.fs.path.join(c.a, &.{ rec, "launches", name });
         if (sys.exists(c.gpa, try std.fs.path.join(c.a, &.{ dir, "events.jsonl" }))) return dir;
@@ -1642,31 +628,17 @@ fn resolveLaunch(c: Ctx, rec: []const u8, name: []const u8) !?[]const u8 {
 }
 
 fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var launch: ?[]const u8 = null;
-    var format: ?ReportFormat = null;
-    var bottlenecks = false;
-    var compare: ?[]const u8 = null;
-    var suggest = false;
-    var methods = false;
-    var output: ?[]const u8 = null;
-    if (try parseArgs(c, args, &common, ReportExtra{ .launch = &launch, .format = &format, .bottlenecks = &bottlenecks, .compare = &compare, .suggest = &suggest, .methods = &methods, .output = &output })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    // One report at a time, in a format it has.
-    if (@as(u8, @intFromBool(suggest)) + @intFromBool(compare != null) + @intFromBool(bottlenecks) + @intFromBool(methods) > 1)
-        return fail("choose one of --suggest, --compare, --bottlenecks and --methods", .{});
-    if (methods) {
-        if (launch != null) return fail("--methods describes the results recorded in the working directory, whatever launch made them; drop --launch", .{});
-        if (format != null and format.? != .json) return fail("--methods prints text, or JSON with --format json", .{});
-    }
-    if (format) |f| {
-        if (bottlenecks or compare != null) return fail("--bottlenecks and --compare print text; --format applies to the attempt table and --suggest", .{});
-        if (suggest and f == .html) return fail("--suggest prints tsv or json, not html", .{});
-    }
-    const kind = format orelse .tsv;
-    if (output == null and kind == .html and !suggest and term.isTerminal(1))
-        return fail("the HTML page is for a browser: write it with -o report.html, or redirect standard output", .{});
-    const root = (try rootOf(c, &common)) orelse return .usage;
+    var ra: cli.Report = .{ .stdout_terminal = term.isTerminal(1) };
+    if (try ra.parse(c.parser(), args)) |e| return e;
+    const launch = ra.launch;
+    const format = ra.format;
+    const bottlenecks = ra.bottlenecks;
+    const compare = ra.compare;
+    const suggest = ra.suggest;
+    const methods = ra.methods;
+    const output = ra.output;
+    const kind = ra.kind();
+    const root = (try rootOf(c, &ra.common)) orelse return .usage;
     const rec = try workz.records.recordsDir(c.a, root);
     if (methods) {
         if (!sys.exists(c.gpa, rec)) return failed("no launch recorded in {s}; kanit run starts one", .{rec});
@@ -1685,7 +657,6 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     }
     const dir = if (launch) |id| try std.fs.path.join(c.a, &.{ rec, "launches", id }) else (try workz.records.latestLaunch(c.gpa, c.a, rec)) orelse return failed("no launch recorded in {s}; kanit run starts one", .{rec});
     if (!sys.exists(c.gpa, dir)) return failed("no launch {s}", .{dir});
-    // An attempt writes its record when it ends; the page shows running ones.
     if ((kind != .html or suggest) and workz.records.launchActive(c.gpa, dir))
         std.debug.print("kanit: launch {s} is still running; its attempts that have not ended have no record yet and are left out\n", .{std.fs.path.basename(dir)});
     if (kind == .html) if (output) |path| {
@@ -1697,14 +668,11 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     var text: std.Io.Writer.Allocating = .init(c.gpa);
     defer text.deinit();
     const w = &text.writer;
-    // Records that exist but do not parse are left out and named; the
-    // report exits 1.
     var unread: std.ArrayList([]const u8) = .empty;
     if (suggest) {
         var l = try workz.model.load(c.gpa, c.a, dir);
         defer l.deinit();
         unread = l.unreadable;
-        // A terminal gets a table; a file or a pipe gets the TSV.
         const table = kind == .tsv and output == null and term.isTerminal(1);
         try report.writeSuggestions(w, &l, if (kind == .json) .json else if (table) .table else .tsv);
     } else if (compare) |other| {
@@ -1730,98 +698,16 @@ fn cmdReport(c: Ctx, args: []const [:0]const u8) !Exit {
     return done;
 }
 
-const RunExtra = struct {
-    opts: *run.Options,
-    pass: *std.ArrayList([]const u8),
-    threads: *std.ArrayList([]const u8),
-    reruns: *std.ArrayList([]const u8),
-    a: std.mem.Allocator,
-
-    fn option(self: RunExtra, arg: []const u8, value: ?[]const u8) !usize {
-        const eq = std.mem.eql;
-        const o = self.opts;
-        if (eq(u8, arg, "-k") or eq(u8, arg, "--keep-going")) {
-            o.keep_going = true;
-            return 1;
-        }
-        if (eq(u8, arg, "--rerun-rule")) {
-            try self.reruns.append(self.a, value orelse return missingValue(arg));
-            return 2;
-        }
-        if (eq(u8, arg, "--rerun")) {
-            o.rerun = true;
-            return 1;
-        }
-        if (eq(u8, arg, "--no-isolation")) {
-            o.isolation = false;
-            return 1;
-        }
-        if (eq(u8, arg, "-q") or eq(u8, arg, "--quiet")) {
-            o.quiet = true;
-            return 1;
-        }
-        if (eq(u8, arg, "--json")) {
-            o.json = true;
-            return 1;
-        }
-        if (eq(u8, arg, "--no-color")) {
-            o.color = false;
-            return 1;
-        }
-        const takes_value = for ([_][]const u8{ "-j", "--jobs", "--max-threads", "--max-memory", "-r", "--retry", "--timeout", "--grace", "--input-manifest", "--slice", "--pass-env", "--threads" }) |name| {
-            if (eq(u8, arg, name)) break true;
-        } else false;
-        if (!takes_value) return 0;
-        const v = value orelse return missingValue(arg);
-        if (eq(u8, arg, "-j") or eq(u8, arg, "--jobs")) {
-            o.jobs = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
-            if (o.jobs.? == 0) return invalidValue(arg, v, "use a whole number above 0");
-        } else if (eq(u8, arg, "--max-threads")) {
-            o.max_threads = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use a whole number above 0");
-            if (o.max_threads.? == 0) return invalidValue(arg, v, "use a whole number above 0");
-        } else if (eq(u8, arg, "--max-memory")) {
-            o.max_memory_mib = workflow.parseMemoryMib(v) orelse return invalidValue(arg, v, "use a size from 1M to 1024T, such as 512M or 60G");
-        } else if (eq(u8, arg, "-r") or eq(u8, arg, "--retry")) {
-            o.retry = std.fmt.parseInt(u32, v, 10) catch return invalidValue(arg, v, "use 0 to 3");
-            if (o.retry > 3) return invalidValue(arg, v, "use 0 to 3");
-        } else if (eq(u8, arg, "--timeout")) {
-            o.timeout_s = workflow.parseDuration(v) orelse return invalidValue(arg, v, "use a duration such as 90s, 30m or 2h");
-        } else if (eq(u8, arg, "--grace")) {
-            o.grace_s = if (zeroDuration(v)) 0 else workflow.parseDuration(v) orelse return invalidValue(arg, v, "use a duration such as 10s or 1m, or 0");
-        } else if (eq(u8, arg, "--input-manifest")) {
-            o.input_manifest = v;
-        } else if (eq(u8, arg, "--slice")) {
-            if (!std.mem.endsWith(u8, v, ".slice") or v.len <= ".slice".len or std.mem.indexOfScalar(u8, v, '/') != null) return invalidValue(arg, v, "use a unit name ending in .slice, without /");
-            o.slice = v;
-        } else if (eq(u8, arg, "--pass-env")) {
-            if (!envName(v)) return invalidValue(arg, v, "use a variable name such as HOME");
-            try self.pass.append(self.a, v);
-        } else if (eq(u8, arg, "--threads")) {
-            try self.threads.append(self.a, v);
-        } else return 0;
-        return 2;
-    }
-};
-
 fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
-    var common: Common = .{};
-    var opts: run.Options = .{};
-    var pass: std.ArrayList([]const u8) = .empty;
-    var reruns: std.ArrayList([]const u8) = .empty;
-    var threads: std.ArrayList([]const u8) = .empty;
-    if (try parseArgs(c, args, &common, RunExtra{ .opts = &opts, .pass = &pass, .threads = &threads, .reruns = &reruns, .a = c.a })) |e| return e;
-    if (extraArgs(c, &common)) |e| return e;
-    opts.rerun_rules = reruns.items;
-    opts.pass_env = pass.items;
-    opts.thread_overrides = threads.items;
+    var ra: cli.Run = .{};
+    if (try ra.parse(c.parser(), args)) |e| return e;
+    var opts = ra.opts;
     if (opts.input_manifest) |m| opts.input_manifest = try sys.absolute(c.a, try sys.cwd(c.a), m);
-    // The launcher only starts the scope; the engine inside reads the workflow.
-    if (opts.slice != null and !opts.isolation) return fail("--slice places the run's scope, which --no-isolation does not make; give one of them", .{});
     if (opts.isolation and !try insideOwnScope(c)) return isolate(c, opts);
-    var l = (try load(c, &common)) orelse return .usage;
+    var l = (try load(c, &ra.common)) orelse return .usage;
     defer l.deinit();
-    if (applyThreads(&l.wf, threads.items)) |e| return e;
-    if (!try knownRules(c.a, &l.wf, opts.rerun_rules)) return .usage;
+    if (try c.parser().applyThreads(&l.wf, ra.threads.items)) |e| return e;
+    if (try c.parser().knownRules(&l.wf, opts.rerun_rules)) |e| return e;
     const outcome = try run.execute(c.gpa, c.a, &l.wf, &l.g, l.mask, opts, c.env);
     return switch (outcome) {
         .ok => .ok,
@@ -1831,53 +717,6 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
     };
 }
 
-/// Applies each `--threads STEP=N` to the loaded workflow: the rules of STEP
-/// request N threads in this launch, and their keys change with it.
-fn applyThreads(wf: *workflow.Workflow, overrides: []const []const u8) ?Exit {
-    for (overrides) |o| {
-        // The count follows the last '=', so a step name may hold one.
-        const eq = std.mem.lastIndexOfScalar(u8, o, '=') orelse return fail("--threads {s}: give a step and a thread count, such as align=16", .{o});
-        const step = o[0..eq];
-        const count = o[eq + 1 ..];
-        if (step.len == 0) return fail("--threads {s}: give a step and a thread count, such as align=16", .{o});
-        for (count) |ch| if (!std.ascii.isDigit(ch)) return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
-        const n = std.fmt.parseInt(u32, count, 10) catch return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
-        if (n < 1 or n > 4096) return fail("--threads {s}: the thread count must be a whole number from 1 to 4096", .{o});
-        if (wf.overrideThreads(step, n) == 0) {
-            var steps: std.ArrayList([]const u8) = .empty;
-            defer steps.deinit(std.heap.page_allocator);
-            for (wf.rules) |r| steps.append(std.heap.page_allocator, r.labels.step) catch {};
-            if (workflow.closest(steps.items, step)) |hint| return fail("--threads {s}: no rule has step '{s}'; did you mean '{s}'?", .{ o, step, hint });
-            return fail("--threads {s}: no rule has step '{s}'", .{ o, step });
-        }
-    }
-    return null;
-}
-
-/// The rule of the workflow whose name is closest to `name`, if any is close.
-fn closestRule(a: std.mem.Allocator, wf: *const workflow.Workflow, name: []const u8) !?[]const u8 {
-    var names: std.ArrayList([]const u8) = .empty;
-    for (wf.rules) |r| try names.append(a, r.name);
-    return workflow.closest(names.items, name);
-}
-
-/// Reports a name given to --rerun-rule that is not a rule of the workflow.
-fn knownRules(a: std.mem.Allocator, wf: *const workflow.Workflow, names: []const []const u8) !bool {
-    for (names) |n| if (wf.ruleIndex(n) == null) {
-        if (try closestRule(a, wf, n)) |hint| {
-            std.debug.print("kanit: --rerun-rule {s}: no such rule; did you mean '{s}'?\n", .{ n, hint });
-        } else std.debug.print("kanit: --rerun-rule {s}: no such rule\n", .{n});
-        return false;
-    };
-    return true;
-}
-
-/// Re-executes the run inside a delegated systemd user scope: cgroup limits
-/// for the whole run, swap off. `systemd-run --scope` execs the engine in this
-/// same process, so interrupt signals reach the engine directly.
-/// Whether this process is the engine `isolate` started: `WORKZ_STAGE` names
-/// the scope it made, and this process runs in that scope. A marker
-/// inherited from elsewhere fails the second test, so the launch isolates.
 fn insideOwnScope(c: Ctx) !bool {
     const stage = c.env.get("WORKZ_STAGE") orelse return false;
     if (!std.mem.startsWith(u8, stage, "inner:")) return false;
@@ -1893,24 +732,16 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     const systemd_run = (try workz.process.findProgram(c.gpa, c.a, c.env.get("PATH") orelse "/usr/bin:/bin", "systemd-run")) orelse return fail("systemd-run not found; isolation needs a systemd user manager (or use --no-isolation)", .{});
     const threads = opts.max_threads orelse run.defaultThreads();
     var memory = opts.max_memory_mib orelse run.defaultMemoryMib(c.gpa);
-    // The engine and its network holder need a little memory beside the tasks.
     memory += 256;
     const exe = try sys.selfExe(c.a);
     var argv: std.ArrayList([]const u8) = .empty;
     try argv.appendSlice(c.a, &.{ systemd_run, "--user", "--scope", "--quiet" });
-    // systemd-run 254 and newer can expand `$NAME` in the command it starts,
-    // and older ones neither expand nor know the option that stops it: it is
-    // given only when an argument holds a `$`.
     const dollar = std.mem.indexOfScalar(u8, exe, '$') != null or for (c.argv[1..]) |arg| {
         if (std.mem.indexOfScalar(u8, arg, '$') != null) break true;
     } else false;
     if (dollar) try argv.append(c.a, "--expand-environment=no");
-    // systemd-run names a scope after its own pid. When kanit itself was
-    // started by `systemd-run --scope`, that pid is ours and its scope is still
-    // loaded, so the run's scope gets a name of its own.
     const unit = try std.fmt.allocPrint(c.a, "workz-{d}-{x}", .{ linux.getpid(), sys.realNs() });
     try argv.append(c.a, try std.fmt.allocPrint(c.a, "--unit={s}", .{unit}));
-    // With --slice the scope becomes a child of the caller's slice, inside its limits.
     if (opts.slice) |slice| try argv.append(c.a, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
     try argv.appendSlice(c.a, &.{
         "-p", "Delegate=yes",
@@ -1930,13 +761,6 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     return fail("cannot start systemd-run: {s}", .{@tagName(linux.errno(rc))});
 }
 
-/// Internal: creates the run's network: a new user namespace mapping the
-/// caller's own uid and gid, and a new network namespace with only loopback,
-/// brought up. Reports "ready" on stdout and waits for end of file on stdin,
-/// a pipe whose only writer is the engine; shell rules join both namespaces.
-/// The engine stops it with SIGKILL. End of file means the engine died: the
-/// holder then kills the run's cgroup (`cgroup.kill` named by the argument),
-/// so no task, container or service outlives its engine.
 fn netns(args: []const [:0]const u8) Exit {
     const uid = linux.getuid();
     const gid = linux.getgid();
@@ -1946,8 +770,6 @@ fn netns(args: []const [:0]const u8) Exit {
         if (linux.errno(rc) != .SUCCESS) return fail("cannot open {s}", .{args[0]});
         kill_fd = @intCast(rc);
     }
-    // Stopping the run's scope signals every process in it; the engine
-    // handles that and stops this holder itself.
     var ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
     for ([_]linux.SIG{ .INT, .TERM, .HUP }) |sig| _ = linux.sigaction(sig, &ignore, null);
     if (linux.errno(linux.unshare(linux.CLONE.NEWUSER | linux.CLONE.NEWNET)) != .SUCCESS) return fail("cannot create the run's network namespace", .{});
@@ -1955,7 +777,6 @@ fn netns(args: []const [:0]const u8) Exit {
     writeProc("/proc/self/setgroups", "deny") catch return fail("cannot deny setgroups", .{});
     writeProc("/proc/self/uid_map", std.fmt.bufPrint(&buf, "{d} {d} 1", .{ uid, uid }) catch unreachable) catch return fail("cannot map the user id", .{});
     writeProc("/proc/self/gid_map", std.fmt.bufPrint(&buf, "{d} {d} 1", .{ gid, gid }) catch unreachable) catch return fail("cannot map the group id", .{});
-    // Bring loopback up so rules can use 127.0.0.1 among themselves.
     const IfReq = extern struct { name: [16]u8, flags: i16, pad: [22]u8 };
     const sock = linux.socket(linux.AF.INET, linux.SOCK.DGRAM | linux.SOCK.CLOEXEC, 0);
     if (linux.errno(sock) == .SUCCESS) {
@@ -1963,7 +784,8 @@ fn netns(args: []const [:0]const u8) Exit {
         @memcpy(req.name[0..2], "lo");
         const fd: i32 = @intCast(sock);
         if (linux.errno(linux.ioctl(fd, linux.SIOCGIFFLAGS, @intFromPtr(&req))) == .SUCCESS) {
-            req.flags |= 1; // IFF_UP
+            const iff_up: i16 = 1;
+            req.flags |= iff_up;
             _ = linux.ioctl(fd, linux.SIOCSIFFLAGS, @intFromPtr(&req));
         }
         _ = linux.close(fd);
@@ -1980,10 +802,6 @@ fn netns(args: []const [:0]const u8) Exit {
     return .ok;
 }
 
-/// Internal: guards a run without isolation. It reads "+PGID" and "-PGID"
-/// lines on stdin, a pipe whose only writer is the engine, as tasks start
-/// and end. At end of file, also when the engine died, it kills the process
-/// groups still listed, so no task outlives its engine.
 fn guard() Exit {
     var ignore: linux.Sigaction = .{ .handler = .{ .handler = linux.SIG.IGN }, .mask = linux.sigemptyset(), .flags = 0 };
     for ([_]linux.SIG{ .INT, .TERM, .HUP }) |sig| _ = linux.sigaction(sig, &ignore, null);
@@ -2019,11 +837,6 @@ fn writeProc(path: [*:0]const u8, text: []const u8) !void {
     _ = try sys.check(linux.write(fd, text.ptr, text.len));
 }
 
-/// Internal: maps every file read-only, touches each page so the run's
-/// holder group carries the page-cache charge, reports "ready" on stdout
-/// and keeps the mappings until it is stopped.
-/// `__hold PATH...`: maps every file at or below each path, touches each
-/// page once, says `ready BYTES` and keeps the mappings until killed.
 fn hold(paths: []const [:0]const u8) Exit {
     const gpa = std.heap.page_allocator;
     var files: std.ArrayList([]u8) = .empty;
@@ -2032,7 +845,6 @@ fn hold(paths: []const [:0]const u8) Exit {
     var total: u64 = 0;
     for (files.items) |file| {
         const p = gpa.dupeZ(u8, file) catch return fail("out of memory listing shared input {s}", .{file});
-        // Without O_NONBLOCK, opening a FIFO waits for a writer forever.
         const fd_rc = linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .NONBLOCK = true, .CLOEXEC = true }, 0);
         if (linux.errno(fd_rc) != .SUCCESS) return fail("cannot open shared input {s}", .{p});
         const fd: i32 = @intCast(fd_rc);
@@ -2056,8 +868,6 @@ fn hold(paths: []const [:0]const u8) Exit {
     while (true) _ = linux.pause();
 }
 
-/// Says on standard error why a launch has no attempts to report, and, for
-/// the newest launch, which launch last ran some.
 fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
     const id = std.fs.path.basename(dir);
     var why: []const u8 = if (workz.records.launchActive(c.gpa, dir)) "none has ended yet" else "it ran no rule";
@@ -2079,4 +889,26 @@ fn noAttempts(c: Ctx, rec: []const u8, dir: []const u8, newest: bool) !void {
         std.debug.print("kanit: the newest launch that ran attempts is {s}: kanit report --launch {s}\n", .{ names[k], names[k] });
         return;
     }
+}
+
+fn graphProblem(c: Ctx, path: []const u8, root: []const u8, first: workflow.Problem) !workflow.Problem {
+    var problem: workflow.Problem = .{};
+    var wf = workflow.loadWithLines(c.gpa, path, root, &problem) catch |err| switch (err) {
+        error.Invalid => {
+            c.gpa.free(first.message);
+            return problem;
+        },
+        else => return err,
+    };
+    defer wf.deinit();
+    var g = graph.build(c.gpa, &wf, &problem) catch |err| switch (err) {
+        error.Cycle, error.Invalid => {
+            c.gpa.free(first.message);
+            return problem;
+        },
+        else => return err,
+    };
+    g.deinit();
+    c.gpa.free(problem.message);
+    return first;
 }

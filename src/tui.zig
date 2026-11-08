@@ -36,8 +36,6 @@ pub const Key = union(enum) {
     interrupt,
 };
 
-/// Decodes one key from the start of `in`; `used` is the number of bytes it
-/// took. An escape sequence this view does not use is skipped whole.
 pub fn decode(in: []const u8, used: *usize) ?Key {
     used.* = 0;
     if (in.len == 0) return null;
@@ -49,16 +47,13 @@ pub fn decode(in: []const u8, used: *usize) ?Key {
         else => return .{ .char = in[0] },
     }
     if (in.len == 1 or in[1] == 0x1b) return .escape;
-    // Escape and a key at once is an Alt key, which this view does not use.
     if (in[1] != '[' and in[1] != 'O') {
         used.* = 2;
         return null;
     }
-    // CSI: parameters and intermediates, then one final byte in 0x40-0x7e.
     var i: usize = 2;
     while (i < in.len and (in[i] < 0x40 or in[i] > 0x7e)) i += 1;
     if (i == in.len) {
-        // Incomplete: wait for the rest.
         used.* = 0;
         return null;
     }
@@ -96,61 +91,40 @@ pub const Filter = enum {
 
 pub const Mode = enum { table, log, timeline, details, help };
 
-/// Order of the table rows.
 pub const Sort = enum {
-    /// Running first, then waiting, failed, done and pending.
     status,
-    /// Longest running or longest run first.
     elapsed,
-    /// Largest recorded peak first.
     memory,
     name,
 };
 
-/// A control command chosen in the view, for the run loop to send.
 pub const Action = struct { cmd: []const u8, rule: ?usize };
 
-/// How long `X` waits for its confirming second press.
 const confirm_ns = 3 * std.time.ns_per_s;
 
 pub const Ui = struct {
-    /// Producers and consumers of each rule, for its details.
     links: Links = .{},
     mode: Mode = .table,
-    /// The view `?` was pressed in, shown again when the keys close.
     before_help: Mode = .table,
     filter: Filter = .all,
-    /// Selected rule (index into the tracker's rules, stable as it only
-    /// grows) and the first visible row.
     selected: ?usize = null,
-    /// Set once a key moved the selection: it then stays on its rule as rows
-    /// reorder; until then it follows the top row.
     chosen: bool = false,
     top: usize = 0,
     stderr: bool = true,
     quit: bool = false,
     sort: Sort = .status,
-    /// Rows whose name contains this text; typed after `/`.
     query: [64]u8 = undefined,
     query_len: usize = 0,
     typing: bool = false,
-    /// A control command to send, set by `S`, `R` and a confirmed `X`.
     action: ?Action = null,
-    /// A line shown in place of the key hints until `message_until`.
     message: [160]u8 = undefined,
     message_len: usize = 0,
     message_until: i128 = 0,
-    /// Table rows on screen in the last frame.
     page: usize = 20,
     color: bool = false,
-    /// Time of the key being applied, set by the run loop; messages and the
-    /// confirmation of `X` count from it.
     clock_ns: i128 = 0,
-    /// A second `X` before this time cancels the launch.
     confirm_until: i128 = 0,
 
-    /// Applies a key. `rows` lists the visible rules in display order;
-    /// `page` is the number of table rows on screen.
     pub fn key(self: *Ui, k: Key, rows: []const usize, page: usize) void {
         if (self.typing) return self.typeKey(k);
         if (self.mode == .help) {
@@ -217,7 +191,6 @@ pub const Ui = struct {
                     self.top = 0;
                 },
                 'S' => if (self.selected) |sel| {
-                    // The rule acted on stays selected as its row moves.
                     self.chosen = true;
                     self.action = .{ .cmd = "stop", .rule = sel };
                 },
@@ -237,8 +210,6 @@ pub const Ui = struct {
         }
     }
 
-    /// Keys while typing a search: text, backspace, enter to keep it and
-    /// escape to clear it.
     fn typeKey(self: *Ui, k: Key) void {
         switch (k) {
             .enter => self.typing = false,
@@ -289,16 +260,12 @@ pub const Ui = struct {
         self.chosen = true;
     }
 
-    /// Keeps the selection on screen: a selection that left the filter
-    /// moves to the nearest row, and `top` scrolls to show it.
     pub fn settle(self: *Ui, rows: []const usize, page: usize) void {
         if (rows.len == 0) {
             self.top = 0;
             return;
         }
         if (!self.chosen) self.selected = rows[@min(self.top, rows.len - 1)];
-        // Without a selection, or when it left the view, the top row is
-        // selected.
         const pos = self.position(rows) orelse blk: {
             self.selected = rows[@min(self.top, rows.len - 1)];
             break :blk self.position(rows);
@@ -327,10 +294,6 @@ fn elapsedOf(r: *const RuleView, now_ns: i128) i128 {
     return (if (r.finished_ns > 0) r.finished_ns else now_ns) - r.started_ns;
 }
 
-/// Visible rules in display order. By status: running first, then
-/// waiting, failed, done and pending, each in the order the launch reached
-/// them; or by elapsed time, recorded peak or name. `query` keeps the rules
-/// whose name contains it.
 pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []const u8, now_ns: i128) ![]usize {
     var out: std.ArrayList(usize) = .empty;
     for (t.rules.items, 0..) |r, i| {
@@ -370,8 +333,6 @@ pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []
     return out.items;
 }
 
-/// Bytes of `s` that fill at most `cols` columns, counting each UTF-8
-/// sequence as one column and never cutting one.
 pub fn fit(s: []const u8, cols: usize) usize {
     var n: usize = 0;
     for (s, 0..) |c, i| {
@@ -382,8 +343,6 @@ pub fn fit(s: []const u8, cols: usize) usize {
     return s.len;
 }
 
-/// The byte where the last `cols` columns of `s` start, counting each UTF-8
-/// sequence as one column.
 fn tailStart(s: []const u8, cols: usize) usize {
     var n: usize = 0;
     var i = s.len;
@@ -413,11 +372,8 @@ const on_red = "\x1b[41m";
 const on_blue = "\x1b[44m";
 const on_magenta = "\x1b[45m";
 const on_cyan = "\x1b[46m";
-/// The empty part of a bar: bright black, a grey in most themes.
 const on_track = "\x1b[100m";
 
-/// One line of a frame: text and SGR sequences, cut at `cols` visible
-/// columns. Sequences are dropped when color is off.
 const Line = struct {
     buf: [4096]u8 = undefined,
     len: usize = 0,
@@ -435,7 +391,6 @@ const Line = struct {
         self.len += n;
     }
 
-    /// Visible text, cut at the width; control characters become spaces.
     fn text(self: *Line, s: []const u8) void {
         const cut = s[0..fit(s, self.cols -| self.used)];
         const start = self.len;
@@ -445,8 +400,6 @@ const Line = struct {
         for (shown) |c| self.used += @intFromBool(c & 0xc0 != 0x80);
     }
 
-    /// Text that ends with "..." where the rest of the line cannot hold it,
-    /// so a cut is never read as the whole text.
     fn clipped(self: *Line, s: []const u8) void {
         const room = self.cols -| self.used;
         if (fit(s, room) == s.len or room < 4) return self.text(s);
@@ -469,13 +422,10 @@ const Line = struct {
         }
     }
 
-    /// Pads with spaces up to visible column `col`.
     fn to(self: *Line, col: usize) void {
         if (col > self.used) self.spaces(col - self.used);
     }
 
-    /// `s` in a field of `width` columns, cut or padded; right-aligned with
-    /// `right`.
     fn field(self: *Line, s: []const u8, width: usize, right: bool) void {
         const cut = s[0..fit(s, width)];
         var shown: usize = 0;
@@ -485,8 +435,6 @@ const Line = struct {
         if (!right) self.spaces(width - shown);
     }
 
-    /// A name in a field of `width` columns. A longer one keeps its start
-    /// and end around "...", since rules of one step differ at the end.
     fn name(self: *Line, s: []const u8, width: usize) void {
         if (fit(s, width) == s.len or width < 7) return self.field(s, width, false);
         const keep = width - 3;
@@ -496,7 +444,6 @@ const Line = struct {
         self.text(s[tailStart(s, keep - head)..]);
     }
 
-    /// `n` cells of background `bg` with color, or of `ch` without.
     fn cells(self: *Line, n: usize, bg: []const u8, ch: u8) void {
         if (n == 0) return;
         if (self.color) {
@@ -512,9 +459,6 @@ const Line = struct {
         }
     }
 
-    /// A bar of `width` cells split into parts proportional to `parts`, each
-    /// at least one cell when it is not zero and there is room; the rest is
-    /// the empty track.
     fn bar(self: *Line, width: usize, total: f64, parts: []const Part) void {
         var cells_of: [8]usize = @splat(0);
         var taken: usize = 0;
@@ -535,8 +479,6 @@ const Line = struct {
 
 const Part = struct { value: f64, bg: []const u8, ch: u8 };
 
-/// Writes frame lines: each cleared to its end, the last one without a
-/// newline so the frame never scrolls.
 const Frame = struct {
     w: *std.Io.Writer,
     cols: usize,
@@ -567,14 +509,12 @@ const Frame = struct {
     }
 };
 
-/// Elapsed time as m:ss, or h:mm:ss from an hour on.
 fn clock(buf: []u8, ns: i128) []const u8 {
     const s: u64 = @intCast(@max(@divFloor(ns, std.time.ns_per_s), 0));
     const r = if (s >= 3600) std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}", .{ s / 3600, s / 60 % 60, s % 60 }) else std.fmt.bufPrint(buf, "{d}:{d:0>2}", .{ s / 60, s % 60 });
     return r catch "";
 }
 
-/// A byte count in a few characters: 980K, 4.2M, 202M, 1.5G.
 fn compact(buf: []u8, n: u64) []const u8 {
     const f: f64 = @floatFromInt(n);
     if (n == 0) return "0";
@@ -589,7 +529,6 @@ fn compact(buf: []u8, n: u64) []const u8 {
     return r catch "";
 }
 
-/// A tick label for the timeline axis: 0, 45s, 2m, 1m30s, 1h, 1h20m.
 fn tickLabel(buf: []u8, s: u64) []const u8 {
     const r = if (s == 0)
         std.fmt.bufPrint(buf, "0", .{})
@@ -623,15 +562,10 @@ fn look(s: Status) Look {
     };
 }
 
-/// The color of a bar filled to `ratio` of its limit: green, then yellow
-/// from 70%, red from 90%.
 fn pressure(ratio: f64) []const u8 {
     return if (ratio >= 0.9) on_red else if (ratio >= 0.7) on_yellow else on_green;
 }
 
-/// Draws one frame of the current view into `w`. With `live`, the output of
-/// running rules is read from their logs; counters come from the tracker,
-/// sampled by the run loop. Tests draw without it.
 pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols: usize, rows: usize, now_ns: i128, live: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -640,7 +574,6 @@ pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols:
     try w.writeAll("\x1b[H");
     const end_ns = if (t.finished) t.finished_ns else now_ns;
     try drawHeader(&f, t, end_ns);
-    // A blank line sets the body apart when the terminal has room for it.
     if (rows >= 24) try f.blank();
 
     const list = try visible(a, t, ui.filter, ui.sort, ui.queryText(), now_ns);
@@ -665,9 +598,7 @@ pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols:
 fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     var cb: [16]u8 = undefined;
     const state = if (t.finished) t.final_status else "running";
-    // Without a readable event the start is unknown.
     const elapsed = if (t.started_ns == 0) "-:--" else clock(&cb, end_ns - t.started_ns);
-    // Title bar: the whole line in reverse video, the state as a badge.
     var l = f.begin();
     l.sgr(reverse ++ bold);
     l.text(" kanit ");
@@ -706,7 +637,6 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     l.print("  {d}/{d} done", .{ done, t.selected });
     if (t.selected > 0) l.print(" ({d}%)", .{done * 100 / t.selected});
     l.sgr(reset);
-    // Zero counts are left out, except failures.
     if (running > 0) {
         l.sgr(cyan);
         l.print("  {d} running", .{running});
@@ -732,7 +662,6 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
 
     const res = t.reserved();
     const reserved_th: f64 = @floatFromInt(res.threads);
-    // Use is sampled while rules run; an ended launch uses nothing.
     const cores: ?f64 = if (t.finished) null else t.cpu_cores;
     const in_use: ?u64 = if (t.finished) null else t.memory_current;
     const busy = @min(cores orelse 0, reserved_th);
@@ -790,7 +719,6 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     }
 }
 
-/// Which table columns fit in `cols`, and their widths.
 const Columns = struct {
     name: usize,
     cpu: bool,
@@ -838,7 +766,6 @@ fn drawTable(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui
         l.field("MEMORY", Columns.bar_w - 2, false);
     }
     if (c.mem) l.field(if (c.bar) "" else "MEMORY", Columns.mem_w, true);
-    // The label that fits whole.
     const room = l.cols -| l.used;
     l.text(if (room >= 22) "  LAST OUTPUT / REASON" else if (room >= 13) "  LAST OUTPUT" else "");
     try f.put(&l);
@@ -908,7 +835,6 @@ fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected:
     if (c.bar) {
         l.spaces(2);
         const width = Columns.bar_w - 2;
-        // Only running rules get a bar; a finished rule's peak is its value.
         if (mem != null and limit > 0 and r.status.active()) {
             const ratio = @as(f64, @floatFromInt(mem.?)) / @as(f64, @floatFromInt(limit));
             const n: usize = @min(width, @as(usize, @intFromFloat(@ceil(@min(ratio, 1) * @as(f64, @floatFromInt(width))))));
@@ -943,11 +869,9 @@ fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected:
 fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page: usize, end_ns: i128) !void {
     const name_w = std.math.clamp(f.cols / 4, 10, 32);
     const axis_w = f.cols -| (2 + name_w + 1);
-    // The axis starts at the first event, or at the end without one.
     const origin = if (t.started_ns != 0) t.started_ns else end_ns;
     const span: i128 = @max(end_ns - origin, std.time.ns_per_s);
     const span_s: u64 = @intCast(@divFloor(span + std.time.ns_per_s - 1, std.time.ns_per_s));
-    // Ticks at a round step, at most one per ten columns.
     const steps = [_]u64{ 1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400 };
     const max_ticks = @max(axis_w / 10, 1);
     const step = for (steps) |s| {
@@ -993,7 +917,6 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
         l.name(r.name, name_w);
         l.sgr(reset);
         l.text(" ");
-        // Each column is blank, waiting, or the attempt's run in its result.
         var x: usize = 0;
         const ready_at = if (r.ready_ns > 0) col(r.ready_ns, origin, span, axis_w) else axis_w;
         const start_at = if (r.started_ns > 0) col(r.started_ns, origin, span, axis_w) else axis_w;
@@ -1026,8 +949,6 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
     }
 }
 
-/// Everything known about the selected rule: its state and request, its
-/// times, and while it runs its cgroup's counters and pressure.
 fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, space: usize, now_ns: i128, live: bool) !void {
     const ri = ui.selected orelse return;
     const r = &t.rules.items[ri];
@@ -1076,7 +997,6 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
         l.print("{d} threads, {s}", .{ r.threads, compact(&b[0], r.memory_mib << 20) });
         try f.put(&l);
     }
-    // What it reads from, what reads from it, and the shared inputs it holds.
     for ([_]struct { []const u8, ?[]const []const u8 }{
         .{ "after", ui.links.after.get(r.name) },
         .{ "before", ui.links.before.get(r.name) },
@@ -1186,7 +1106,6 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
     }
 }
 
-/// A log line, red when it reports an error and yellow for a warning.
 fn logLine(l: *Line, line: []const u8) void {
     var low: [256]u8 = undefined;
     const n = @min(line.len, low.len);
@@ -1294,14 +1213,12 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
     }
     const Hint = struct { key: []const u8, what: []const u8 };
     const hints: []const Hint = switch (ui.mode) {
-        // "?" comes second, so a narrow terminal still shows where the keys are.
         .table => &.{ .{ .key = "q", .what = "quit" }, .{ .key = "?", .what = "keys" }, .{ .key = "enter", .what = "log" }, .{ .key = "i", .what = "details" }, .{ .key = "t", .what = "timeline" }, .{ .key = "S R X", .what = "stop retry cancel" }, .{ .key = "/", .what = "search" }, .{ .key = "s", .what = "sort" }, .{ .key = "a r w f d", .what = "filter" } },
         .timeline => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "j k", .what = "move" }, .{ .key = "enter", .what = "log" }, .{ .key = "t", .what = "table" } },
         .log => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "o", .what = "stdout/stderr" }, .{ .key = "j k", .what = "rule" } },
         .details => &.{ .{ .key = "q", .what = "back" }, .{ .key = "?", .what = "keys" }, .{ .key = "j k", .what = "rule" }, .{ .key = "enter", .what = "log" }, .{ .key = "S", .what = "stop" }, .{ .key = "R", .what = "retry" } },
         .help => &.{.{ .key = "q", .what = "back" }},
     };
-    // The view's state on the right: filter, sort and search.
     var sb: [128]u8 = undefined;
     const state = if (ui.query_len > 0)
         std.fmt.bufPrint(&sb, "{s} | {s} | \"{s}\" ", .{ @tagName(ui.filter), @tagName(ui.sort), ui.queryText() }) catch ""
@@ -1326,7 +1243,6 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
 
 // --- Running the view ---
 
-/// The terminal in raw mode on the alternate screen; `leave` restores it.
 const Terminal = struct {
     saved: linux.termios,
 
@@ -1356,10 +1272,6 @@ const Terminal = struct {
     }
 };
 
-/// Reads the live counters the view shows into the tracker: memory and CPU
-/// of running attempts, memory of held shared inputs, and the run's CPU
-/// cores and memory. A read that fails keeps the last value, because a
-/// cgroup can be missing for a moment as an attempt starts or ends.
 pub const Sampler = struct {
     run_cpu: ?u64 = null,
     run_ns: i128 = 0,
@@ -1394,7 +1306,6 @@ pub const Sampler = struct {
     }
 };
 
-/// Appends a command chosen in the view to the launch's control file.
 fn send(gpa: Allocator, t: *const Tracker, ui: *Ui, act: Action) void {
     var buf: [256]u8 = undefined;
     const name = if (act.rule) |ri| t.rules.items[ri].name else "";
@@ -1409,8 +1320,6 @@ fn send(gpa: Allocator, t: *const Tracker, ui: *Ui, act: Action) void {
     ui.say(std.fmt.bufPrint(&said, "sent: {s}", .{std.mem.trimEnd(u8, line, "\n")}) catch "sent", sys.realNs());
 }
 
-/// Runs the interactive view until `q` or an interrupt. The launch is
-/// followed while it runs and stays browsable after it ends.
 pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
     var set = linux.sigemptyset();
     for ([_]linux.SIG{ .INT, .TERM, .HUP, .WINCH }) |s| linux.sigaddset(&set, s);
@@ -1467,7 +1376,6 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
                 var used: usize = 0;
                 const k = decode(input[at..pending], &used);
                 if (used == 0) {
-                    // A sequence too long for the buffer is dropped.
                     if (at == 0 and pending == input.len) at = pending;
                     break;
                 }
@@ -1479,7 +1387,6 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
                 }
                 if (ui.quit) break;
             }
-            // A sequence cut by the read waits for its remaining bytes.
             std.mem.copyForwards(u8, input[0 .. pending - at], input[at..pending]);
             pending -= at;
         }
@@ -1487,8 +1394,6 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
     return true;
 }
 
-/// Each rule's producers and consumers, by name, from the launch's copy of
-/// its workflow; empty when that cannot be read.
 pub const Links = struct {
     after: std.StringHashMapUnmanaged([]const []const u8) = .empty,
     before: std.StringHashMapUnmanaged([]const []const u8) = .empty,

@@ -4,6 +4,19 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line, and each version says first what such a change needs from you.
 
+## [Unreleased]
+
+Large workflows run faster in less memory, and a launch writes its resume state in small appends. Nothing needs action.
+
+### Changed
+
+- On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.
+- A launch appends each completed rule to `.workz/state.log`, synced at most once a second, instead of rewriting `state.json`; `state.json` is rewritten when the launch ends. kanit 0.7.0 ignores the log and reruns the rules recorded only there.
+
+### Fixed
+
+- `report --format html` and the launch page draw a launch whose start line selects none of the rules that ran, instead of stopping on an index out of bounds.
+
 ## [0.7.0] - 2026-11-06
 
 workz becomes kanit. Pipeline templates gain run files, sample-sheet defaults and quoted placeholders, reports use about half the memory, and a Zig program can follow a running launch.

@@ -170,7 +170,6 @@ test "[unit] - [workflow]: a shared input's path is an input of the rules that u
     try testing.expectEqualStrings("ref/index", r.input[1]);
     try testing.expect(std.mem.endsWith(u8, r.input_abs[1], "/ref/index"));
     try testing.expectEqual(@as(usize, 2), wf.rules[1].input.len);
-    // A service's index too: a rebuilt one reruns the rules that join it.
     try testing.expectEqual(@as(usize, 1), wf.rules[2].input.len);
     try testing.expectEqualStrings("ref/star", wf.rules[2].input[0]);
 }
@@ -233,8 +232,7 @@ test "[failure] - [graph]: a cycle error names the rules on the cycle in order" 
     var s = try Scratch.init();
     defer s.deinit();
     var problem: workflow.Problem = .{};
-    // `after` depends on the cycle without being on it; `x` and `y` are on it.
-    var wf = try loadText(&s, head ++
+    var wf = try helpers.loadTextLines(&s, head ++
         "[[rules]]\nname = \"after\"\ninput = [\"y\"]\noutput = [\"after\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"x\"\ninput = [\"z\"]\noutput = [\"x\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"y\"\ninput = [\"x\"]\noutput = [\"y\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
@@ -254,7 +252,6 @@ test "[unit] - [workflow]: undeclared labels are derived from the rule name and 
     const nf = derive("pool_01_baseline__STAR_ALIGN", null);
     try testing.expectEqualStrings("STAR_ALIGN", nf.step);
     try testing.expectEqualStrings("pool_01_baseline", nf.sample.?);
-    // A single "_" names the step only: the rest is too ambiguous for a sample.
     const one = derive("classify_03JW", null);
     try testing.expectEqualStrings("classify", one.step);
     try testing.expect(one.sample == null);
@@ -302,12 +299,10 @@ test "[failure] - [workflow]: a label must be a short string without control cha
 
 test "rule line numbers stay right across many rules" {
     const rule = "[[rules]]\nname = \"r\"\noutput = [\"o\"]\nshell = \"true\"\nmemory = \"1M\"\n";
-    // head is lines 1-4; each rule is 5 lines, so the fourth starts at line 20.
     try expectInvalid(head ++ rule ++ "[[rules]]\nname = \"s\"\noutput = [\"p\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
         "[[rules]]\nname = \"t\"\noutput = [\"q\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++ rule, "line 20: duplicate rule name 'r'");
 }
 
-/// The problems of a workflow written into `s`, which must be invalid.
 fn problemsIn(s: *Scratch, text: []const u8) ![]const u8 {
     var problem: workflow.Problem = .{};
     errdefer testing.allocator.free(problem.message);
@@ -325,8 +320,6 @@ test "[failure] - [workflow]: an input reaching a declared output through a dire
     _ = try s.dir("data");
     try s.link("alias", "data");
 
-    // The consumer names the alias of a file not yet produced, of an existing
-    // one, and of the directory the producer writes into.
     const msg = try problemsIn(&s, head ++ rule1("a", "output = [\"data/x.txt\", \"data/sub/y.txt\"]\n") ++
         rule1("b", "input = [\"alias/x.txt\"]\noutput = [\"b.txt\"]\n") ++
         rule1("c", "input = [\"alias\"]\noutput = [\"c.txt\"]\n"));
@@ -353,8 +346,6 @@ test "[failure] - [workflow]: a writable path through a symlinked directory is r
         rule1("d", "output = [\"d.txt\"]\nbenchmark = \"alias/d.tsv\"\nworkdir = \"w/out/sub\"\n"));
     defer testing.allocator.free(msg);
 
-    // Two spellings of one file, an output and a log reaching the records,
-    // a benchmark through an alias and a workdir leaving the working directory.
     try testing.expect(std.mem.indexOf(u8, msg, "rule b: 'alias/o' passes through a symlinked directory; name it by its real path") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "rule c: 'rec/o.txt' passes through a symlinked directory; name it by its real path") != null);
     try testing.expect(std.mem.indexOf(u8, msg, "rule c: 'rec/state.json' passes through a symlinked directory; name it by its real path") != null);
@@ -596,7 +587,7 @@ test "[unit] - [schema]: every key the parser accepts has a type in the schema" 
     var parsed = try std.json.parseFromSlice(std.json.Value, testing.allocator, text.written(), .{});
     defer parsed.deinit();
     try testing.expect(parsed.value.object.get("properties").?.object.get("rules") != null);
-    // The parser reads `description` and `author` only to ignore them.
+    try testing.expectEqual(false, parsed.value.object.get("properties").?.object.get("rules").?.object.get("items").?.object.get("additionalProperties").?.bool);
     const meta = parsed.value.object.get("properties").?.object.get("workflow").?.object.get("properties").?.object;
     for ([_][]const u8{ "description", "author" }) |k| try testing.expect(meta.get(k).?.object.get("type") == null);
     try testing.expectEqualStrings("string", meta.get("name").?.object.get("type").?.string);
@@ -856,7 +847,6 @@ test "[failure] - [workflow]: values that cannot mean what they say are refused"
             return error.TestUnexpectedResult;
         }
     }
-    // 200 two-byte characters are 200 characters.
     var problem: workflow.Problem = .{};
     defer testing.allocator.free(problem.message);
     var wf = try loadText(&s, head ++ rule1("a", "output = [\"a\"]\nstep = \"" ++ "é" ** 200 ++ "\"\n"), &problem);
@@ -1071,4 +1061,138 @@ test "[unit] - [workflow]: a launch's copy of its workflow loads whatever has be
 
 test "[failure] - [workflow]: a resource group is named as rules and shared inputs are" {
     try expectInvalid(head ++ "[resource_groups.\"disk <io>\"]\nmax = 1\n\n[[rules]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", "invalid resource group name 'disk <io>'");
+}
+
+test "[unit] - [graph]: a target selects its dependency closure and no unrelated rule" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ "[[rules]]\nname = \"root\"\noutput = [\"root.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"child\"\ninput = [\"root.txt\"]\noutput = [\"child.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"other\"\noutput = [\"other.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var unknown: ?[]const u8 = null;
+
+    const mask = try workz.graph.select(testing.allocator, &wf, &g, &.{"child"}, &unknown);
+    defer testing.allocator.free(mask);
+
+    try testing.expectEqualSlices(bool, &.{ true, true, false }, mask);
+}
+
+test "[failure] - [workflow]: links need a workdir and an input target, and mounts need a container with an absolute target" {
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x.txt\"]\nshell = \"true\"\nmemory = \"1M\"\nlinks = { \"i\" = \"data/in.txt\" }\n", "does not set");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"work/x/x.txt\"]\nshell = \"true\"\nmemory = \"1M\"\nworkdir = \"work/x\"\nlinks = { \"i\" = \"data/in.txt\" }\n", "not an input of the rule");
+    try expectInvalid(head ++ "[[rules]]\nname = \"x\"\noutput = [\"x.txt\"]\nshell = \"true\"\nmemory = \"1M\"\nworkdir = \"../elsewhere\"\n", "must be a directory below the working directory");
+    try expectInvalid(head ++ "[[rules]]\nname = \"h\"\noutput = [\"h.txt\"]\nshell = \"true\"\nmemory = \"1M\"\nmounts = { \"os-release\" = \"/etc/os-release\" }\n", "has mounts but no container");
+    try expectInvalid(head ++ "[[rules]]\nname = \"m\"\noutput = [\"m.txt\"]\ncontainer = \"img\"\nshell = \"true\"\nmemory = \"1M\"\nmounts = { \"os-release\" = \"etc/os-release\" }\n", "must be an absolute path in the image");
+}
+
+test "[failure] - [workflow]: a rule that lists a shared input twice is refused" {
+    try expectInvalid(head ++ "[shared.ref]\npath = \"ref\"\n[[rules]]\nname = \"r\"\noutput = [\"r.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n[rules.resources]\nshared = [\"ref\", \"ref\"]\n", "rule r lists shared input 'ref' twice");
+}
+
+fn hardLink(s: *Scratch, from: []const u8, to: []const u8) !void {
+    const linux = std.os.linux;
+    const src = try std.fs.path.join(testing.allocator, &.{ s.path, from });
+    defer testing.allocator.free(src);
+    const dst = try std.fs.path.join(testing.allocator, &.{ s.path, to });
+    try s.files.append(testing.allocator, dst);
+    const sz = try testing.allocator.dupeZ(u8, src);
+    defer testing.allocator.free(sz);
+    const dz = try testing.allocator.dupeZ(u8, dst);
+    defer testing.allocator.free(dz);
+    _ = try sys.check(linux.linkat(linux.AT.FDCWD, sz, linux.AT.FDCWD, dz, 0));
+}
+
+test "[failure] - [workflow]: an input, log or benchmark that aliases another file of the rule is refused, and a second name for an input is accepted" {
+    const Case = struct {
+        name: []const u8,
+        inputs: []const u8 = "[\"input\"]",
+        log: []const u8 = "task.log",
+        benchmark: []const u8 = "metrics.json",
+        pre: []const []const u8 = &.{},
+        hard: []const [2][]const u8 = &.{},
+        soft: []const [2][]const u8 = &.{},
+        ok: bool = false,
+    };
+    const cases = [_]Case{
+        .{ .name = "ordinary", .ok = true },
+        .{ .name = "shared_inputs", .inputs = "[\"input\", \"second\"]", .hard = &.{.{ "input", "second" }}, .ok = true },
+        .{ .name = "log_is_input", .log = "input" },
+        .{ .name = "relative_alias", .inputs = "[\"sub/../input\"]", .log = "input" },
+        .{ .name = "log_hardlink", .hard = &.{.{ "input", "task.log" }} },
+        .{ .name = "log_output_hardlink", .pre = &.{"out"}, .hard = &.{.{ "out", "task.log" }} },
+        .{ .name = "input_output_hardlink", .hard = &.{.{ "input", "out" }} },
+        .{ .name = "log_symlink", .soft = &.{.{ "task.log", "input" }} },
+        .{ .name = "duplicate_side_write", .benchmark = "task.log" },
+    };
+    for (cases) |c| {
+        var s = try Scratch.init();
+        defer s.deinit();
+        _ = try s.file("input", "source");
+        _ = try s.dir("sub");
+        for (c.pre) |name| _ = try s.file(name, "prior");
+        for (c.hard) |pair| try hardLink(&s, pair[0], pair[1]);
+        for (c.soft) |pair| try s.link(pair[0], pair[1]);
+        const text = try std.fmt.allocPrint(testing.allocator, head ++ "[[rules]]\nname = \"copy\"\ninput = {s}\noutput = [\"out\"]\nshell = \"cat input > out\"\nlog = \"{s}\"\nbenchmark = \"{s}\"\n[rules.resources]\nthreads = 1\nmemory = \"64M\"\n", .{ c.inputs, c.log, c.benchmark });
+        defer testing.allocator.free(text);
+        var problem: workflow.Problem = .{};
+        const accepted = blk: {
+            var wf = loadText(&s, text, &problem) catch |err| {
+                try testing.expectEqual(error.Invalid, err);
+                testing.allocator.free(problem.message);
+                break :blk false;
+            };
+            wf.deinit();
+            break :blk true;
+        };
+        if (accepted != c.ok) {
+            std.debug.print("alias case {s} was {s}\n", .{ c.name, if (accepted) "accepted" else "refused" });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "[unit] - [lint]: validate notes a resource group that no selected rule uses, and a rule left out of the sample views" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ "[resource_groups.disk]\nmax = 1\n\n[[rules]]\nname = \"align_s1\"\ninput = [\"reads/s1.fq\"]\noutput = [\"a1\"]\nshell = \"true\"\nmemory = \"1M\"\nsample = \"s1\"\n\n" ++
+        "[[rules]]\nname = \"align_all\"\noutput = [\"a2\"]\nshell = \"true\"\nmemory = \"1M\"\nstep = \"align\"\n", &problem);
+    defer wf.deinit();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    var out: std.Io.Writer.Allocating = .init(a);
+
+    try workz.lint.notes(a, &out.writer, &wf, mask);
+
+    try testing.expectEqualStrings("note: resource group disk is used by no selected rule\nnote: rule align_all has no sample, though other rules of step align do; it is left out of the per-sample views\n", out.written());
+}
+
+test "[failure] - [lint]: --inputs names each input that is missing and each dangling symlink" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try s.link("dangling", "gone");
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ "[[rules]]\nname = \"align_s1\"\ninput = [\"reads/s1.fq\"]\noutput = [\"a1\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"d\"\ninput = [\"dangling\"]\noutput = [\"d.txt\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    const mask = try a.alloc(bool, wf.rules.len);
+    @memset(mask, true);
+    var out: std.Io.Writer.Allocating = .init(a);
+
+    const missing = try workz.lint.missingInputs(testing.allocator, &out.writer, &wf, &g, mask);
+
+    try testing.expectEqual(@as(usize, 2), missing);
+    try testing.expectEqualStrings("missing input of rule align_s1: reads/s1.fq\nmissing input of rule d: dangling (a symlink to gone, which does not exist)\n2 missing inputs: create them, or fix the paths\n", out.written());
 }

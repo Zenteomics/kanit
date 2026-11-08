@@ -22,7 +22,6 @@ pub const Error = error{
     Unexpected,
 };
 
-/// The errno of the last failed call made through `check`, for messages.
 pub threadlocal var last_errno: linux.E = .SUCCESS;
 
 pub fn check(rc: usize) Error!usize {
@@ -50,7 +49,6 @@ pub fn errnoName() []const u8 {
     return @tagName(last_errno);
 }
 
-/// An error of these calls in words, for messages; others by name.
 pub fn errorText(err: anyerror) []const u8 {
     return switch (err) {
         error.FileNotFound => "no such file or directory",
@@ -67,7 +65,6 @@ pub fn errorText(err: anyerror) []const u8 {
     };
 }
 
-/// Copies `path` into a null-terminated buffer owned by `gpa`.
 pub fn z(gpa: Allocator, path: []const u8) ![:0]u8 {
     return gpa.dupeZ(u8, path);
 }
@@ -80,9 +77,6 @@ pub fn openRead(gpa: Allocator, path: []const u8) !Fd {
     return @intCast(try check(linux.openat(linux.AT.FDCWD, p, .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0)));
 }
 
-/// Creates a FIFO and opens it for reading and writing, which does not wait
-/// for a reader. Its readers see end of file once every such descriptor is
-/// closed, also when the process holding it dies.
 pub fn openFifo(gpa: Allocator, path: []const u8) !Fd {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -132,10 +126,14 @@ pub fn fsync(fd: Fd) !void {
     _ = try check(linux.fsync(fd));
 }
 
-/// Reads a whole file, refusing files larger than `limit` bytes. Reads go
-/// straight into a buffer sized from the file, so reading many small
-/// records costs no more than their bytes; a file without a size, such as
-/// one under /proc, grows the buffer as it is read.
+pub fn fdatasync(fd: Fd) !void {
+    _ = try check(linux.fdatasync(fd));
+}
+
+pub fn truncateFd(fd: Fd, len: u64) !void {
+    _ = try check(linux.ftruncate(fd, @intCast(len)));
+}
+
 pub fn readFile(gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     const fd = try openRead(gpa, path);
     defer close(fd);
@@ -153,7 +151,6 @@ pub fn readFile(gpa: Allocator, path: []const u8, limit: usize) ![]u8 {
     return list.toOwnedSlice(gpa);
 }
 
-/// Returns at most the first `max` bytes of a file, or an empty slice if it is missing.
 pub fn readHead(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = openRead(gpa, path) catch |err| switch (err) {
         error.FileNotFound => return gpa.alloc(u8, 0),
@@ -171,8 +168,6 @@ pub fn readHead(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     return gpa.realloc(out, done);
 }
 
-/// At most `max` bytes of `text`, cut before a UTF-8 continuation byte so
-/// that no character is split.
 pub fn utf8Prefix(text: []const u8, max: usize) []const u8 {
     if (text.len <= max) return text;
     var end = max;
@@ -180,9 +175,6 @@ pub fn utf8Prefix(text: []const u8, max: usize) []const u8 {
     return text[0..end];
 }
 
-/// `bytes` as valid UTF-8, for a program's output that goes into records
-/// and terminals: each byte that does not start a valid sequence becomes
-/// U+FFFD. Valid text is returned as it is, else a copy in `a`.
 pub fn utf8Text(a: Allocator, bytes: []const u8) ![]const u8 {
     if (std.unicode.utf8ValidateSlice(bytes)) return bytes;
     var out: std.ArrayList(u8) = .empty;
@@ -200,7 +192,6 @@ pub fn utf8Text(a: Allocator, bytes: []const u8) ![]const u8 {
     return out.items;
 }
 
-/// Returns at most the last `max` bytes of a file, or an empty slice if it is missing.
 pub fn readTail(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     const fd = openRead(gpa, path) catch |err| switch (err) {
         error.FileNotFound => return gpa.alloc(u8, 0),
@@ -221,8 +212,6 @@ pub fn readTail(gpa: Allocator, path: []const u8, max: usize) ![]u8 {
     return out[0..done];
 }
 
-/// Writes `bytes` to `path` through a temporary file, fsync and rename, then
-/// fsyncs the directory, so readers see either the old or the new file.
 pub fn writeFileAtomic(gpa: Allocator, path: []const u8, bytes: []const u8) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
@@ -236,8 +225,6 @@ pub fn writeFileAtomic(gpa: Allocator, path: []const u8, bytes: []const u8) !voi
     try fsyncDir(gpa, std.fs.path.dirname(path) orelse ".");
 }
 
-/// Atomic replacement without fsync: readers never see a partial file, but a
-/// power loss may lose the newest version. For records, not for resume state.
 pub fn writeFileReplace(gpa: Allocator, path: []const u8, bytes: []const u8) !void {
     const tmp = try std.fmt.allocPrint(gpa, "{s}.tmp", .{path});
     defer gpa.free(tmp);
@@ -267,7 +254,6 @@ pub fn rename(gpa: Allocator, from: []const u8, to: []const u8) !void {
     _ = try check(linux.renameat(linux.AT.FDCWD, a, linux.AT.FDCWD, b));
 }
 
-/// Removes file `path`; a missing one is no error.
 pub fn unlink(gpa: Allocator, path: []const u8) !void {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -286,8 +272,6 @@ pub fn mkdir(gpa: Allocator, path: []const u8) !void {
     };
 }
 
-/// Creates `path` and every missing parent. The common case, an existing
-/// parent, costs one call.
 pub fn mkdirAll(gpa: Allocator, path: []const u8) !void {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -308,13 +292,6 @@ pub fn rmdir(gpa: Allocator, path: []const u8) !void {
     _ = try check(linux.unlinkat(linux.AT.FDCWD, p, linux.AT.REMOVEDIR));
 }
 
-/// File identity used for resume decisions: inode, size, and the
-/// modification and change times in nanoseconds. A change time cannot be set
-/// back by user programs, so a rewrite that restores mtime is still detected.
-/// The device number tells files apart within one launch, such as two paths
-/// that are hard links to one file, but is left out of the recorded text
-/// (`format`): btrfs numbers its subvolumes anew at each mount, so a
-/// recorded device number would change with every reboot.
 pub const Identity = struct {
     dev: u64,
     ino: u64,
@@ -353,7 +330,6 @@ fn fromStatx(s: linux.Statx) Identity {
     };
 }
 
-/// Identity of `path`, following symlinks; null when it does not exist.
 pub fn stat(gpa: Allocator, path: []const u8) !?Identity {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -365,7 +341,6 @@ pub fn stat(gpa: Allocator, path: []const u8) !?Identity {
     return fromStatx(s);
 }
 
-/// Identity of `path` itself, not following a final symlink.
 pub fn lstat(gpa: Allocator, path: []const u8) !?Identity {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -399,7 +374,6 @@ pub fn monoNs() i128 {
     return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
-/// Writes an RFC 3339 UTC timestamp with milliseconds for `ns` since the epoch.
 pub fn formatTime(w: *std.Io.Writer, ns: i128) !void {
     const secs: u64 = @intCast(@divFloor(ns, std.time.ns_per_s));
     const ms: u64 = @intCast(@divFloor(@mod(ns, std.time.ns_per_s), std.time.ns_per_ms));
@@ -422,7 +396,6 @@ pub fn randomBytes(buf: []u8) void {
 
 pub const Digest = [64]u8;
 
-/// SHA-256 of a file's bytes as lowercase hex.
 pub fn sha256File(gpa: Allocator, path: []const u8) !Digest {
     const fd = try openRead(gpa, path);
     defer close(fd);
@@ -443,21 +416,14 @@ pub fn sha256Bytes(bytes: []const u8) Digest {
     return std.fmt.bytesToHex(out, .lower);
 }
 
-/// The running executable, for reading its bytes: the file that runs, even
-/// after the path it was started from was replaced or deleted.
 pub const self_exe: [:0]const u8 = "/proc/self/exe";
 
-/// The executable for a child of kanit to exec: its path, so the child is
-/// named kanit, or `/proc/self/exe` once that path was replaced or deleted
-/// (a rebuild during a run); a child resolves the link to the running file
-/// until its execve.
 pub fn childExe(a: Allocator) ![:0]const u8 {
     const path = try selfExe(a);
     if (std.mem.endsWith(u8, path, " (deleted)")) return self_exe;
     return a.dupeZ(u8, path);
 }
 
-/// Absolute path of the running executable, for another program to exec.
 pub fn selfExe(gpa: Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
     const n = try check(linux.readlinkat(linux.AT.FDCWD, "/proc/self/exe", &buf, buf.len));
@@ -467,19 +433,14 @@ pub fn selfExe(gpa: Allocator) ![]u8 {
 pub fn cwd(gpa: Allocator) ![]u8 {
     var buf: [4096]u8 = undefined;
     const n = try check(linux.getcwd(&buf, buf.len));
-    // getcwd returns the length including the terminating zero.
     return gpa.dupe(u8, buf[0 .. n - 1]);
 }
 
-/// Resolves `path` against `base` and removes `.` and `..` components
-/// lexically; symlinks are not followed.
 pub fn absolute(gpa: Allocator, base: []const u8, path: []const u8) ![]u8 {
     if (std.fs.path.isAbsolute(path)) return std.fs.path.resolve(gpa, &.{path});
     return std.fs.path.resolve(gpa, &.{ base, path });
 }
 
-/// Resolves symlinks in `path` through /proc, for alias checks.
-/// The target a symlink names, as written; owned by the caller.
 pub fn readlink(gpa: Allocator, path: []const u8) ![]u8 {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -503,9 +464,6 @@ pub fn realpath(gpa: Allocator, path: []const u8) !?[]u8 {
     return try gpa.dupe(u8, buf[0..n]);
 }
 
-/// The names in the directory `path`, sorted, without those that begin with
-/// a dot; null when it does not exist or is not a directory. The names are
-/// allocated in `a`.
 pub fn dirNames(gpa: Allocator, a: Allocator, path: []const u8) !?[]const []const u8 {
     const p = try z(gpa, path);
     defer gpa.free(p);
@@ -528,17 +486,12 @@ pub fn dirNames(gpa: Allocator, a: Allocator, path: []const u8) !?[]const []cons
     return names.items;
 }
 
-/// The entries of an open directory, without "." and "..", read with
-/// getdents64. An entry's name lives in the reader's buffer until the next
-/// call of `next`.
 pub const DirEntries = struct {
     fd: Fd,
     buf: [16384]u8 align(8) = undefined,
     n: usize = 0,
     off: usize = 0,
 
-    /// `kind` is the d_type byte: 4 for a directory, 8 for a regular file,
-    /// 10 for a symlink, 0 when the file system does not say.
     pub const Entry = struct { name: []const u8, kind: u8 };
 
     pub fn next(self: *DirEntries) Error!?Entry {

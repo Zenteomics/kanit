@@ -10,7 +10,6 @@ const Type = enum { any, string, integer, boolean, strings, string_table, intege
 
 const Key = struct { name: []const u8, type: Type, help: []const u8 };
 
-/// Type and help of every key a table may hold, by table.
 const workflow_types = [_]Key{
     .{ .name = "name", .type = .string, .help = "name of the workflow, required" },
     .{ .name = "version", .type = .string, .help = "your version label" },
@@ -66,14 +65,11 @@ const resource_types = [_]Key{
     .{ .name = "shared", .type = .strings, .help = "shared inputs it uses" },
 };
 
-/// The type of `name` in `types`; a key the parser accepts without one
-/// is a mistake in this file, which the unit tests catch.
 pub fn find(types: []const Key, name: []const u8) ?Key {
     for (types) |k| if (std.mem.eql(u8, k.name, name)) return k;
     return null;
 }
 
-/// Pairs each parser key list with its types, for the tests.
 pub const tables = [_]struct { keys: []const []const u8, types: []const Key }{
     .{ .keys = &workflow.workflow_keys, .types = &workflow_types },
     .{ .keys = &workflow.default_keys, .types = &default_types },
@@ -100,7 +96,6 @@ fn value(w: *std.Io.Writer, k: Key) std.Io.Writer.Error!void {
     try w.print(",\"description\":{f}}}", .{std.json.fmt(k.help, .{})});
 }
 
-/// `"type":"object"` with one property per key, and no other key.
 fn object(w: *std.Io.Writer, keys: []const []const u8, types: []const Key) std.Io.Writer.Error!void {
     try w.writeAll("\"type\":\"object\",\"additionalProperties\":false,\"properties\":{");
     for (keys, 0..) |name, n| {

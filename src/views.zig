@@ -17,8 +17,6 @@ const eql = std.mem.eql;
 pub const Layer = enum { rules, files, resources, all };
 pub const Format = enum { dot, json, text };
 
-/// A rule with its upstream rules to `up` levels, and its downstream rules
-/// to `down` levels; null is none, `all` every level.
 pub const Focus = struct {
     rule: []const u8,
     up: ?u32 = null,
@@ -26,11 +24,6 @@ pub const Focus = struct {
 
     pub const all = std.math.maxInt(u32);
 
-    /// `+X` (all upstream), `X+` (all downstream), `+X+`, and a depth
-    /// before or after the sign: `2+X`, `X+1`. Since a rule name may be all
-    /// digits, some texts read two ways, such as `12+` and `1+2`: the first
-    /// reading whose rule `wf` has wins, else the first reading. Null when
-    /// the text names no rule with a direction.
     pub fn parse(text: []const u8, wf: ?*const workflow.Workflow) ?Focus {
         var first: ?Focus = null;
         for ([_][2]bool{ .{ true, true }, .{ true, false }, .{ false, true } }) |use| {
@@ -41,8 +34,6 @@ pub const Focus = struct {
         return first;
     }
 
-    /// `text` read with a depth before its first `+` (`prefix`) and after
-    /// its last (`suffix`); null when it does not read that way.
     fn reading(text: []const u8, prefix: bool, suffix: bool) ?Focus {
         var f: Focus = .{ .rule = text };
         var rest = text;
@@ -73,9 +64,7 @@ pub const Options = struct {
     layer: Layer = .rules,
     by_step: bool = false,
     focus: ?Focus = null,
-    /// `--why FROM:TO`: one path of rules from FROM to TO.
     why: ?[2][]const u8 = null,
-    /// `--users NAME`: one shared input with its producers and users.
     users: ?[]const u8 = null,
 };
 
@@ -89,14 +78,11 @@ pub const Node = struct {
     step: ?[]const u8 = null,
     sample: ?[]const u8 = null,
     tool: ?[]const u8 = null,
-    /// Rules a step node stands for.
     rules: ?usize = null,
     threads: ?u32 = null,
     memory_mib: ?u64 = null,
-    /// A shared input: `service` or `mapped`, and its path.
     shared: ?[]const u8 = null,
     path: ?[]const u8 = null,
-    /// A resource group's capacity.
     max: ?u32 = null,
 };
 
@@ -104,9 +90,7 @@ pub const Edge = struct {
     source: []const u8,
     target: []const u8,
     kind: EdgeKind,
-    /// Units of a resource group a rule takes.
     units: ?u32 = null,
-    /// A file that links two rules, for `input` edges.
     file: ?[]const u8 = null,
 };
 
@@ -117,7 +101,6 @@ pub const View = struct {
 
 pub const Error = error{ UnknownRule, UnknownShared, NoPath, NotSelected, OutOfMemory };
 
-/// The rules a view shows: the selected ones, narrowed by the options.
 fn chosen(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, opts: Options) ![]bool {
     const sel = try a.dupe(bool, mask);
     if (opts.focus) |f| {
@@ -160,8 +143,6 @@ fn usesShared(r: workflow.Rule, name: []const u8) bool {
     return false;
 }
 
-/// Whether rule `i` writes the path of service `si`, or inside it, which the
-/// service loads.
 fn loads(wf: *const workflow.Workflow, g: *const graph.Graph, i: usize, si: usize) bool {
     const s = wf.shared[si];
     if (!s.isService()) return false;
@@ -171,9 +152,6 @@ fn loads(wf: *const workflow.Workflow, g: *const graph.Graph, i: usize, si: usiz
     return false;
 }
 
-/// The rules of one path from rule `from` to rule `to`, in order: the
-/// shortest, found breadth first through the selected rules (`mask`)
-/// reading each one's outputs.
 pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, from: []const u8, to: []const u8) ![]const usize {
     const s = wf.ruleIndex(from) orelse return error.UnknownRule;
     const t = wf.ruleIndex(to) orelse return error.UnknownRule;
@@ -207,8 +185,6 @@ pub fn whyPath(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph
     return path.items;
 }
 
-/// The first input of rule `c` that rule `p` writes: the file itself, or
-/// a directory `p` writes inside.
 fn linkFile(wf: *const workflow.Workflow, g: *const graph.Graph, p: usize, c: usize) ?[]const u8 {
     const r = wf.rules[c];
     for (r.input_abs, r.input) |in, written| {
@@ -218,7 +194,6 @@ fn linkFile(wf: *const workflow.Workflow, g: *const graph.Graph, p: usize, c: us
     return null;
 }
 
-/// Builds the view of the rules that `mask` selects.
 pub fn build(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool, opts: Options) !View {
     const sel = try chosen(a, wf, g, mask, opts);
     var nodes: std.ArrayList(Node) = .empty;
@@ -229,7 +204,6 @@ pub fn build(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, 
     const files = layer == .files or layer == .all;
     const resources = layer == .resources or layer == .all;
 
-    // The node each rule is drawn as: itself, or its step.
     const unit = try a.alloc([]const u8, wf.rules.len);
     for (g.order) |i| {
         if (!sel[i]) continue;
@@ -288,7 +262,6 @@ pub fn build(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, 
             for (r.input_abs) |in| {
                 const f = try Add.file(a, &nodes, &ids, workflow.keyPath(wf.root, in));
                 try Add.edge(a, &edges, &edge_ids, .{ .source = f, .target = unit[i], .kind = .consumes });
-                // The written files inside a directory input lead to it.
                 for (graph.below(g.outputs, in)) |o| if (sel[o.rule]) {
                     const inner = try Add.file(a, &nodes, &ids, workflow.keyPath(wf.root, o.path));
                     try Add.edge(a, &edges, &edge_ids, .{ .source = inner, .target = f, .kind = .within });
@@ -313,7 +286,6 @@ pub fn build(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, 
                     .path = if (s.path_abs) |p| workflow.keyPath(wf.root, p) else null,
                     .memory_mib = s.memory_mib,
                 });
-                // The rules writing what a service loads.
                 for (g.order) |p| if (sel[p] and loads(wf, g, p, si))
                     try Add.edge(a, &edges, &edge_ids, .{ .source = unit[p], .target = id, .kind = .loads });
             }
@@ -331,7 +303,7 @@ pub fn build(a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, 
     return .{ .nodes = nodes.items, .edges = edges.items };
 }
 
-// ---- output ----
+// --- Output ---
 
 pub fn writeJson(w: *std.Io.Writer, v: View) !void {
     const NodeData = struct { data: Node };
@@ -364,9 +336,6 @@ fn quoted(w: *std.Io.Writer, s: []const u8) !void {
     try w.writeByte('"');
 }
 
-/// Graphviz DOT: rules and steps as boxes, files as notes, shared inputs
-/// as cylinders with their memory, groups as hexagons; edges styled by
-/// kind.
 pub fn writeDot(a: Allocator, w: *std.Io.Writer, name: []const u8, v: View) !void {
     try w.writeAll("digraph ");
     try quoted(w, name);
@@ -422,8 +391,6 @@ pub fn writeDot(a: Allocator, w: *std.Io.Writer, name: []const u8, v: View) !voi
     try w.writeAll("}\n");
 }
 
-/// Text: each rule or step with what feeds it and what it feeds, then
-/// each shared input with what loads it and what uses it, then groups.
 pub fn writeText(a: Allocator, w: *std.Io.Writer, v: View) !void {
     const Lists = struct {
         fn of(al: Allocator, edges: []const Edge, id: []const u8, kind: ?EdgeKind, incoming: bool) ![]const Edge {
@@ -485,8 +452,6 @@ fn label(v: View, id: []const u8) []const u8 {
     return id;
 }
 
-/// One line of names, the far end of each edge, with the file linking an
-/// input edge.
 fn names(w: *std.Io.Writer, title: []const u8, v: View, edges: []const Edge, incoming: bool) !void {
     if (edges.len == 0) return;
     try w.print("  {s} ", .{title});
@@ -499,8 +464,6 @@ fn names(w: *std.Io.Writer, title: []const u8, v: View, edges: []const Edge, inc
     try w.writeAll("\n");
 }
 
-/// The path `--why` found, one rule per line, each with the file it reads
-/// from the one before.
 pub fn writeWhy(w: *std.Io.Writer, wf: *const workflow.Workflow, g: *const graph.Graph, path: []const usize) !void {
     for (path, 0..) |i, k| {
         if (k == 0) {

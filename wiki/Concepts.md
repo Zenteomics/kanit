@@ -107,7 +107,7 @@ A file's **identity** is its inode, size, and modification and change times, so 
 
 ## Records
 
-Everything kanit knows about earlier launches is in `.workz/`: `state.json` holds the key and outputs of every completed rule, and each launch directory holds its event stream, summary and attempts. The commands that show a launch only read these files, so they work from any terminal while the launch runs and after it ends. [Records](Records.md) describes every file.
+Everything kanit knows about earlier launches is in `.workz/`: `state.json`, with the rules completed since it was written in `state.log`, holds the key and outputs of every completed rule, and each launch directory holds its event stream, summary and attempts. The commands that show a launch only read these files, so they work from any terminal while the launch runs and after it ends. [Records](Records.md) describes every file.
 
 ## Other terms
 

@@ -24,22 +24,17 @@ fn seconds(ns: i128) f64 {
     return @as(f64, @floatFromInt(@max(ns, 0))) / 1e9;
 }
 
-/// A cgroup counter in bytes, right-aligned in `width` columns, or `-`.
 fn memory(w: *std.Io.Writer, width: usize, n: ?u64) !void {
     const v = n orelse return w.print("{s:>[1]}", .{ "-", width });
     try units.right(w, width, units.size, .{@as(f64, @floatFromInt(v)) / 1048576.0});
 }
 
-/// A path as shown to a person: relative to the current directory when it
-/// lies below it, else as given.
 pub fn shownPath(a: Allocator, path: []const u8) []const u8 {
     const here = sys.cwd(a) catch return path;
     const below = here.len > 1 and path.len > here.len + 1 and std.mem.startsWith(u8, path, here) and path[here.len] == '/';
     return if (below) path[here.len + 1 ..] else path;
 }
 
-/// The WORKFLOW argument that names a launch's workflow from here: null for
-/// `workflow.toml` in the current directory, the default.
 fn workflowArg(gpa: Allocator, a: Allocator, launch_dir: []const u8) !?[]const u8 {
     const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return null;
     defer gpa.free(text);
@@ -49,16 +44,11 @@ fn workflowArg(gpa: Allocator, a: Allocator, launch_dir: []const u8) !?[]const u
     return if (std.mem.eql(u8, shown, "workflow.toml")) null else shown;
 }
 
-/// The last non-empty line of a file, with control characters blanked and
-/// cut to `max` bytes; allocated in `a`.
 pub fn lastLine(gpa: Allocator, a: Allocator, path: []const u8, max: usize) []const u8 {
     const lines = lastLines(gpa, a, path, 1, max);
     return if (lines.len == 0) "" else lines[0];
 }
 
-/// The last `n` non-empty lines of a file, oldest first, with control
-/// characters blanked, each cut to `max` bytes without splitting a character
-/// and made valid UTF-8; allocated in `a`.
 pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: usize) []const []const u8 {
     const tail = sys.readTail(gpa, path, 4096) catch return &.{};
     defer gpa.free(tail);
@@ -75,8 +65,6 @@ pub fn lastLines(gpa: Allocator, a: Allocator, path: []const u8, n: usize, max: 
     return found.items;
 }
 
-/// The latest output line of an attempt: its standard error, else its
-/// standard output.
 pub fn lastOutput(gpa: Allocator, a: Allocator, dir: []const u8, max: usize) []const u8 {
     if (dir.len == 0) return "";
     const line = lastLine(gpa, a, std.fs.path.join(a, &.{ dir, "stderr.log" }) catch return "", max);
@@ -84,9 +72,6 @@ pub fn lastOutput(gpa: Allocator, a: Allocator, dir: []const u8, max: usize) []c
     return lastLine(gpa, a, std.fs.path.join(a, &.{ dir, "stdout.log" }) catch return "", max);
 }
 
-/// The plain text view: header, running tasks with live counters, failures.
-/// `alive` is false for a launch whose engine ended without recording its
-/// end: nothing of it runs any longer.
 pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128, alive: bool) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -98,7 +83,6 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     } else if (!alive) {
         try w.writeAll("unfinished: its engine ended without recording its end");
     } else {
-        // Without a readable event the start is unknown, not the epoch.
         if (t.started_ns == 0) try w.writeAll("running, started at an unknown time") else {
             try w.writeAll("running for ");
             try units.duration(w, seconds(now_ns - t.started_ns));
@@ -113,7 +97,6 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     try w.print(" {d} done\n", .{t.count(.completed) + t.count(.reused)});
     for (t.shared.items) |s| try w.print("shared {s}: {s}\n", .{ s.name, s.state });
 
-    // An ended launch has nothing running; its summary is `kanit status`.
     if (!t.finished and alive) {
         try w.writeAll("\nRUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT\n");
         var shown: usize = 0;
@@ -151,14 +134,11 @@ pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128
     }
 }
 
-/// Up to `most` of `names`, joined by commas, and how many more there are.
 fn writeNames(w: *std.Io.Writer, names: []const []const u8, most: usize) !void {
     for (names[0..@min(names.len, most)], 0..) |n, i| try w.print("{s}{s}", .{ if (i == 0) "" else ", ", n });
     if (names.len > most) try w.print(" and {d} more", .{names.len - most});
 }
 
-/// The launch to show: the one named `launch` by ID, else the newest. Null,
-/// with the reason printed, when there is none.
 pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]const u8) !?[]const u8 {
     const rec = try records.recordsDir(a, root);
     if (launch) |id| {
@@ -173,9 +153,6 @@ pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]con
     };
 }
 
-/// Shows the launch in `dir`: interactively when both standard input and
-/// output are terminals and `once` is not set; otherwise as text, refreshed
-/// every `interval_ms` until the launch finishes, or once.
 pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
@@ -185,8 +162,6 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
     var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
         _ = try tr.update();
-        // A launch whose engine died never records its end; one that ended
-        // between the two reads has recorded it.
         var alive = tr.finished or records.launchActive(gpa, dir);
         if (!alive) alive = (try tr.update()) and tr.finished;
         if (tty and !once) try out.interface.writeAll("\x1b[H\x1b[2J");
@@ -202,8 +177,6 @@ pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_m
     }
 }
 
-/// One line per launch, newest first, for the last `n`: start, status,
-/// elapsed time, counts and the error of a failed launch.
 pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !void {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
@@ -218,8 +191,6 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
         i -= 1;
         const path = try std.fs.path.join(a, &.{ rec, "launches", names[i], "summary.json" });
         const text = sys.readFile(gpa, path, records.launch_record_max) catch {
-            // No summary: the newest launch while a run holds the lock runs;
-            // any other ended without recording its end, as a killed engine.
             try w.print("{s:<31} {s}\n", .{ names[i], if (live and i == names.len - 1) "running" else "unfinished" });
             continue;
         };
@@ -228,7 +199,6 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
             error.OutOfMemory => return err,
             else => std.json.Value{ .null = {} },
         };
-        // A damaged summary keeps its row, so the list still shows every launch.
         if (v != .object) {
             try w.print("{s:<31} {s}\n", .{ names[i], "unreadable" });
             continue;
@@ -251,9 +221,6 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     }
 }
 
-/// Writes a readable summary of an ended launch from its records: how it
-/// ended and how long it took, the counts, its slowest rules or its
-/// failures, where its records are, and what to run next.
 pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, color: bool) !void {
     const s: term.Style = .{ .on = color };
     const text = try sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), records.launch_record_max);
@@ -275,7 +242,6 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     const cancelled = count(counts, "cancelled");
     const not_started = count(counts, "not_started");
     const selected = if (int(v, "selected")) |n| @as(u64, @intCast(n)) else 0;
-    // The label column holds the outcome badge and one space after it.
     const col = @max(outcome.len + 3, 10);
     const label = struct {
         fn put(wr: *std.Io.Writer, st: term.Style, width: usize, name: []const u8) !void {
@@ -313,14 +279,12 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         }
     }
 
-    // The last attempt of each rule, from the attempt records.
     const rows = model.attempts(gpa, a, launch_dir, null) catch &.{};
     var last: std.ArrayList(model.Attempt) = .empty;
     for (rows, 0..) |r, i| {
         if (i + 1 < rows.len and std.mem.eql(u8, rows[i + 1].rule, r.rule)) continue;
         try last.append(a, r);
     }
-    // Up to five failures, their reasons aligned after the longest name.
     const max_failures = 5;
     var failures: usize = 0;
     var name_w: usize = 0;
@@ -336,14 +300,12 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         try w.print("{s}{s}{s}", .{ s.bold(), r.rule, s.reset() });
         try w.splatByteAll(' ', name_w -| r.rule.len + 2);
         try w.print("{s}{s}{s}\n", .{ s.red(), r.reason, s.reset() });
-        // The attempt's last error line, unless the reason already holds it.
         const said = if (r.dir.len == 0) "" else lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "stderr.log" }), 160);
         if (said.len > 0 and std.mem.indexOf(u8, r.reason, said) == null) {
             try label(w, s, col, "");
             try w.splatByteAll(' ', name_w + 2);
             try w.print("{s}| {s}{s}\n", .{ s.dim(), said, s.reset() });
         }
-        // The last line of each diagnostics file it kept, after its name.
         for (r.diagnostics) |d| {
             const line = lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "diagnostics", d }), 160);
             if (line.len == 0 or std.mem.indexOf(u8, r.reason, line) != null) continue;
@@ -357,7 +319,6 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         try label(w, s, col, "");
         try w.print("and {d} more; kanit report lists every attempt\n", .{failures - shown});
     }
-    // A blocked rule never ran, so it has no attempt: the summary names it.
     var blocked_names: std.ArrayList([]const u8) = .empty;
     if (get(v, "failures")) |fs| if (fs == .array) for (fs.array.items) |f| {
         if (std.mem.eql(u8, str(f, "status") orelse "", "blocked")) if (str(f, "rule")) |name| try blocked_names.append(a, name);
@@ -380,13 +341,10 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
         }
         try w.writeAll("\n");
     }
-    // The launch's own page sits among its records; a launch without one
-    // shows its directory.
     const page = try std.fs.path.join(a, &.{ launch_dir, "report.html" });
     const has_page = sys.exists(gpa, page);
     try label(w, s, col, if (has_page) "page" else "records");
     try w.print("{s}\n", .{shownPath(a, if (has_page) page else launch_dir)});
-    // Earlier outputs this launch replaced stay on disk until removed.
     if (int(v, "previous_bytes")) |b| if (b > 0 and try keepsPrevious(gpa, a, launch_dir)) {
         try label(w, s, col, "previous");
         try units.size(w, @as(f64, @floatFromInt(b)) / 1048576.0);
@@ -400,7 +358,6 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
             try w.print("{s}kanit report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
         }
     } else if (std.mem.eql(u8, outcome, "refused")) {
-        // Outputs changed outside kanit: the command that reruns their rules.
         var rules: std.ArrayList([]const u8) = .empty;
         if (get(v, "changed_outputs")) |cs| if (cs == .array) for (cs.array.items) |c| {
             const rule = str(c, "rule") orelse continue;
@@ -424,17 +381,12 @@ pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir:
     }
 }
 
-/// Prints the summary of the launch in `dir`: with `human`, the readable
-/// summary, else its `summary.json` as written. While the launch runs, it
-/// prints the plain view, or with JSON the launch so far in the summary's
-/// shape, with status `running`.
 pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: bool) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
     const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), records.launch_record_max) catch |err| switch (err) {
         error.FileNotFound => {
-            // The view says itself when the launch did not finish.
             if (human) return try watch(gpa, io, dir, true, 1000, color);
             const active = records.launchActive(gpa, dir);
             if (!active) std.debug.print("kanit: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
@@ -443,7 +395,6 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
         else => return err,
     };
     defer gpa.free(summary);
-    // A script reads this as the summary: it must be one, not a fragment.
     _ = std.json.parseFromSliceLeaky(std.json.Value, a, summary, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
@@ -462,10 +413,6 @@ pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: b
     return true;
 }
 
-/// A launch without a summary, running or unfinished, as JSON with the
-/// summary's keys and `status_text` as its status, so a script reads one
-/// shape: what has not ended is null, and the counts add the rules running,
-/// waiting once ready and pending; `not_started` counts the last two.
 fn runningJson(gpa: Allocator, dir: []const u8, status_text: []const u8) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
@@ -521,8 +468,6 @@ fn runningJson(gpa: Allocator, dir: []const u8, status_text: []const u8) !bool {
     return true;
 }
 
-/// Whether some attempt of the launch still keeps earlier outputs in its
-/// `previous/` directory.
 fn keepsPrevious(gpa: Allocator, a: Allocator, launch_dir: []const u8) !bool {
     const attempts = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
     for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {

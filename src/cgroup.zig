@@ -11,13 +11,11 @@ const linux = std.os.linux;
 const Allocator = std.mem.Allocator;
 
 pub const Tree = struct {
-    /// Absolute cgroupfs path of the run's scope.
     root: []const u8,
 };
 
 pub const SetupError = error{NotDelegated};
 
-/// Claims the delegated cgroup the process runs in.
 pub fn setup(gpa: Allocator, a: Allocator) !Tree {
     const self_cg = try sys.readFile(gpa, "/proc/self/cgroup", 1 << 16);
     defer gpa.free(self_cg);
@@ -29,7 +27,6 @@ pub fn setup(gpa: Allocator, a: Allocator) !Tree {
     const engine = try std.fs.path.join(gpa, &.{ root, "engine" });
     defer gpa.free(engine);
     sys.mkdir(gpa, engine) catch return error.NotDelegated;
-    // Move every process of the scope (the engine and its launcher) into the leaf.
     const procs_path = try std.fs.path.join(gpa, &.{ root, "cgroup.procs" });
     defer gpa.free(procs_path);
     const procs = try sys.readFile(gpa, procs_path, 1 << 20);
@@ -56,13 +53,9 @@ fn writeText(gpa: Allocator, path: []const u8, text: []const u8) !void {
 pub const Limits = struct {
     memory_bytes: ?u64 = null,
     threads: ?u32 = null,
-    /// On OOM the kernel kills every process of the group together, so a
-    /// command never runs on after one of its processes was killed.
     oom_group: bool = false,
 };
 
-/// Creates `<root>/<name>` with the given limits. Swap needs no setting:
-/// the run's scope has `memory.swap.max` 0, which bounds every group below.
 pub fn create(gpa: Allocator, a: Allocator, tree: Tree, name: []const u8, limits: Limits) ![]const u8 {
     const path = try std.fs.path.join(a, &.{ tree.root, name });
     try sys.mkdir(gpa, path);
@@ -85,15 +78,12 @@ fn set(gpa: Allocator, dir: []const u8, file: []const u8, value: []const u8) !vo
     try writeText(gpa, p, value);
 }
 
-/// Opens the group's `cgroup.procs` for a child to join itself before exec.
 pub fn openProcs(gpa: Allocator, path: []const u8) !sys.Fd {
     const p = try std.fs.path.join(gpa, &.{ path, "cgroup.procs" });
     defer gpa.free(p);
     return sys.openWrite(gpa, p, .append);
 }
 
-/// Kernel counters of a task group, read after its command exits and before
-/// the group is removed.
 pub const Counters = struct {
     memory_peak: ?u64 = null,
     memory_current: ?u64 = null,
@@ -101,15 +91,8 @@ pub const Counters = struct {
     oom_kill: u64 = 0,
     memory_max_events: u64 = 0,
     cpu_usage_usec: ?u64 = null,
-    /// Page cache still charged to the group when it is read, after the
-    /// attempt ended.
     file: ?u64 = null,
-    /// The largest anonymous memory (heap, stacks) the run's samples saw
-    /// while the attempt ran; the engine fills it in. Anonymous memory is
-    /// gone once the processes exit, so it cannot be read at the end.
     anon_peak: ?u64 = null,
-    /// Pressure stall totals in microseconds: time at least one task of the
-    /// group ("some") or all of them ("full") waited for the resource.
     cpu_some_us: ?u64 = null,
     memory_some_us: ?u64 = null,
     memory_full_us: ?u64 = null,
@@ -152,7 +135,6 @@ pub fn read(gpa: Allocator, path: []const u8) Counters {
     return c;
 }
 
-/// The group's anonymous memory now, in bytes.
 pub fn anon(gpa: Allocator, path: []const u8) ?u64 {
     const kv = readKeyed(gpa, path, "memory.stat") orelse return null;
     defer gpa.free(kv);
@@ -182,7 +164,6 @@ fn field(text: []const u8, name: []const u8) ?u64 {
     return null;
 }
 
-/// The `total=` field of a pressure line ("some avg10=... total=N").
 pub fn pressureTotal(text: []const u8, kind: []const u8) ?u64 {
     var it = std.mem.splitScalar(u8, text, '\n');
     while (it.next()) |line| {
@@ -193,30 +174,22 @@ pub fn pressureTotal(text: []const u8, kind: []const u8) ?u64 {
     return null;
 }
 
-/// CPU time used by the group so far, in microseconds.
 pub fn cpuUsage(gpa: Allocator, path: []const u8) ?u64 {
     const kv = readKeyed(gpa, path, "cpu.stat") orelse return null;
     defer gpa.free(kv);
     return field(kv, "usage_usec");
 }
 
-/// True while any process remains in the group. A group whose events cannot
-/// be read counts as populated: its processes are then stopped by the kill
-/// that ends a stop's grace period, not left running.
 pub fn populated(gpa: Allocator, path: []const u8) bool {
     const kv = readKeyed(gpa, path, "cgroup.events") orelse return true;
     defer gpa.free(kv);
     return (field(kv, "populated") orelse 0) != 0;
 }
 
-/// Kills every process in the group.
 pub fn kill(gpa: Allocator, path: []const u8) void {
     set(gpa, path, "cgroup.kill", "1") catch {};
 }
 
-/// Removes an empty group and its empty child groups, deepest first (a
-/// container runtime may leave its own groups below a task's);
-/// error.Busy while processes remain.
 pub fn remove(gpa: Allocator, path: []const u8) !void {
     sys.rmdir(gpa, path) catch |err| switch (err) {
         error.Busy => {
@@ -235,7 +208,6 @@ fn removeChildren(gpa: Allocator, path: []const u8, depth: usize) !void {
     defer sys.close(fd);
     var entries: sys.DirEntries = .{ .fd = fd };
     while (try entries.next()) |e| {
-        // Directories are child groups; the rest are interface files.
         if (e.kind != 4) continue;
         const child = try std.fs.path.join(gpa, &.{ path, e.name });
         defer gpa.free(child);

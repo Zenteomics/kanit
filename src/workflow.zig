@@ -12,7 +12,6 @@ pub const GroupUse = struct { name: []const u8, count: u32 };
 pub const Rule = struct {
     line: u32,
     name: []const u8,
-    /// Paths as written, and their absolute lexical forms.
     input: []const []const u8,
     input_abs: []const []const u8,
     output: []const []const u8,
@@ -20,55 +19,34 @@ pub const Rule = struct {
     shell: []const u8,
     threads: u32,
     memory_mib: u64,
-    /// The memory request as written, part of the rule key.
     memory_text: []const u8,
     priority: i64,
     log: ?[]const u8,
     log_abs: ?[]const u8,
     benchmark: ?[]const u8,
     benchmark_abs: ?[]const u8,
-    /// Files the command writes about its own failure, such as a tool's own
-    /// log; their tails are kept with a failed attempt. Not part of the key.
     diagnostics: []const []const u8 = &.{},
     diagnostics_abs: []const []const u8 = &.{},
-    /// A command that prints the version of the rule's tool, run once per
-    /// launch in the rule's image or on the host; not part of the key.
     version: ?[]const u8 = null,
     retries: ?u32,
     timeout_s: ?u64,
-    /// Hash outputs after success so consumers are reused when they repeat.
     cutoff: bool,
-    /// Image the shell command runs in, or null for the host shell.
     container: ?[]const u8,
-    /// Host files or directories mounted read-only over paths in the image.
-    /// Their sources are also inputs of the rule.
     mounts: []const ImageMount = &.{},
-    /// Directory the command runs in, inside the working directory, made
-    /// before each attempt; paths stay relative to the working directory.
     workdir: ?[]const u8 = null,
     workdir_abs: ?[]const u8 = null,
-    /// Symlinks made in the work directory before each attempt, each to one
-    /// of the rule's inputs.
     links: []const Link = &.{},
     groups: []const GroupUse,
     shared: []const []const u8,
-    /// `shared` as indices into `Workflow.shared`, set once the workflow
-    /// is checked.
     shared_index: []const usize = &.{},
-    /// What the rule is, for reports and the live view; not part of its key.
     labels: Labels = .{ .step = "" },
 };
 
-/// What a rule is: the step it is an instance of, the category of that
-/// step, the tool it runs and the sample it works on. Each is declared in
-/// the workflow or derived (see `deriveLabels`); none is part of the rule
-/// key, so changing one reruns nothing.
 pub const Labels = struct {
     step: []const u8,
     category: ?[]const u8 = null,
     tool: ?[]const u8 = null,
     sample: ?[]const u8 = null,
-    /// Which of the four the workflow declared.
     declared: Declared = .{},
 
     pub const Declared = struct { step: bool = false, category: bool = false, tool: bool = false, sample: bool = false };
@@ -76,17 +54,9 @@ pub const Labels = struct {
 
 pub const label_keys = [_][]const u8{ "step", "category", "tool", "sample" };
 
-/// The labels of a rule that declares none: the step is the part of the
-/// name after the last "__" ("s1__STAR_ALIGN" is "STAR_ALIGN"), else before
-/// the last "_" ("align_s1" is "align"), else the whole name; the sample is
-/// the part before the last "__", the convention of preparers that name
-/// rules SAMPLE__STEP; the tool of a container rule is its image's
-/// repository name without registry, path or tag. Declared labels replace
-/// the derived ones one by one.
 pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
     var l: Labels = .{ .step = name };
     if (std.mem.lastIndexOf(u8, name, "__")) |i| {
-        // A name that ends in "__" keeps it as its step.
         if (i + 2 < name.len) {
             l.step = name[i + 2 ..];
             if (i > 0) l.sample = name[0..i];
@@ -103,8 +73,6 @@ pub fn deriveLabels(name: []const u8, container: ?[]const u8) Labels {
     return l;
 }
 
-/// A label value: 1 to 200 characters of valid UTF-8, without control
-/// characters.
 fn validLabel(value: []const u8) bool {
     if (value.len == 0 or !std.unicode.utf8ValidateSlice(value)) return false;
     if ((std.unicode.utf8CountCodepoints(value) catch return false) > 200) return false;
@@ -117,9 +85,6 @@ pub const Link = struct { name: []const u8, target: []const u8, target_abs: []co
 pub const ImageMount = struct { source: []const u8, source_abs: []const u8, target: []const u8 };
 
 pub const Group = struct { name: []const u8, max: u32 };
-/// A shared input: files mapped once (`path`), or a service container that
-/// holds something in memory for its users (`container`, `command`,
-/// `memory`, with `path` mounted read-only).
 pub const Shared = struct {
     name: []const u8,
     path: ?[]const u8,
@@ -127,11 +92,8 @@ pub const Shared = struct {
     container: ?[]const u8 = null,
     command: ?[]const u8 = null,
     memory_mib: ?u64 = null,
-    /// Longest a service may take to become ready.
     timeout_s: ?u64 = null,
-    /// Starts after a failure before ready, before its users fail.
     retries: u32 = 0,
-    /// Host paths mounted read-only over paths in the service's image.
     mounts: []const ImageMount = &.{},
 
     pub fn isService(self: Shared) bool {
@@ -141,7 +103,6 @@ pub const Shared = struct {
 
 pub const Workflow = struct {
     arena: std.heap.ArenaAllocator,
-    /// The file's bytes, kept for snapshots and digests.
     source: []const u8,
     path: []const u8,
     root: []const u8,
@@ -155,9 +116,6 @@ pub const Workflow = struct {
         self.arena.deinit();
     }
 
-    /// Sets the thread request of every rule of step `step` to `threads`, as
-    /// `run --threads` does for one launch; returns how many rules it set.
-    /// The request stays part of each rule's key.
     pub fn overrideThreads(self: *Workflow, step: []const u8, threads: u32) usize {
         var n: usize = 0;
         for (@constCast(self.rules)) |*r| if (std.mem.eql(u8, r.labels.step, step)) {
@@ -183,29 +141,20 @@ pub const Workflow = struct {
     }
 };
 
-/// A rejected workflow: the message names the line when the source shows it.
 pub const Problem = struct {
-    /// Every problem found, one per line, each after its source line when
-    /// known; at most `max_listed` of them.
     message: []u8 = &.{},
-    /// Where the first problem is in the source, when known: 1-based line,
-    /// and column or 0.
     line: u32 = 0,
     col: u32 = 0,
-    /// How many problems were found.
     count: u32 = 0,
-    /// The source line of what is being checked, which `add` names.
     current_line: u32 = 0,
 
     pub const max_listed = 50;
 
-    /// Records a problem and fails.
     pub fn set(self: *Problem, gpa: Allocator, comptime fmt: []const u8, args: anytype) error{ Invalid, OutOfMemory } {
         try self.add(gpa, fmt, args);
         return error.Invalid;
     }
 
-    /// Records a problem; checking goes on to find the next one.
     pub fn add(self: *Problem, gpa: Allocator, comptime fmt: []const u8, args: anytype) error{OutOfMemory}!void {
         self.count += 1;
         if (self.count == 1 and self.current_line > 0) {
@@ -215,8 +164,6 @@ pub const Problem = struct {
         if (self.count > max_listed) return;
         const msg = try std.fmt.allocPrint(gpa, fmt, args);
         defer gpa.free(msg);
-        // One problem is one line: names quoted from the file may hold
-        // control characters.
         for (msg) |*ch| if (ch.* < 0x20 or ch.* == 0x7f) {
             ch.* = ' ';
         };
@@ -247,8 +194,6 @@ const Parser = struct {
     spans: *toml.EntrySpanMap,
     headers: *toml.HeaderSpanMap,
     problem: *Problem,
-    /// Line lookups mostly move forward through the file: the last offset
-    /// and its line number, so each lookup counts only from there.
     cursor_offset: usize = 0,
     cursor_line: u32 = 1,
 
@@ -263,7 +208,6 @@ const Parser = struct {
         return self.cursor_line;
     }
 
-    /// Line of the entry or header at `path`, or 0 when the source has none.
     fn line(self: *Parser, path: []const toml.PathSegment) u32 {
         const hp: toml.HintPath = .{ .segments = path };
         if (self.spans.get(hp)) |s| return self.lineAt(s.statement.start);
@@ -279,8 +223,6 @@ const Parser = struct {
         return self.problem.set(self.gpa, "{s}", .{msg});
     }
 
-    /// `checkKeys`, recording an unknown key without failing, so the rest of
-    /// the table is still checked.
     fn keysNoted(self: *Parser, table: *const toml.Table, allowed: []const []const u8, at: []const toml.PathSegment, where: []const u8) !void {
         self.checkKeys(table, allowed, at, where) catch |err| switch (err) {
             error.Invalid => {},
@@ -345,7 +287,6 @@ const Parser = struct {
         return out;
     }
 
-    /// `mounts = { "host path" = "/path/in/image" }` of a rule or service.
     fn imageMounts(self: *Parser, table: *const toml.Table, at: []const toml.PathSegment, what: []const u8, name: []const u8, root: []const u8) ![]const ImageMount {
         const mv = table.get("mounts") orelse return &.{};
         const mt = switch (mv) {
@@ -360,7 +301,6 @@ const Parser = struct {
                 .string => |s| s,
                 else => return self.failKey(at, "mounts", "{s} {s}: the image path for '{s}' must be a string", .{ what, name, src }),
             };
-            // Podman's --volume syntax cannot carry ':' or ','.
             if (!localPath(src) or std.mem.indexOfAny(u8, src, ":,") != null)
                 return self.failKey(at, "mounts", "{s} {s}: invalid mount source '{s}'", .{ what, name, src });
             if (!std.fs.path.isAbsolute(target) or std.mem.eql(u8, target, "/") or std.mem.indexOfAny(u8, target, ":,") != null or hasParentComponent(target))
@@ -379,13 +319,10 @@ const Parser = struct {
     }
 };
 
-/// Passes on running out of memory; a recorded problem lets checking go on.
 fn noted(err: error{ Invalid, OutOfMemory }) error{OutOfMemory}!void {
     if (err == error.OutOfMemory) return error.OutOfMemory;
 }
 
-/// The value of `x`, or `default` when reading it recorded a problem, so
-/// checking goes on.
 fn keep(comptime T: type, x: anyerror!T, default: T) !T {
     return x catch |err| switch (err) {
         error.Invalid => default,
@@ -398,8 +335,6 @@ fn contains(list: []const []const u8, key: []const u8) bool {
     return false;
 }
 
-/// Writes line `line` of `source` under a gutter, with a caret under
-/// column `col` when it is known.
 pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void {
     if (line == 0) return;
     var it = std.mem.splitScalar(u8, source, '\n');
@@ -414,7 +349,6 @@ pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void
             try w.writeAll("  ");
             for (0..width.len) |_| try w.writeAll(" ");
             try w.writeAll(" | ");
-            // Tabs keep their width so the caret lines up.
             for (shown[0 .. col - 1]) |c| try w.writeAll(if (c == '\t') "\t" else " ");
             try w.writeAll("^\n");
         }
@@ -422,7 +356,6 @@ pub fn snippet(w: *std.Io.Writer, source: []const u8, line: u32, col: u32) !void
     }
 }
 
-/// Allowed key within edit distance 3 of `key`, for hints.
 pub fn closest(allowed: []const []const u8, key: []const u8) ?[]const u8 {
     var best: ?[]const u8 = null;
     var best_d: usize = 4;
@@ -452,23 +385,17 @@ pub fn editDistance(a: []const u8, b: []const u8) usize {
     return prev[b.len];
 }
 
-/// The largest size accepted for a request or a budget, 1024T: far above any
-/// workstation, and small enough that sums and byte counts fit in a u64.
 pub const max_memory_mib: u64 = 1 << 30;
 
-/// Memory request in MiB: an integer with an optional K, M, G or T suffix;
-/// no suffix means MiB. Null for zero or above `max_memory_mib`.
 pub fn parseMemoryMib(text: []const u8) ?u64 {
     const t = std.mem.trim(u8, text, " ");
     if (t.len == 0) return null;
     const last = std.ascii.toUpper(t[t.len - 1]);
     const has_unit = std.mem.indexOfScalar(u8, "KMGT", last) != null;
     const digits = if (has_unit) t[0 .. t.len - 1] else t;
-    // Digits alone: parseInt would also take a sign and underscores.
     if (!allDigits(digits)) return null;
     const n = std.fmt.parseInt(u64, digits, 10) catch return null;
     const mib = switch (if (has_unit) last else 'M') {
-        // Rounded up, so a request never shrinks; under 1 MiB is refused.
         'K' => if (n < 1024) return null else std.math.divCeil(u64, n, 1024) catch unreachable,
         'M' => n,
         'G' => std.math.mul(u64, n, 1024) catch return null,
@@ -479,8 +406,6 @@ pub fn parseMemoryMib(text: []const u8) ?u64 {
     return mib;
 }
 
-/// Duration in seconds: an integer followed by s, m, h or d, possibly
-/// repeated ("1h30m"); a bare integer means seconds.
 pub fn parseDuration(text: []const u8) ?u64 {
     const t = std.mem.trim(u8, text, " ");
     if (t.len == 0) return null;
@@ -512,20 +437,15 @@ pub fn validName(name: []const u8) bool {
     return true;
 }
 
-/// An explicit local path written relative to the working directory,
-/// without "..".
 fn relativeLocal(p: []const u8) bool {
     return localPath(p) and !std.fs.path.isAbsolute(p) and !hasParentComponent(p);
 }
 
-/// Whether `abs`, a path at or below `root`, is the engine's record
-/// directory or inside it.
 pub fn inRecords(root: []const u8, abs: []const u8) bool {
     const rel = if (std.mem.eql(u8, root, "/")) abs else abs[root.len..];
     return std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz");
 }
 
-/// Rejects remote, glob and empty paths; workflows name explicit local files.
 fn localPath(p: []const u8) bool {
     if (p.len == 0) return false;
     if (std.mem.indexOf(u8, p, "://") != null or std.mem.startsWith(u8, p, "gh:")) return false;
@@ -536,21 +456,25 @@ fn localPath(p: []const u8) bool {
     return true;
 }
 
-/// Parses and checks a workflow file. `root` is the working directory that
-/// relative paths resolve against. On error.Invalid, `problem` holds the reason.
 pub fn load(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
-    return loadChecked(gpa, path, root, problem, true);
+    var quick: Problem = .{};
+    defer gpa.free(quick.message);
+    if (loadChecked(gpa, path, root, &quick, true, false)) |wf| return wf else |err| if (err != error.Invalid) return err;
+    return loadWithLines(gpa, path, root, problem);
 }
 
-/// Loads the copy of a workflow that a launch recorded, for reading its
-/// records: every check that reads the workflow alone, none that looks at
-/// the files of the working directory, which may have changed since.
+pub fn loadWithLines(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
+    return loadChecked(gpa, path, root, problem, true, true);
+}
+
 pub fn loadRecorded(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem) !Workflow {
-    return loadChecked(gpa, path, root, problem, false);
+    var quick: Problem = .{};
+    defer gpa.free(quick.message);
+    if (loadChecked(gpa, path, root, &quick, false, false)) |wf| return wf else |err| if (err != error.Invalid) return err;
+    return loadChecked(gpa, path, root, problem, false, true);
 }
 
-fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem, files: bool) !Workflow {
-    // Problems found before this load, by a caller that reuses `problem`.
+fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Problem, files: bool, lines: bool) !Workflow {
     const prior = problem.count;
     problem.current_line = 0;
     var wf: Workflow = undefined;
@@ -571,7 +495,7 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
     var spans: toml.ParseSpans = .{ .entries = &entries, .headers = &headers };
     defer spans.deinit(gpa);
     var info: toml.ErrorInfo = .{};
-    const doc = toml.parseSliceWithSpans(gpa, source, &info, &spans) catch |err| switch (err) {
+    const doc = toml.parseSliceWithSpans(gpa, source, &info, if (lines) &spans else null) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             problem.line = @intCast(info.line);
@@ -582,10 +506,8 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
     defer toml.deinit(doc, gpa);
 
     var p: Parser = .{ .gpa = gpa, .arena = arena, .source = source, .spans = &entries, .headers = &headers, .problem = problem };
-    // An unknown key is reported, and the rest is still checked.
     try p.keysNoted(doc, &top_keys, &.{}, "the workflow document");
 
-    // [workflow]
     const meta = switch (doc.get("workflow") orelse return problem.set(gpa, "missing [workflow] table", .{})) {
         .table => |t| t,
         else => return problem.set(gpa, "workflow must be a table", .{}),
@@ -603,7 +525,6 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
         if (v != format_version) return p.failKey(&at_wf, "format_version", "workflow format_version {d} is not supported; this engine reads format {d}", .{ v, format_version });
     }
 
-    // [defaults]
     var default_threads: ?i64 = null;
     var default_memory: ?[]const u8 = null;
     if (doc.get("defaults")) |dv| {
@@ -615,12 +536,10 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
         try p.keysNoted(d, &default_keys, &at, "[defaults]");
         default_threads = try keep(?i64, p.int(d, "threads", &at, "defaults"), null);
         default_memory = try keep(?[]const u8, p.str(d, "memory", &at, "defaults"), null);
-        // Checked where declared, so an unused bad default is found too.
         if (default_threads) |t| if (t < 1 or t > 4096) try noted(p.failKey(&at, "threads", "defaults: threads must be between 1 and 4096", .{}));
         if (default_memory) |m| if (parseMemoryMib(m) == null) try noted(p.failKey(&at, "memory", "defaults: invalid memory '{s}' (use a size from 1M to 1024T, such as 512M or 60G)", .{m}));
     }
 
-    // [resource_groups.*]
     var groups: std.ArrayList(Group) = .empty;
     if (doc.get("resource_groups")) |gv| {
         const gt = switch (gv) {
@@ -638,7 +557,6 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
     }
     wf.groups = groups.items;
 
-    // [shared.*]
     var shared: std.ArrayList(Shared) = .empty;
     if (doc.get("shared")) |sv| {
         const st = switch (sv) {
@@ -656,7 +574,6 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
     }
     wf.shared = shared.items;
 
-    // [[rules]]
     const rules_v = doc.get("rules") orelse return problem.set(gpa, "the workflow declares no [[rules]]", .{});
     const rules_a = switch (rules_v) {
         .array => |a| a,
@@ -671,11 +588,9 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
         };
         try rules.append(arena, r);
     }
-    // Rules that did not parse leave the rest to check against nothing.
     if (problem.count > prior) return error.Invalid;
     wf.rules = rules.items;
     try checkRules(gpa, &wf, problem, files);
-    // Every shared name now exists: resolve each rule's to indices once.
     for (rules.items) |*r| {
         const idx = try arena.alloc(usize, r.shared.len);
         for (r.shared, idx) |s, *x| x.* = wf.sharedIndex(s).?;
@@ -684,7 +599,6 @@ fn loadChecked(gpa: Allocator, path: []const u8, root: []const u8, problem: *Pro
     return wf;
 }
 
-/// Parses `[resource_groups.NAME]`.
 fn parseGroup(p: *Parser, name: []const u8, v: toml.Value) !Group {
     const at = [_]toml.PathSegment{ .{ .key = "resource_groups" }, .{ .key = name } };
     const g = switch (v) {
@@ -698,7 +612,6 @@ fn parseGroup(p: *Parser, name: []const u8, v: toml.Value) !Group {
     return .{ .name = try p.arena.dupe(u8, name), .max = @intCast(max) };
 }
 
-/// Parses `[shared.NAME]`, a mapped file input or a service.
 fn parseShared(p: *Parser, root: []const u8, name: []const u8, v: toml.Value) !Shared {
     const arena = p.arena;
     const at = [_]toml.PathSegment{ .{ .key = "shared" }, .{ .key = name } };
@@ -745,7 +658,6 @@ fn parseShared(p: *Parser, root: []const u8, name: []const u8, v: toml.Value) !S
     };
 }
 
-/// Parses rule `i` of `[[rules]]`.
 fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads: ?i64, default_memory: ?[]const u8, i: usize, rv: toml.Value) !Rule {
     const arena = p.arena;
     const at = [_]toml.PathSegment{ .{ .key = "rules" }, .{ .index = i } };
@@ -758,8 +670,6 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     if (!validName(name)) return p.failKey(&at, "name", "invalid rule name '{s}': use letters, digits, '_', '.', '-', starting with a letter or digit, at most 161 characters", .{name});
     const shell = (try p.str(r, "shell", &at, name)) orelse return p.fail(&at, "rule {s} needs a shell command", .{name});
     if (std.mem.trim(u8, shell, " \t\r\n").len == 0) return p.failKey(&at, "shell", "rule {s}: shell is empty; give the command that writes its outputs", .{name});
-    // Bash drops a NUL and runs what follows it, which is not the command
-    // a reader of the workflow sees.
     if (std.mem.indexOfScalar(u8, shell, 0) != null) return p.failKey(&at, "shell", "rule {s}: shell holds a NUL byte", .{name});
     var input = try p.strings(r, "input", &at, name);
     const output = try p.strings(r, "output", &at, name);
@@ -768,7 +678,6 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     if (version) |v| if (std.mem.trim(u8, v, " \t\n").len == 0) return p.failKey(&at, "version", "rule {s}: version must be a command, such as \"STAR --version\"", .{name});
     const mounts = try p.imageMounts(r, &at, "rule", name, root);
     if (mounts.len > 0) {
-        // Each mount source is also an input of the rule.
         var extra: std.ArrayList([]const u8) = .empty;
         try extra.appendSlice(arena, input);
         for (mounts) |m| {
@@ -795,7 +704,6 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
         if (try p.int(res, "threads", &res_at, name)) |t| threads = t;
         if (try p.str(res, "memory", &res_at, name)) |m| memory = m;
         shared_uses = try p.strings(res, "shared", &res_at, name);
-        // Each shared input is held, and counted, once.
         for (shared_uses, 0..) |s, k| for (shared_uses[0..k]) |earlier| if (std.mem.eql(u8, s, earlier))
             return p.failKey(&res_at, "shared", "rule {s} lists shared input '{s}' twice", .{ name, s });
         if (res.get("groups")) |gv| {
@@ -815,10 +723,6 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
             }
         }
     }
-    // A rule reads the files of the shared inputs it uses, a mapped file or
-    // a service's index and the files mounted into the service, so each path
-    // is also its input: a rebuilt index or a changed mounted file reruns
-    // it, and a rule writing one runs before it.
     for (shared_uses) |used| {
         const sh = for (wf.shared) |s| {
             if (std.mem.eql(u8, s.name, used)) break s;
@@ -917,7 +821,6 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
     };
 }
 
-/// `input` with `path` appended, unless it already names `path_abs`.
 fn withInput(arena: Allocator, root: []const u8, input: []const []const u8, path: []const u8, path_abs: []const u8) ![]const []const u8 {
     for (input) |in| if (std.mem.eql(u8, try sys.absolute(arena, root, in), path_abs)) return input;
     const more = try arena.alloc([]const u8, input.len + 1);
@@ -932,9 +835,6 @@ fn absAll(arena: Allocator, root: []const u8, paths: []const []const u8) ![]cons
     return out;
 }
 
-/// How rule keys and `state.json` name path `abs`: relative to the working
-/// directory `root` when inside it, so moving the project keeps them, else
-/// absolute.
 pub fn keyPath(root: []const u8, abs: []const u8) []const u8 {
     if (std.mem.eql(u8, root, "/")) return abs;
     if (std.mem.eql(u8, abs, root)) return ".";
@@ -942,15 +842,11 @@ pub fn keyPath(root: []const u8, abs: []const u8) []const u8 {
     return abs;
 }
 
-/// True when `path` is `root` or lies beneath it.
 pub fn within(root: []const u8, path: []const u8) bool {
     if (!std.mem.startsWith(u8, path, root)) return false;
     return path.len == root.len or path[root.len] == '/' or std.mem.eql(u8, root, "/");
 }
 
-/// Writable paths (outputs, logs, benchmarks) must stay inside the working
-/// directory, outside the engine's record directory, and must not resolve
-/// through a symlinked parent to somewhere else.
 fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: []const u8, written: []const u8, abs: []const u8, problem: *Problem) !void {
     if (!relativeLocal(written))
         return problem.set(gpa, "rule {s}: '{s}' must be a relative path inside the working directory", .{ rule, written });
@@ -961,14 +857,8 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: [
     if (try sys.lstat(gpa, abs)) |id| {
         if (!id.isReg()) return problem.set(gpa, "rule {s}: existing '{s}' must be a regular file", .{ rule, written });
     }
-    // The parent must resolve inside the working directory, and to the path
-    // as written: through a symlinked directory the file would have a second
-    // name, which the graph and the containment checks do not see.
     const parent = std.fs.path.dirname(abs) orelse return;
     const real_root = (try cache.real(wf.root)) orelse return;
-    // A missing directory on the way may be a symlink that points nowhere:
-    // the resolution below skips it, so it is looked for here, up to the
-    // first directory that exists.
     var head = parent;
     while (head.len > wf.root.len and within(wf.root, head)) : (head = std.fs.path.dirname(head) orelse break) {
         if (try cache.real(head) != null) break;
@@ -982,8 +872,6 @@ fn checkWritable(gpa: Allocator, wf: *const Workflow, cache: *PathCache, rule: [
         return problem.set(gpa, "rule {s}: '{s}' passes through a symlinked directory; name it by its real path", .{ rule, written });
 }
 
-/// Whether `path` below `root` and `real` below `real_root` name the same
-/// place relative to their roots.
 fn sameBelow(root: []const u8, path: []const u8, real_root: []const u8, real: []const u8) bool {
     if (!within(root, path) or !within(real_root, real)) return false;
     return std.mem.eql(u8, std.mem.trimStart(u8, path[root.len..], "/"), std.mem.trimStart(u8, real[real_root.len..], "/"));
@@ -997,9 +885,6 @@ fn hasParentComponent(path: []const u8) bool {
 
 const Inode = struct { dev: u64, ino: u64 };
 
-/// One stat and one symlink resolution per distinct path while checking.
-/// With `files` false every path reads as absent, so only the checks that
-/// need the workflow alone apply.
 const PathCache = struct {
     gpa: Allocator,
     files: bool = true,
@@ -1021,10 +906,6 @@ const PathCache = struct {
         return id;
     }
 
-    /// The resolved path of an absolute, normalized `path`, or null when it
-    /// does not exist. A path whose last component is not a symlink resolves
-    /// through its directory, so each directory is resolved once and each
-    /// file costs one `statx`.
     fn real(self: *PathCache, path: []const u8) !?[]const u8 {
         if (!self.files) return null;
         if (self.reals.get(path)) |v| return v;
@@ -1032,7 +913,6 @@ const PathCache = struct {
             const dir = std.fs.path.dirname(path) orelse break :blk try sys.realpath(self.gpa, path);
             const id = (try sys.lstat(self.gpa, path)) orelse break :blk null;
             if (id.mode & 0o170000 == 0o120000) break :blk try sys.realpath(self.gpa, path);
-            // Not a symlink: its identity is also what stat would return.
             if (!self.ids.contains(path)) try self.ids.put(self.gpa, path, id);
             const real_dir = (try self.real(dir)) orelse break :blk null;
             break :blk try std.fs.path.join(self.gpa, &.{ real_dir, std.fs.path.basename(path) });
@@ -1042,9 +922,6 @@ const PathCache = struct {
         return r;
     }
 
-    /// Where an absolute, normalized `path` is or would be created: the
-    /// resolved path of its nearest existing ancestor with the rest of
-    /// `path` appended. Owned by the caller; null when no ancestor resolves.
     fn destination(self: *PathCache, path: []const u8) !?[]u8 {
         var head = path;
         while (true) {
@@ -1058,8 +935,6 @@ const PathCache = struct {
     }
 };
 
-/// Reports the nearest directory above `abs`, inside `root`, that a rule
-/// writes as a file (`files` and `sides` map paths to their rules).
 fn fileAncestor(gpa: Allocator, problem: *Problem, root: []const u8, files: *const std.StringHashMapUnmanaged([]const u8), sides: *const std.StringHashMapUnmanaged([]const u8), rule: []const u8, what: []const u8, written: []const u8, abs: []const u8) !void {
     var dir = std.fs.path.dirname(abs) orelse return;
     while (dir.len > root.len and within(root, dir)) : (dir = std.fs.path.dirname(dir) orelse return) {
@@ -1068,11 +943,6 @@ fn fileAncestor(gpa: Allocator, problem: *Problem, root: []const u8, files: *con
     }
 }
 
-/// Whether `written`, a path with a `..` component, leads the kernel
-/// somewhere else than its normalized form `abs`: the kernel resolves the
-/// part up to the last `..` with every symlink in it, normalizing does not.
-/// False when that part does not exist, since the kernel cannot follow it
-/// either.
 fn dotDotDiffers(gpa: Allocator, cache: *PathCache, root: []const u8, written: []const u8, abs: []const u8) !bool {
     if (!cache.files) return false;
     var it = std.mem.splitScalar(u8, written, '/');
@@ -1114,13 +984,8 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
     var cache: PathCache = .{ .gpa = gpa, .files = files };
     defer cache.deinit();
 
-    // Each problem is recorded and checking goes on: a bad item skips only
-    // itself, so the items after it are still checked against the others.
     for (wf.rules) |r| {
-        // Problems with this rule show its line.
         problem.current_line = r.line;
-        // A second rule of the same name would repeat the first one's
-        // problems; it is reported once.
         if ((try names.fetchPut(gpa, r.name, {})) != null) {
             try problem.add(gpa, "duplicate rule name '{s}'", .{r.name});
             continue;
@@ -1173,8 +1038,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
             }
             try side.put(gpa, abs, r.name);
         }
-        // Diagnostics are only read, after a failure: any file inside the
-        // working directory but outside the records.
         for (r.diagnostics, r.diagnostics_abs, 0..) |written, abs, k| {
             if (!relativeLocal(written))
                 try problem.add(gpa, "rule {s}: diagnostics '{s}' must be a relative path inside the working directory", .{ r.name, written })
@@ -1215,8 +1078,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
                     try problem.add(gpa, "rule {s}: workdir '{s}' passes through a symlinked directory; name it by its real path", .{ r.name, d });
             }
         }
-        // A rule's own writes would change its directory input while it runs.
-        // A shared input's path has its own checks, with the graph.
         own: for (r.input_abs, r.input) |in, in_written| {
             for (r.shared) |name| if (wf.sharedIndex(name)) |si| if (wf.shared[si].path_abs) |p| if (std.mem.eql(u8, p, in)) continue :own;
             for (r.output_abs, r.output) |abs, written| try insideInput(gpa, problem, r.name, "", written, abs, in_written, in);
@@ -1251,7 +1112,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
     defer side_inodes.deinit(gpa);
     var it = side.iterator();
     sides: while (it.next()) |e| {
-        // Problems with a log or benchmark show the line of its rule.
         problem.current_line = if (wf.ruleIndex(e.value_ptr.*)) |ri| wf.rules[ri].line else 0;
         if (outputs.contains(e.key_ptr.*)) {
             try problem.add(gpa, "rule {s}: a log or benchmark overlaps a declared output", .{e.value_ptr.*});
@@ -1266,8 +1126,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
                 try problem.add(gpa, "rule {s}: a log or benchmark is a hard link to a log or benchmark of rule {s}", .{ e.value_ptr.*, other.value });
         }
     }
-    // A path written as a file cannot also be a directory that another
-    // writable path or a workdir lies in.
     for (wf.rules) |r| {
         problem.current_line = r.line;
         for (r.output_abs, r.output) |abs, written| try fileAncestor(gpa, problem, wf.root, &outputs, &side, r.name, "", written, abs);
@@ -1280,7 +1138,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
         }
     }
     for (wf.rules) |r| {
-        // Problems with this rule show its line.
         problem.current_line = r.line;
         inputs: for (r.input_abs, r.input) |in, written| {
             if (side.get(in)) |w| {
@@ -1293,16 +1150,10 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
                     continue :inputs;
                 }
             };
-            // Paths are normalized as written, `a/../b` as `b`, while the
-            // kernel follows a symlink before its `..`: a spelling whose two
-            // readings differ names a file the graph cannot see.
             if (try dotDotDiffers(gpa, &cache, wf.root, written, in)) {
                 try problem.add(gpa, "rule {s}: input '{s}' names another file than it spells: a '..' follows a symlink; write the path without '..'", .{ r.name, written });
                 continue :inputs;
             }
-            // An input reaching a declared output, or a directory holding
-            // one, through a symlink must name the producer path: the graph
-            // links rules by the paths they write.
             if (!outputs.contains(in)) if (try cache.destination(in)) |dest| {
                 defer gpa.free(dest);
                 const real_root = (try cache.real(wf.root)) orelse wf.root;
@@ -1321,8 +1172,6 @@ fn checkRules(gpa: Allocator, wf: *const Workflow, problem: *Problem, files: boo
         }
     }
     problem.current_line = 0;
-    // Mapped files are measured at launch, so they cannot be produced by the
-    // run; a service's files can (the graph checks its users' order).
     shareds: for (wf.shared) |s| {
         const sp = s.path_abs orelse continue;
         if (s.isService()) continue;

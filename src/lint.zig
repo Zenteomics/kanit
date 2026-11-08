@@ -8,8 +8,6 @@ const graph = @import("graph.zig");
 const Allocator = std.mem.Allocator;
 const eql = std.mem.eql;
 
-/// Notes, one line each: a shared input or resource group no selected rule
-/// uses, and a step whose rules declare `sample` only in part.
 pub fn notes(a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask: []const bool) !void {
     for (wf.shared) |s| {
         var used = false;
@@ -25,7 +23,6 @@ pub fn notes(a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask
         };
         if (!used) try w.print("note: resource group {s} is used by no selected rule\n", .{g.name});
     }
-    // Per step: how many rules have a sample, and one that has none.
     var with: std.StringArrayHashMapUnmanaged(struct { some: usize = 0, missing: ?[]const u8 = null }) = .empty;
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
@@ -39,15 +36,12 @@ pub fn notes(a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, mask
         try w.print("note: rule {s} has no sample, though other rules of step {s} do; it is left out of the per-sample views\n", .{ name, step });
 }
 
-/// Inputs of selected rules that exist nowhere and that no rule writes,
-/// one line each, as `run` would refuse them; returns how many.
 pub fn missingInputs(gpa: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, g: *const graph.Graph, mask: []const bool) !usize {
     var n: usize = 0;
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
         for (r.input_abs, r.input) |in, written| {
             if (g.produces(in)) continue;
-            // As the launch does: a symlink counts by what it points at.
             const found = sys.stat(gpa, in) catch |err| {
                 n += 1;
                 try w.print("input of rule {s}: {s} cannot be read: {s}\n", .{ r.name, written, sys.errorText(err) });

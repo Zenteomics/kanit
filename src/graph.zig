@@ -5,18 +5,12 @@ const Allocator = std.mem.Allocator;
 
 pub const Graph = struct {
     arena: std.heap.ArenaAllocator,
-    /// For each rule, the rules producing its inputs, sorted, without duplicates.
     parents: []const []const usize,
     children: []const []const usize,
-    /// Rule indices with every parent before its children; ties keep file order.
     order: []const usize,
-    /// Output path to producing rule.
     producer: std.StringHashMapUnmanaged(usize),
-    /// Every output path with its rule, sorted by path, to find the rules
-    /// writing inside a directory.
     outputs: []const Output,
 
-    /// Whether a rule writes `path`, or a file below it.
     pub fn produces(self: *const Graph, path: []const u8) bool {
         if (self.producer.contains(path)) return true;
         return below(self.outputs, path).len > 0;
@@ -50,13 +44,12 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
             if (g.producer.get(in)) |pi| {
                 if (std.mem.indexOfScalar(usize, ps.items, pi) == null) try ps.append(a, pi);
             }
-            // A directory input depends on every rule writing inside it.
             for (below(g.outputs, in)) |o| {
                 if (o.rule == i) continue;
                 if (std.mem.indexOfScalar(usize, ps.items, o.rule) == null) try ps.append(a, o.rule);
             }
         }
-        std.mem.sort(usize, ps.items, {}, std.sort.asc(usize));
+        std.mem.sortUnstable(usize, ps.items, {}, std.sort.asc(usize));
         parents[i] = ps.items;
         for (ps.items) |pi| try child_lists[pi].append(a, i);
     }
@@ -65,7 +58,6 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
     g.parents = parents;
     g.children = children;
 
-    // Kahn's algorithm, always taking the lowest ready index for a stable order.
     const pending = try a.alloc(usize, n);
     for (parents, 0..) |ps, i| pending[i] = ps.len;
     var ready: std.PriorityQueue(usize, void, lessIndex) = .empty;
@@ -94,9 +86,6 @@ pub fn build(gpa: Allocator, wf: *const workflow.Workflow, cycle_message: *workf
     return g;
 }
 
-/// The rules of one cycle, each a parent of the next, from the rules Kahn's
-/// algorithm left with `pending` parents. Every such rule has a parent also
-/// left, so walking from parent to parent returns to a rule already seen.
 fn findCycle(a: Allocator, parents: []const []const usize, pending: []const usize) ![]usize {
     var i = for (pending, 0..) |c, k| {
         if (c > 0) break k;
@@ -116,7 +105,6 @@ fn findCycle(a: Allocator, parents: []const []const usize, pending: []const usiz
     return loop;
 }
 
-/// An output path and the rule that writes it.
 pub const Output = struct {
     path: []const u8,
     rule: usize,
@@ -126,9 +114,6 @@ pub const Output = struct {
     }
 };
 
-/// The outputs strictly below directory `dir`, from outputs sorted by path:
-/// they start with "dir/", so they are the run that begins at the first
-/// path not sorting before "dir/".
 pub fn below(outputs: []const Output, dir: []const u8) []const Output {
     var lo: usize = 0;
     var hi: usize = outputs.len;
@@ -141,7 +126,6 @@ pub fn below(outputs: []const Output, dir: []const u8) []const Output {
     return outputs[lo..end];
 }
 
-/// Whether `path` sorts before `dir` followed by '/'.
 fn beforeDirSlash(path: []const u8, dir: []const u8) bool {
     const n = @min(path.len, dir.len);
     switch (std.mem.order(u8, path[0..n], dir[0..n])) {
@@ -157,10 +141,6 @@ fn isBelow(dir: []const u8, path: []const u8) bool {
     return path.len > dir.len + 1 and std.mem.startsWith(u8, path, dir) and path[dir.len] == '/';
 }
 
-/// A service loads its path when its first user starts; a rule that joins
-/// the service cannot also write there, since the service would start
-/// before the file exists. Rules that write there are producers of every
-/// user, through the service's path as their input.
 fn checkServiceInputs(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, problem: *workflow.Problem) !void {
     for (wf.shared) |s| {
         const sp = s.path_abs orelse continue;
@@ -184,8 +164,6 @@ fn lessIndex(_: void, x: usize, y: usize) std.math.Order {
     return std.math.order(x, y);
 }
 
-/// Marks the selected targets and every rule they depend on. With no
-/// targets, every rule is selected. Unknown names are returned in `unknown`.
 pub fn select(gpa: Allocator, wf: *const workflow.Workflow, g: *const Graph, targets: []const []const u8, unknown: *?[]const u8) ![]bool {
     const mask = try gpa.alloc(bool, wf.rules.len);
     if (targets.len == 0) {

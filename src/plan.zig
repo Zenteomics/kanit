@@ -22,16 +22,13 @@ pub const Context = struct {
     g: *const graph.Graph,
     st: *state.State,
     ids: *state.Identities,
-    /// Environment part of rule keys (state.envText).
     env_text: []const u8,
     engine_id: []const u8,
     rerun: bool = false,
     rerun_rules: []const []const u8 = &.{},
     cut: ?state.Cutoff = null,
     environ: *const std.process.Environ.Map,
-    /// Names passed with --pass-env, which Podman also receives.
     pass_env: []const []const u8 = &.{},
-    /// Per rule: key text beyond the command, as the run computes it.
     extras: []const []const u8 = &.{},
 
     pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8, environ: *const std.process.Environ.Map) !Context {
@@ -48,13 +45,8 @@ pub const Context = struct {
         };
     }
 
-    /// Decides every selected rule in graph order. A rule whose producer
-    /// runs also runs, since its inputs will change; when the producer has
-    /// `cutoff = true`, the run may still reuse it if the producer's outputs
-    /// come out the same.
     pub fn decideAll(self: *Context, mask: []const bool) ![]Decision {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
-        // A launch passes the extras of the images it resolved.
         if (self.extras.len == 0) self.extras = try self.resolveExtras(mask);
         const out = try self.a.alloc(Decision, self.wf.rules.len);
         for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
@@ -65,8 +57,6 @@ pub const Context = struct {
         return out;
     }
 
-    /// Image IDs of the selected container rules, resolved as the run does;
-    /// an image that cannot be resolved keeps its reference and is reported.
     fn resolveExtras(self: *Context, mask: []const bool) ![]const []const u8 {
         var images: std.StringHashMapUnmanaged([]const u8) = .empty;
         const refs = try container.imageRefs(self.a, self.wf, mask);
@@ -75,7 +65,6 @@ pub const Context = struct {
                 std.debug.print("kanit: podman is not on PATH; container rules cannot be planned exactly\n", .{});
                 return container.ruleExtras(self.a, self.wf, &images);
             };
-            // Podman sees the environment a run gives it.
             const envp = try process.Vec.init(self.a, try state.hostEnv(self.a, self.environ, self.pass_env));
             const devnull = try sys.openRead(self.gpa, "/dev/null");
             defer sys.close(devnull);
@@ -88,8 +77,6 @@ pub const Context = struct {
 
     fn decide(self: *Context, i: usize, prior: []const Decision) !Decision {
         const r = &self.wf.rules[i];
-        // An input that no selected rule produces must exist, or the run
-        // refuses to start.
         for (r.input_abs, r.input) |in, written| {
             if (self.g.produces(in)) continue;
             if ((try self.ids.get(in)) == null) return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "input missing: {s}", .{written}) };
@@ -125,7 +112,6 @@ pub const Context = struct {
     }
 };
 
-/// The keys this plan gives the rules it decided, for `state.ruleKey`.
 const Prior = struct {
     ds: []const Decision,
     pub fn get(self: Prior, p: usize) ?[]const u8 {
@@ -133,16 +119,12 @@ const Prior = struct {
     }
 };
 
-/// A reason without the rule or file it names, to group decisions:
-/// "producer X runs" is "a producer runs", "output missing: P" is
-/// "output missing", and so on.
 pub fn reasonClass(reason: []const u8) []const u8 {
     if (std.mem.startsWith(u8, reason, "producer ")) return if (std.mem.endsWith(u8, reason, "; reused if its outputs repeat")) "a cutoff producer runs; reused if its outputs repeat" else "a producer runs";
     for ([_][]const u8{ "input missing", "output missing", "output changed" }) |p| if (std.mem.startsWith(u8, reason, p)) return p;
     return reason;
 }
 
-/// Counts of the decisions `ds` by reason class, largest first.
 pub fn printSummary(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, mask: []const bool) !void {
     var groups: std.StringArrayHashMapUnmanaged(struct { run: bool, n: usize }) = .empty;
     for (ctx.g.order) |i| {
@@ -169,7 +151,6 @@ pub fn printSummary(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision
     try w.print("{d} to run, {d} to reuse\n", .{ runs, reuse });
 }
 
-/// One line per selected rule in graph order: run or reuse, and why.
 pub fn printPlan(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, mask: []const bool) !void {
     var runs: usize = 0;
     var reuse: usize = 0;
@@ -182,8 +163,6 @@ pub fn printPlan(w: *std.Io.Writer, ctx: *const Context, ds: []const Decision, m
     try w.print("{d} to run, {d} to reuse\n", .{ runs, reuse });
 }
 
-/// Explains one rule: each part of its key against the recorded entry, and
-/// which input files changed since they were last recorded.
 pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []const u8) !bool {
     const i = ctx.wf.ruleIndex(name) orelse return false;
     const ds = try ctx.decideAll(mask);
@@ -213,8 +192,6 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
         if (!std.mem.eql(u8, e.request, k.request)) try w.print("    was: {s}\n    now: {s}\n", .{ e.request, k.request });
         if (!std.mem.eql(u8, e.engine, k.engine)) try w.print("    was: {s}\n    now: {s}\n", .{ e.engine, k.engine });
     }
-    // Each input against what this rule's record saw; older records lack
-    // that, and are compared with the last identity any rule recorded.
     for (r.input_abs, 0..) |in, n| {
         const now = if (d.key) |k| k.input_ids[n].id else (try ctx.ids.get(in)) orelse {
             try w.print("  input missing: {s}\n", .{in});
@@ -238,9 +215,6 @@ pub fn explain(w: *std.Io.Writer, ctx: *Context, mask: []const bool, name: []con
     return true;
 }
 
-/// Checks recorded outputs of the selected rules. With `content`, hashes
-/// them, compares against stored digests and stores missing ones. False
-/// when an output differs or a selected rule has no record to check.
 pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.Identities, wf: *const workflow.Workflow, mask: []const bool, content: bool) !bool {
     var ok = true;
     var checked: usize = 0;
@@ -259,8 +233,6 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
             checked += 1;
             switch (try state.checkOutput(gpa, ids, o.*)) {
                 .intact => {},
-                // Its bytes still match its stored digest: `run` reuses it
-                // under its new identity.
                 .refreshed => |now| o.id = try sa.dupe(u8, now),
                 .missing => {
                     try w.print("missing   {s}: {s}\n", .{ r.name, o.path });
@@ -300,19 +272,12 @@ pub fn loadState(gpa: Allocator, root: []const u8, a: Allocator) !state.State {
     return state.loadRecorded(gpa, a, try records.recordsDir(a, root));
 }
 
-/// What `plan --budget` checks: the budget a launch would have.
 pub const Budget = struct {
     threads: u32,
     memory_mib: u64,
-    /// Neither was given: every CPU and three quarters of the memory.
     defaults: bool,
 };
 
-/// Checks the rules that would run (`runs`, from the plan's decisions)
-/// against the budget as `run` does before a launch: its threads, and its
-/// memory with its shared inputs, each held once, and a container rule's
-/// Podman client. A reused rule needs nothing. Returns how many rules cannot
-/// fit or shared inputs cannot be measured, so the launch would be refused.
 pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const workflow.Workflow, runs: []const bool, reused: usize, b: Budget) !usize {
     const units = @import("units.zig");
     const run = @import("run.zig");
@@ -324,7 +289,6 @@ pub fn printBudget(gpa: Allocator, a: Allocator, w: *std.Io.Writer, wf: *const w
         try w.writeAll(" no budget\n");
     }
 
-    // Each shared input's memory, counted once.
     var failure: []const u8 = "";
     const shared = run.sharedSizes(gpa, a, wf, runs, &failure) catch |err| switch (err) {
         error.Unmeasurable => {

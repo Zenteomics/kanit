@@ -12,10 +12,6 @@ fn defaultAction(sig: linux.SIG) void {
     _ = linux.sigaction(sig, &act, null);
 }
 
-/// Blocks the signals the engine handles and returns a signalfd that reports
-/// them. Ignored dispositions inherited from a launcher are reset first, since
-/// an ignored signal is discarded even while blocked. The engine also becomes
-/// a subreaper, so descendants that leave their task are reaped here.
 pub fn setupSignals() !sys.Fd {
     for (handled) |s| defaultAction(s);
     var set = linux.sigemptyset();
@@ -26,7 +22,6 @@ pub fn setupSignals() !sys.Fd {
     return @intCast(fd);
 }
 
-/// Drains pending signals; returns a bit per signal number seen.
 pub fn readSignals(fd: sys.Fd) u64 {
     var seen: u64 = 0;
     var info: linux.signalfd_siginfo = undefined;
@@ -43,7 +38,6 @@ pub fn has(seen: u64, sig: linux.SIG) bool {
 }
 
 pub const Spec = struct {
-    /// Executable path and argument vector, prepared before fork.
     path: [*:0]const u8,
     argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
@@ -51,26 +45,17 @@ pub const Spec = struct {
     stdin: sys.Fd,
     stdout: sys.Fd,
     stderr: sys.Fd,
-    /// Open `cgroup.procs` of the task's cgroup, or -1.
     cgroup_procs: sys.Fd = -1,
-    /// Run the child in a new process group led by itself.
     new_group: bool = true,
-    /// User and network namespaces to join before exec, or -1.
     userns: sys.Fd = -1,
     netns: sys.Fd = -1,
 };
 
-/// Starts a child. The child joins its process group and cgroup, restores
-/// default signal handling and an empty signal mask, and execs. An exec
-/// failure is reported through a close-on-exec pipe as error.ExecFailed.
 pub fn spawn(spec: *const Spec) !linux.pid_t {
     var pipe: [2]i32 = undefined;
     _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
     defer sys.close(pipe[0]);
 
-    // The child shares the engine's memory until it execs (CLONE_VM with
-    // CLONE_VFORK, as posix_spawn does), so starting a task does not copy the
-    // engine's page tables. It runs on its own stack and makes only system calls.
     var arg: ChildArg = .{ .spec = spec, .err_pipe = pipe[1] };
     const flags: u32 = linux.CLONE.VM | linux.CLONE.VFORK | @intFromEnum(linux.SIG.CHLD);
     const rc = linux.clone(childEntry, @intFromPtr(&child_stack) + child_stack.len, flags, @intFromPtr(&arg), null, 0, null);
@@ -94,8 +79,6 @@ pub fn spawn(spec: *const Spec) !linux.pid_t {
 
 const ChildArg = struct { spec: *const Spec, err_pipe: i32 };
 
-/// Stack for the child between clone and exec. The engine starts one child
-/// at a time and waits for its exec, so one stack suffices.
 var child_stack: [64 * 1024]u8 align(16) = undefined;
 
 fn childEntry(arg: usize) callconv(.c) u8 {
@@ -119,7 +102,6 @@ fn child(spec: *const Spec, err_pipe: i32) noreturn {
     linux.exit_group(127);
 }
 
-/// In the child: on a failed call, sends its errno to the parent and exits.
 fn step(err_pipe: i32, rc: usize) void {
     const e = linux.errno(rc);
     if (e == .SUCCESS) return;
@@ -146,7 +128,6 @@ pub const Reaped = struct {
     }
 };
 
-/// Reaps one exited child without blocking; null when none is waiting.
 pub fn reap() ?Reaped {
     var status: u32 = 0;
     var usage: linux.rusage = undefined;
@@ -159,7 +140,6 @@ pub fn signalGroup(pgid: linux.pid_t, sig: linux.SIG) void {
     _ = linux.kill(-pgid, sig);
 }
 
-/// Whether a process group still has a member.
 pub fn groupAlive(pgid: linux.pid_t) bool {
     return linux.errno(linux.kill(-pgid, @enumFromInt(0))) != .SRCH;
 }
@@ -168,13 +148,10 @@ pub fn signalPid(pid: linux.pid_t, sig: linux.SIG) void {
     _ = linux.kill(pid, sig);
 }
 
-/// Waits for readable signals or file descriptors until `deadline_ns`
-/// (monotonic), or indefinitely when null.
 pub fn wait(fds: []linux.pollfd, deadline_ns: ?i128) void {
     var ts: linux.timespec = undefined;
     var tsp: ?*linux.timespec = null;
     if (deadline_ns) |d| {
-        // A far deadline waits a day at most; the caller waits again.
         const left = @min(@max(d - sys.monoNs(), 0), std.time.ns_per_day);
         ts = .{ .sec = @intCast(@divFloor(left, std.time.ns_per_s)), .nsec = @intCast(@mod(left, std.time.ns_per_s)) };
         tsp = &ts;
@@ -182,7 +159,6 @@ pub fn wait(fds: []linux.pollfd, deadline_ns: ?i128) void {
     _ = linux.ppoll(fds.ptr, fds.len, tsp, null);
 }
 
-/// A null-terminated argument or environment vector built before fork.
 pub const Vec = struct {
     items: [:null]?[*:0]const u8,
 
@@ -193,8 +169,6 @@ pub const Vec = struct {
     }
 };
 
-/// The executable `name` on PATH, or null: the first regular file of that
-/// name the user may execute, as the shell finds it.
 pub fn findProgram(gpa: Allocator, a: Allocator, path_env: []const u8, name: []const u8) !?[]const u8 {
     var it = std.mem.tokenizeScalar(u8, path_env, ':');
     while (it.next()) |dir| {
@@ -206,8 +180,6 @@ pub fn findProgram(gpa: Allocator, a: Allocator, path_env: []const u8, name: []c
     return null;
 }
 
-/// Runs a short command and returns its standard output; error.CommandFailed
-/// with `status` set when it does not exit 0.
 pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *const Vec, devnull: sys.Fd, status: *u32) ![]u8 {
     var pipe: [2]i32 = undefined;
     _ = try sys.check(linux.pipe2(&pipe, .{ .CLOEXEC = true }));
@@ -238,7 +210,6 @@ pub fn capture(gpa: Allocator, a: Allocator, argv: []const []const u8, envp: *co
     }
     _ = gpa;
     if (!linux.W.IFEXITED(status.*) or linux.W.EXITSTATUS(status.*) != 0) return error.CommandFailed;
-    // Output cut short by a failed read is not the command's output.
     if (read_failed) return error.CommandFailed;
     return out.items;
 }

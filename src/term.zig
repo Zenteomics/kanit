@@ -11,8 +11,6 @@ pub fn isTerminal(fd: sys.Fd) bool {
     return linux.errno(linux.tcgetattr(fd, &t)) == .SUCCESS;
 }
 
-/// Whether output on `fd` may use color: only on a terminal, never when
-/// `NO_COLOR` is set to a non-empty value (no-color.org) or `TERM` is `dumb`.
 pub fn colorOn(fd: sys.Fd, env: *const std.process.Environ.Map) bool {
     if (!isTerminal(fd)) return false;
     if (env.get("NO_COLOR")) |v| if (v.len > 0) return false;
@@ -22,15 +20,12 @@ pub fn colorOn(fd: sys.Fd, env: *const std.process.Environ.Map) bool {
 
 pub const Size = struct { cols: usize, rows: usize };
 
-/// The size of the terminal on `fd`, or 80 by 24 when it cannot be read.
 pub fn size(fd: sys.Fd) Size {
     var ws: std.posix.winsize = undefined;
     if (linux.errno(linux.ioctl(fd, linux.T.IOCGWINSZ, @intFromPtr(&ws))) != .SUCCESS or ws.col == 0 or ws.row == 0) return .{ .cols = 80, .rows = 24 };
     return .{ .cols = ws.col, .rows = ws.row };
 }
 
-/// SGR sequences, or empty strings when color is off, so callers write the
-/// same text either way.
 pub const Style = struct {
     on: bool,
 
@@ -63,10 +58,6 @@ pub const Style = struct {
     }
 };
 
-/// Makes text safe to show on a terminal, in place: each C0 control
-/// character and DEL becomes a space, and so does each C1 control character
-/// (U+0080 to U+009F, two bytes in UTF-8), which some terminals act on as
-/// they do on escape. Returns the text, shorter by one byte per C1 character.
 pub fn blankControls(s: []u8) []u8 {
     var w: usize = 0;
     var i: usize = 0;

@@ -16,19 +16,12 @@ const Value = std.json.Value;
 const eql = std.mem.eql;
 const get = fields.get;
 
-/// A workflow file, by its `[workflow]` name and version and the digest of
-/// its bytes, and the recorded rules it made.
 pub const Source = struct { name: []const u8, version: []const u8 = "", sha256: []const u8 = "", rules: usize = 0 };
 
-/// An engine or a launch, and the recorded rules it made.
 pub const Count = struct { name: []const u8, rules: usize = 0 };
 
-/// A tool: what its rules declared or derived as `tool`, the image they ran
-/// in, and the version its command printed.
 pub const Tool = struct {
     tool: []const u8,
-    /// The first line its version command printed, or null when no rule
-    /// names one or no launch recorded its output.
     version: ?[]const u8,
     version_command: ?[]const u8,
     container: ?[]const u8,
@@ -37,9 +30,6 @@ pub const Tool = struct {
     rules: usize,
 };
 
-/// A step: how many rules ran it, their requests, and the command of the
-/// first of them by name. The requests are null when no rule of the step
-/// has a recorded request.
 pub const Step = struct {
     step: []const u8,
     rules: usize,
@@ -55,7 +45,6 @@ pub const Step = struct {
 pub const Methods = struct {
     workdir: []const u8,
     rules: usize,
-    /// UTC times the first and last recorded rule finished.
     first_finished: []const u8,
     last_finished: []const u8,
     workflows: []const Source,
@@ -65,12 +54,10 @@ pub const Methods = struct {
     steps: []const Step,
 };
 
-/// One recorded rule, from its attempt's records and its launch's.
 const Rule = struct {
     name: []const u8,
     step: []const u8,
     tool: []const u8,
-    /// The request, from the attempt's record, else its request file.
     threads: ?f64,
     memory_mib: ?f64,
     container: ?[]const u8,
@@ -91,8 +78,6 @@ const Launch = struct {
     versions: ?Value = null,
 };
 
-/// A JSON record file, or null when there is none; one that does not parse
-/// is named on standard error and read as absent.
 fn readJson(gpa: Allocator, a: Allocator, path: []const u8) !?Value {
     const bytes = sys.readFile(gpa, path, 16 << 20) catch |err| return if (err == error.OutOfMemory) err else null;
     defer gpa.free(bytes);
@@ -117,7 +102,6 @@ fn optStr(v: ?Value, key: []const u8) ?[]const u8 {
     return if (s.len > 0) s else null;
 }
 
-/// The first non-empty line of `text`.
 fn firstLine(text: []const u8) []const u8 {
     var it = std.mem.tokenizeAny(u8, text, "\r\n");
     while (it.next()) |line| {
@@ -127,12 +111,7 @@ fn firstLine(text: []const u8) []const u8 {
     return "";
 }
 
-/// The version a launch recorded for `command` run in `image`, or on the
-/// host when `image` is null: the first line of what it printed, if it
-/// exited 0.
 fn versionOf(l: *const Launch, command: []const u8, image: ?[]const u8) ?[]const u8 {
-    // `{"v": 1, "commands": [...]}`; launches before the version field wrote
-    // the bare list.
     const top = l.versions orelse return null;
     const list = if (top == .object) (fields.get(top, "commands") orelse return null) else top;
     if (list != .array) return null;
@@ -148,7 +127,6 @@ fn versionOf(l: *const Launch, command: []const u8, image: ?[]const u8) ?[]const
     return null;
 }
 
-/// Counts a rule for workflow file `s` in `list`.
 fn countSource(a: Allocator, list: *std.ArrayList(Source), s: Source) !void {
     for (list.items) |*x| if (eql(u8, x.name, s.name) and eql(u8, x.version, s.version) and eql(u8, x.sha256, s.sha256)) {
         x.rules += 1;
@@ -159,7 +137,6 @@ fn countSource(a: Allocator, list: *std.ArrayList(Source), s: Source) !void {
     try list.append(a, n);
 }
 
-/// Counts a rule for `name` in `list`.
 fn count(a: Allocator, list: *std.ArrayList(Count), name: []const u8) !void {
     for (list.items) |*x| if (eql(u8, x.name, name)) {
         x.rules += 1;
@@ -170,8 +147,6 @@ fn count(a: Allocator, list: *std.ArrayList(Count), name: []const u8) !void {
 
 const Names = struct { name: []const u8 = "", version: []const u8 = "" };
 
-/// The `[workflow]` name and version in a launch's copy of its workflow
-/// file, for a launch whose `launch.json` does not record them.
 fn snapshotNames(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Names {
     const bytes = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), 64 << 20) catch |err| return if (err == error.OutOfMemory) err else .{};
     defer gpa.free(bytes);
@@ -191,7 +166,6 @@ fn snapshotNames(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Names {
     return out;
 }
 
-/// Reads what produced the results recorded in working directory `root`.
 pub fn collect(gpa: Allocator, a: Allocator, root: []const u8) !Methods {
     const rec = try records.recordsDir(a, root);
     var st = try state.load(gpa, rec);
@@ -200,7 +174,6 @@ pub fn collect(gpa: Allocator, a: Allocator, root: []const u8) !Methods {
     var launches: std.StringArrayHashMapUnmanaged(*Launch) = .empty;
     var rules: std.ArrayList(Rule) = .empty;
     for (st.data.rules.map.keys(), st.data.rules.map.values()) |name, e| {
-        // attempts/<rule>/<NNN> inside the launch directory.
         const launch_dir = std.fs.path.dirname(std.fs.path.dirname(std.fs.path.dirname(e.attempt) orelse continue) orelse continue) orelse continue;
         const gop = try launches.getOrPut(a, launch_dir);
         if (!gop.found_existing) {
@@ -243,8 +216,6 @@ pub fn collect(gpa: Allocator, a: Allocator, root: []const u8) !Methods {
             .launch = l,
         });
     }
-    // Steps in the order they first finished, which follows the pipeline;
-    // rules by name within a step.
     std.mem.sort(Rule, rules.items, {}, struct {
         fn lt(_: void, x: Rule, y: Rule) bool {
             const o = std.mem.order(u8, x.finished, y.finished);
@@ -323,7 +294,6 @@ pub fn writeJson(w: *std.Io.Writer, m: Methods) !void {
     try w.print("{f}\n", .{std.json.fmt(m, .{ .whitespace = .indent_2 })});
 }
 
-/// The methods as text: sources, then tools, then steps.
 pub fn writeText(w: *std.Io.Writer, m: Methods) !void {
     try w.print("Results in {s}: ", .{m.workdir});
     try units.count(w, m.rules, "rule", "rules");
@@ -359,7 +329,6 @@ pub fn writeText(w: *std.Io.Writer, m: Methods) !void {
         } else try w.writeAll("    host\n");
         if (t.version_command) |c| {
             try w.print("    version  {s}", .{c});
-            // It failed, did not run, or ran in a launch that is gone.
             if (t.version == null) try w.writeAll(" (no version recorded)");
             try w.writeAll("\n");
         } else if (t.tool.len > 0) unversioned += 1;
@@ -385,7 +354,6 @@ pub fn writeText(w: *std.Io.Writer, m: Methods) !void {
             try w.writeAll(if (s.rules == 1) "\n" else " each\n");
         } else try w.writeAll(", request not recorded\n");
         try w.print("    {s}: ", .{s.example});
-        // Continuation lines of a multi-line command stay indented.
         var lines = std.mem.splitScalar(u8, std.mem.trim(u8, s.command, " \n"), '\n');
         var k: usize = 0;
         while (lines.next()) |line| : (k += 1) try w.print("{s}{s}\n", .{ if (k == 0) "" else "      ", line });

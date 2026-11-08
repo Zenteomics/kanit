@@ -6,6 +6,7 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
 .workz/
   lock                              held by the running launch
   state.json                        resume state: the record of every completed rule
+  state.log                         rules completed since state.json was written
   journal                           rules started and completed, for crash recovery
   launches/
     20261107T060905.136-0b96682a/   one directory per launch
@@ -34,7 +35,7 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 
 ## state.json
 
-`state.json` is the memory of the working directory: kanit reads it at the start of every launch to decide what to reuse, and rewrites it, atomically, as rules complete. It is one line of JSON with a `format_version` and these fields:
+`state.json` is the memory of the working directory: kanit reads it, with `state.log`, at the start of every launch to decide what to reuse, and rewrites it, atomically, when a launch ends. It is one line of JSON with a `format_version` and these fields:
 
 - `rules`: for each completed rule, its key and the seven parts it was made from, its outputs with their identities and digests (`path`, `id`, `sha256`), its attempt directory, finish time and wall time.
 - `files`: the last recorded identity of every input and output path, which `explain` compares against.
@@ -44,6 +45,14 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
 
 kanit reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+
+## state.log
+
+While a launch runs, kanit appends each completed rule to `state.log` instead of rewriting `state.json`, and syncs the file to disk at most once a second, before it marks the rules done in the journal. A launch therefore writes about a kilobyte per completed rule however large the state is. Every command that reads the state applies `state.log` on top of `state.json`.
+
+The first line names the log's version, `v`, 1 in this version, and the `state.json` it extends, by its identity (`base`). Each later line holds one rule's record (`rule` and `entry`, as in `rules` above), one file identity (`file` and `id`) or one keyed environment (`env` and `text`), with paths written as in `state.json`. A last line cut short by a crash is ignored, and the next save writes over it.
+
+When a launch ends, or when the log grows past twice the size of `state.json` and at least 1 MiB, kanit rewrites `state.json` with everything and removes the log. A log whose `base` names another `state.json`, such as one replaced by an earlier kanit, which does not read `state.log`, is ignored. Deleting `state.json` makes kanit ignore the log too.
 
 ## Launch files
 
