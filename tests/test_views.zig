@@ -296,38 +296,6 @@ test "[unit] - [watch]: the selection follows the top row until a key moves it" 
     try testing.expectEqual(@as(?usize, 2), ui.selected);
 }
 
-test "[unit] - [run]: the readable summary names each failure with its last error line and the next command" {
-    var s = try Scratch.init();
-    defer s.deinit();
-    const launch = try s.dir("launch");
-    _ = try s.dir("launch/attempts");
-    _ = try s.dir("launch/attempts/align_S1");
-    _ = try s.dir("launch/attempts/align_S1/001");
-    _ = try s.dir("launch/attempts/prep");
-    _ = try s.dir("launch/attempts/prep/001");
-    _ = try s.file("launch/summary.json",
-        \\{"status":"failed","elapsed_s":3.4,"selected":4,"counts":{"completed":2,"reused":0,"failed":1,"blocked":1,"cancelled":0,"not_started":0}}
-    );
-    _ = try s.file("launch/attempts/prep/001/record.json",
-        \\{"rule":"prep","attempt":1,"status":"completed","reason":"","wall_s":1.0}
-    );
-    _ = try s.file("launch/attempts/align_S1/001/record.json",
-        \\{"rule":"align_S1","attempt":1,"status":"failed","reason":"exited with status 3","wall_s":1.2}
-    );
-    _ = try s.file("launch/attempts/align_S1/001/stderr.log", "reading index\nalign: reference index is truncated\n\n");
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var out: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer out.deinit();
-    try workz.monitor.writeSummary(testing.allocator, arena.allocator(), &out.writer, launch, false);
-    const text = out.written();
-    try testing.expect(std.mem.indexOfScalar(u8, text, 0x1b) == null);
-    try testing.expect(std.mem.startsWith(u8, text, " failed    after 3.4 s: 2 completed, 0 reused, 1 failed, 1 blocked\n"));
-    try testing.expect(std.mem.indexOf(u8, text, "\n failures  align_S1  exited with status 3\n                     | align: reference index is truncated\n") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "\n next      kanit logs align_S1") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "prep") == null);
-}
-
 test "[unit] - [run]: the text view of a launch whose engine died says it did not finish and shows nothing running" {
     var s = try Scratch.init();
     defer s.deinit();
@@ -344,19 +312,69 @@ test "[unit] - [run]: the text view of a launch whose engine died says it did no
     try testing.expect(std.mem.indexOf(u8, text, "RUNNING") == null);
 }
 
-test "[unit] - [run]: the readable summary names the rules a failure blocked" {
+fn summaryLaunch(s: *Scratch, events: []const u8, summary: ?[]const u8) ![]const u8 {
+    const launch = try s.dir("launch");
+    _ = try s.file("launch/events.jsonl", events);
+    if (summary) |text| _ = try s.file("launch/summary.json", text);
+    const wf = try s.file("launch/workflow", helpers.head ++
+        "[[rules]]\nname = \"S1__trim\"\noutput = [\"t1\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S2__trim\"\noutput = [\"t2\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S1__align\"\ninput = [\"t1\"]\noutput = [\"a1\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"S2__align\"\ninput = [\"t2\"]\noutput = [\"a2\"]\nshell = \"true\"\nmemory = \"1M\"\n" ++
+        "[[rules]]\nname = \"merge\"\ninput = [\"a1\", \"a2\"]\noutput = [\"m\"]\nshell = \"true\"\nmemory = \"1M\"\n");
+    _ = wf;
+    var buf: [512]u8 = undefined;
+    _ = try s.file("launch/launch.json", try std.fmt.bufPrint(&buf, "{{\"workdir\":\"{s}\",\"workflow\":\"{s}/workflow.toml\"}}", .{ s.path, s.path }));
+    return launch;
+}
+
+fn event(comptime at: []const u8, comptime body: []const u8) *const [41 + at.len + body.len:0]u8 {
+    return "{\"v\":1,\"time\":\"2026-01-01T00:00:" ++ at ++ ".000Z\"," ++ body ++ "}\n";
+}
+
+const summary_events = event("00", "\"event\":\"launch_started\",\"selected\":5,\"rules\":[\"S1__trim\",\"S2__trim\",\"S1__align\",\"S2__align\",\"merge\"]") ++
+    event("01", "\"event\":\"task_started\",\"rule\":\"S1__trim\",\"attempt\":1,\"directory\":\"\"") ++
+    event("02", "\"event\":\"task_finished\",\"rule\":\"S1__trim\",\"attempt\":1,\"status\":\"completed\"") ++
+    event("01", "\"event\":\"task_reused\",\"rule\":\"S2__trim\"") ++
+    event("02", "\"event\":\"task_started\",\"rule\":\"S1__align\",\"attempt\":1,\"directory\":\"\"") ++
+    event("05", "\"event\":\"task_finished\",\"rule\":\"S1__align\",\"attempt\":1,\"status\":\"completed\"") ++
+    event("02", "\"event\":\"task_started\",\"rule\":\"S2__align\",\"attempt\":1,\"directory\":\"\"") ++
+    event("03", "\"event\":\"task_finished\",\"rule\":\"S2__align\",\"attempt\":1,\"status\":\"failed\",\"reason\":\"exited with status 2: index is incomplete\"") ++
+    event("03", "\"event\":\"task_blocked\",\"rule\":\"merge\"");
+
+test "[unit] - [summary]: an ended launch shows its counts, a sample matrix, its failure, what it blocked and what to type next" {
     var s = try Scratch.init();
     defer s.deinit();
-    const launch = try s.dir("launch");
-    _ = try s.file("launch/summary.json",
-        \\{"status":"failed","elapsed_s":1,"selected":3,"counts":{"completed":1,"reused":0,"failed":1,"blocked":2},"failures":[{"rule":"align","status":"failed","reason":"exited with status 1"},{"rule":"merge","status":"blocked","reason":"blocked"},{"rule":"plot","status":"blocked","reason":"blocked"}]}
-    );
-    var arena = std.heap.ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
+    const launch = try summaryLaunch(&s, summary_events ++ event("06", "\"event\":\"launch_finished\",\"status\":\"failed\""), "{\"status\":\"failed\",\"elapsed_s\":6.0}");
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.monitor.writeSummary(testing.allocator, arena.allocator(), &out.writer, launch, false);
-    try testing.expect(std.mem.indexOf(u8, out.written(), "\n blocked   merge, plot\n") != null);
+    try workz.summary.write(testing.allocator, &out.writer, launch, .{});
+    try testing.expectEqualStrings(
+        \\          failed     3 of 5 rules done in 6.0 s: 2 completed, 1 reused, 1 failed, 1 blocked
+        \\          samples    trim  align  merge
+        \\          S1         +     +
+        \\          S2         +     x
+        \\          all                     .
+        \\                     + done   x failed   . not run
+        \\          failed     align  S2  exited with status 2: index is incomplete
+        \\          blocked    merge      after align/S2 failed
+        \\          slowest    align/S1 3.0 s   trim/S1 1.0 s
+        \\
+    , out.written()[0..std.mem.indexOf(u8, out.written(), "          records").?]);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "          next       kanit logs align/S2 ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "run again; the 3 completed rules are reused\n") != null);
+}
+
+test "[unit] - [summary]: a launch whose engine ended without recording its end reads as unfinished" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try summaryLaunch(&s, summary_events, null);
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.summary.write(testing.allocator, &out.writer, launch, .{});
+    const text = out.written();
+    try testing.expect(std.mem.startsWith(u8, text, "          unfinished 3 of 5 rules done in 5.0 s: 2 completed, 1 reused, 1 failed, 1 blocked\n"));
+    try testing.expect(std.mem.indexOf(u8, text, "          next       kanit logs align/S2") != null);
 }
 
 test "[failure] - [run]: status --history keeps a row for a launch whose summary cannot be read" {

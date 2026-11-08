@@ -12,6 +12,8 @@ const model = @import("model.zig");
 const units = @import("units.zig");
 const fields = @import("fields.zig");
 const tracker = @import("tracker.zig");
+const summary = @import("summary.zig");
+const logging = @import("log.zig");
 const Allocator = std.mem.Allocator;
 const Tracker = tracker.Tracker;
 const Status = tracker.Status;
@@ -33,15 +35,6 @@ pub fn shownPath(a: Allocator, path: []const u8) []const u8 {
     const here = sys.cwd(a) catch return path;
     const below = here.len > 1 and path.len > here.len + 1 and std.mem.startsWith(u8, path, here) and path[here.len] == '/';
     return if (below) path[here.len + 1 ..] else path;
-}
-
-fn workflowArg(gpa: Allocator, a: Allocator, launch_dir: []const u8) !?[]const u8 {
-    const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return null;
-    defer gpa.free(text);
-    const v = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always }) catch return null;
-    const path = str(v, "workflow") orelse return null;
-    const shown = shownPath(a, path);
-    return if (std.mem.eql(u8, shown, "workflow.toml")) null else shown;
 }
 
 pub fn lastLine(gpa: Allocator, a: Allocator, path: []const u8, max: usize) []const u8 {
@@ -221,195 +214,34 @@ pub fn history(gpa: Allocator, w: *std.Io.Writer, root: []const u8, n: usize) !v
     }
 }
 
-pub fn writeSummary(gpa: Allocator, a: Allocator, w: *std.Io.Writer, launch_dir: []const u8, color: bool) !void {
-    const s: term.Style = .{ .on = color };
-    const text = try sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), records.launch_record_max);
-    defer gpa.free(text);
-    const v = try std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always });
-    const outcome = str(v, "status") orelse "?";
-    const elapsed = float(v, "elapsed_s") orelse 0;
-    const counts = if (v == .object) v.object.get("counts") else null;
-    const count = struct {
-        fn of(c: ?std.json.Value, k: []const u8) u64 {
-            const o = c orelse return 0;
-            return if (int(o, k)) |n| @intCast(n) else 0;
-        }
-    }.of;
-    const completed = count(counts, "completed");
-    const reused = count(counts, "reused");
-    const failed = count(counts, "failed");
-    const blocked = count(counts, "blocked");
-    const cancelled = count(counts, "cancelled");
-    const not_started = count(counts, "not_started");
-    const selected = if (int(v, "selected")) |n| @as(u64, @intCast(n)) else 0;
-    const col = @max(outcome.len + 3, 10);
-    const label = struct {
-        fn put(wr: *std.Io.Writer, st: term.Style, width: usize, name: []const u8) !void {
-            try wr.print(" {s}{s}{s}", .{ st.dim(), name, st.reset() });
-            try wr.splatByteAll(' ', width -| name.len);
-        }
-    }.put;
-
-    const badge = if (std.mem.eql(u8, outcome, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, outcome, "interrupted") or std.mem.eql(u8, outcome, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m";
-    if (color) {
-        try w.print(" {s} {s} \x1b[0m", .{ badge, outcome });
-        try w.splatByteAll(' ', col - (outcome.len + 2));
-    } else try label(w, s, col, outcome);
-    var dur: [32]u8 = undefined;
-    var dw: std.Io.Writer = .fixed(&dur);
-    units.duration(&dw, elapsed) catch {};
-    const took = dw.buffered();
-    if (std.mem.eql(u8, outcome, "refused")) {
-        try w.print("{s}\n", .{str(v, "error") orelse ""});
-    } else if (std.mem.eql(u8, outcome, "completed")) {
-        try units.count(w, selected, "rule", "rules");
-        try w.print(" in {s}: {d} ran, {d} reused", .{ took, completed, reused });
-        if (cancelled > 0) try w.print(", {d} cancelled", .{cancelled});
-        try w.writeAll("\n");
-    } else {
-        try w.print("after {s}: {d} completed, {d} reused", .{ took, completed, reused });
-        if (failed > 0) try w.print(", {s}{d} failed{s}", .{ s.red(), failed, s.reset() });
-        if (blocked > 0) try w.print(", {d} blocked", .{blocked});
-        if (cancelled > 0) try w.print(", {d} cancelled", .{cancelled});
-        if (not_started > 0) try w.print(", {d} not started", .{not_started});
-        try w.writeAll("\n");
-        if (str(v, "error")) |e| {
-            try label(w, s, col, "error");
-            try w.print("{s}{s}{s}\n", .{ s.red(), e, s.reset() });
-        }
-    }
-
-    const rows = model.attempts(gpa, a, launch_dir, null) catch &.{};
-    var last: std.ArrayList(model.Attempt) = .empty;
-    for (rows, 0..) |r, i| {
-        if (i + 1 < rows.len and std.mem.eql(u8, rows[i + 1].rule, r.rule)) continue;
-        try last.append(a, r);
-    }
-    const max_failures = 5;
-    var failures: usize = 0;
-    var name_w: usize = 0;
-    for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
-        if (failures < max_failures) name_w = @max(name_w, @min(r.rule.len, 40));
-        failures += 1;
-    };
-    var shown: usize = 0;
-    for (last.items) |r| {
-        if (std.mem.eql(u8, r.status, "completed")) continue;
-        if (shown == max_failures) break;
-        try label(w, s, col, if (shown == 0) "failures" else "");
-        try w.print("{s}{s}{s}", .{ s.bold(), r.rule, s.reset() });
-        try w.splatByteAll(' ', name_w -| r.rule.len + 2);
-        try w.print("{s}{s}{s}\n", .{ s.red(), r.reason, s.reset() });
-        const said = if (r.dir.len == 0) "" else lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "stderr.log" }), 160);
-        if (said.len > 0 and std.mem.indexOf(u8, r.reason, said) == null) {
-            try label(w, s, col, "");
-            try w.splatByteAll(' ', name_w + 2);
-            try w.print("{s}| {s}{s}\n", .{ s.dim(), said, s.reset() });
-        }
-        for (r.diagnostics) |d| {
-            const line = lastLine(gpa, a, try std.fs.path.join(a, &.{ r.dir, "diagnostics", d }), 160);
-            if (line.len == 0 or std.mem.indexOf(u8, r.reason, line) != null) continue;
-            try label(w, s, col, "");
-            try w.splatByteAll(' ', name_w + 2);
-            try w.print("{s}| {s}: {s}{s}\n", .{ s.dim(), d, line, s.reset() });
-        }
-        shown += 1;
-    }
-    if (failures > shown) {
-        try label(w, s, col, "");
-        try w.print("and {d} more; kanit report lists every attempt\n", .{failures - shown});
-    }
-    var blocked_names: std.ArrayList([]const u8) = .empty;
-    if (get(v, "failures")) |fs| if (fs == .array) for (fs.array.items) |f| {
-        if (std.mem.eql(u8, str(f, "status") orelse "", "blocked")) if (str(f, "rule")) |name| try blocked_names.append(a, name);
-    };
-    if (blocked_names.items.len > 0) {
-        try label(w, s, col, "blocked");
-        try writeNames(w, blocked_names.items, 8);
-        try w.writeAll("\n");
-    }
-    if (shown == 0 and last.items.len > 0) {
-        std.mem.sort(model.Attempt, last.items, {}, struct {
-            fn gt(_: void, x: model.Attempt, y: model.Attempt) bool {
-                return x.wall_s > y.wall_s;
-            }
-        }.gt);
-        try label(w, s, col, "slowest");
-        for (last.items[0..@min(last.items.len, 3)], 0..) |r, i| {
-            try w.print("{s}{s} ", .{ if (i == 0) "" else ", ", r.rule });
-            try units.duration(w, r.wall_s);
-        }
-        try w.writeAll("\n");
-    }
-    const page = try std.fs.path.join(a, &.{ launch_dir, "report.html" });
-    const has_page = sys.exists(gpa, page);
-    try label(w, s, col, if (has_page) "page" else "records");
-    try w.print("{s}\n", .{shownPath(a, if (has_page) page else launch_dir)});
-    if (int(v, "previous_bytes")) |b| if (b > 0 and try keepsPrevious(gpa, a, launch_dir)) {
-        try label(w, s, col, "previous");
-        try units.size(w, @as(f64, @floatFromInt(b)) / 1048576.0);
-        try w.print(" of replaced outputs kept; {s}kanit clean --previous{s} removes them\n", .{ s.cyan(), s.reset() });
-    };
-    try label(w, s, col, "next");
-    if (std.mem.eql(u8, outcome, "completed")) {
-        try w.print("{s}kanit report --bottlenecks{s}   what limited this launch\n", .{ s.cyan(), s.reset() });
-        if (!has_page) {
-            try label(w, s, col, "");
-            try w.print("{s}kanit report --format html -o report.html{s}   the launch as one page\n", .{ s.cyan(), s.reset() });
-        }
-    } else if (std.mem.eql(u8, outcome, "refused")) {
-        var rules: std.ArrayList([]const u8) = .empty;
-        if (get(v, "changed_outputs")) |cs| if (cs == .array) for (cs.array.items) |c| {
-            const rule = str(c, "rule") orelse continue;
-            for (rules.items) |r| {
-                if (std.mem.eql(u8, r, rule)) break;
-            } else try rules.append(a, rule);
-        };
-        if (rules.items.len > 0) {
-            try w.print("{s}kanit run", .{s.cyan()});
-            if (try workflowArg(gpa, a, launch_dir)) |wf| try w.print(" {s}", .{wf});
-            for (rules.items) |r| try w.print(" --rerun-rule {s}", .{r});
-            try w.print("{s}   run {s} again; the changed bytes go to previous/\n", .{ s.reset(), if (rules.items.len == 1) "it" else "them" });
-        } else try w.writeAll("fix the cause above and run the same command again\n");
-    } else {
-        for (last.items) |r| if (!std.mem.eql(u8, r.status, "completed")) {
-            try w.print("{s}kanit logs {s}{s}   the output of the failed attempt\n", .{ s.cyan(), r.rule, s.reset() });
-            try label(w, s, col, "");
-            break;
-        };
-        try w.writeAll("run the same command again: rules that completed are reused\n");
-    }
-}
-
-pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, color: bool) !bool {
+pub fn status(gpa: Allocator, io: std.Io, dir: []const u8, human: bool, style: logging.Style) !bool {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    const summary = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), records.launch_record_max) catch |err| switch (err) {
+    if (human) {
+        var buf: [16384]u8 = undefined;
+        var out = std.Io.File.stdout().writerStreaming(io, &buf);
+        try summary.write(gpa, &out.interface, dir, style);
+        try out.interface.flush();
+        return sys.exists(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" })) or records.launchActive(gpa, dir);
+    }
+    const text = sys.readFile(gpa, try std.fs.path.join(a, &.{ dir, "summary.json" }), records.launch_record_max) catch |err| switch (err) {
         error.FileNotFound => {
-            if (human) return try watch(gpa, io, dir, true, 1000, color);
             const active = records.launchActive(gpa, dir);
             if (!active) std.debug.print("kanit: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});
             return try runningJson(gpa, dir, if (active) "running" else "unfinished") and active;
         },
         else => return err,
     };
-    defer gpa.free(summary);
-    _ = std.json.parseFromSliceLeaky(std.json.Value, a, summary, .{}) catch |err| switch (err) {
+    defer gpa.free(text);
+    _ = std.json.parseFromSliceLeaky(std.json.Value, a, text, .{}) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => {
             std.debug.print("kanit: {s}/summary.json is not valid JSON, so the launch's result cannot be shown; its events and attempt records remain\n", .{dir});
             return false;
         },
     };
-    if (human) {
-        var buf: [16384]u8 = undefined;
-        var out = std.Io.File.stdout().writerStreaming(io, &buf);
-        try writeSummary(gpa, a, &out.interface, dir, color);
-        try out.interface.flush();
-        return true;
-    }
-    try sys.writeAll(1, summary);
+    try sys.writeAll(1, text);
     return true;
 }
 
@@ -466,14 +298,4 @@ fn runningJson(gpa: Allocator, dir: []const u8, status_text: []const u8) !bool {
     try w.writer.print("{f}\n", .{std.json.fmt(doc, .{})});
     try sys.writeAll(1, w.written());
     return true;
-}
-
-fn keepsPrevious(gpa: Allocator, a: Allocator, launch_dir: []const u8) !bool {
-    const attempts = try std.fs.path.join(a, &.{ launch_dir, "attempts" });
-    for ((try sys.dirNames(gpa, a, attempts)) orelse &.{}) |rule| {
-        const rule_dir = try std.fs.path.join(a, &.{ attempts, rule });
-        for ((try sys.dirNames(gpa, a, rule_dir)) orelse &.{}) |n|
-            if (sys.exists(gpa, try std.fs.path.join(a, &.{ rule_dir, n, "previous" }))) return true;
-    }
-    return false;
 }

@@ -72,20 +72,31 @@ qc_S6                                          1     0.9 s   1.4 MiB   1.6 MiB  
 
 ## status
 
-`kanit status` prints the newest launch's summary once it has ended, or with `--launch ID` an earlier launch's. On a terminal it is the same short report `kanit run` ends with: the outcome and counts, each failed rule with its reason, which quotes the last line of its error output, the launch's page, and the commands to look further:
+`kanit status` prints the summary of the newest launch, or with `--launch ID` an earlier one's, while it runs or after it ended. On a terminal it is the same report `kanit run` ends with:
 
 ```text
-  failed   after 3.0 s: 2 completed, 0 reused, 1 failed, 1 blocked
- failures  align_S1  exited with status 3: align: reference index is truncated
- blocked   count_S1
- page      .workz/launches/20261107T060918.810-57b00e74/report.html
- next      kanit logs align_S1   the output of the failed attempt
-           run the same command again: rules that completed are reused
+          failed     7 of 10 rules done in 4.3 s: 7 completed, 1 failed, 2 blocked
+          samples    trim  align  count  matrix
+          S1         ✓     ✓      ✓
+          S2         ✓     ✗      ·
+          S3         ✓     ✓      ✓
+          all                            ·
+                     ✓ done   ✗ failed   · not run
+          failed     align   S2  exited with status 2: STAR: genome index is incomplete: missing SA file
+          blocked    count   S2  after align/S2 failed
+                     matrix      after align/S2 failed
+          slowest    align/S1 2.0 s   trim/S2 1.5 s   trim/S1 1.0 s
+          records    .workz/latest/   log launch.log   page report.html
+          next       kanit logs align/S2   the output of the failed attempt
+                     kanit run             run again; the 7 completed rules are reused
 ```
 
-A launch that completed lists its three slowest rules instead of failures. Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written.
+- The first line is the outcome and the count of each status. While the launch runs it reads `running`, with the rules running and waiting so far.
+- A launch of at least two samples shows a matrix of samples by steps: `✓` for a rule done (dim when reused), `✗` failed, `·` not run, `~` running. Rules without a sample form the `all` row. A launch without samples, or with a matrix too wide for the window, lists its steps instead, each with its tool, its counts and its slowest sample.
+- `failed` names each failed rule with its reason, which quotes the last line of its error output; `blocked` names the rules a failure blocked, with the failure that blocked them.
+- `slowest` names the three slowest rules that completed; `records` says where the launch's records, text log and page are; `next` gives the commands to look further or run again.
 
-While the launch runs, `status` prints the plain view above once on a terminal. Off it, or with `--json`, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
+Off a terminal, or with `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written. While the launch runs, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
 
 ```json
 {"engine":"kanit 0.7.0 sha256:...",...,"status":"running","counts":{"completed":10,...},...}

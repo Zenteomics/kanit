@@ -30,4 +30,5 @@ pub const schedule = @import("schedule.zig");
 pub const names = @import("names.zig");
 pub const clock = @import("clock.zig");
 pub const log = @import("log.zig");
+pub const summary = @import("summary.zig");
 pub const cli = @import("cli.zig");

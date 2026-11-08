@@ -619,7 +619,8 @@ fn cmdWatch(c: Ctx, args: []const [:0]const u8, summary: bool) !Exit {
         return .ok;
     }
     const dir = (try monitor.findLaunch(c.gpa, c.a, root, launch)) orelse return .failed;
-    const ok = if (summary) try monitor.status(c.gpa, c.io, dir, !json and term.isTerminal(1), color) else try monitor.watch(c.gpa, c.io, dir, once, interval, color);
+    const style: workz.log.Style = .{ .color = color, .marks = workz.log.marksFor(c.env), .cols = if (term.isTerminal(1)) term.size(1).cols else 0 };
+    const ok = if (summary) try monitor.status(c.gpa, c.io, dir, !json and term.isTerminal(1), style) else try monitor.watch(c.gpa, c.io, dir, once, interval, color);
     return if (ok) .ok else .failed;
 }
 

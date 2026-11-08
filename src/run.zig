@@ -19,6 +19,7 @@ const cgroup = @import("cgroup.zig");
 const naming = @import("names.zig");
 const logging = @import("log.zig");
 const clock = @import("clock.zig");
+const summary_text = @import("summary.zig");
 const container = @import("container.zig");
 const plan = @import("plan.zig");
 const model = @import("model.zig");
@@ -456,9 +457,9 @@ const Engine = struct {
 
     fn rootText(self: *Engine, root: usize) []const u8 {
         return switch (self.tasks[root].status) {
-            .failed => "which failed",
-            .cancelled => "which was cancelled",
-            else => "which did not start",
+            .failed => "failed",
+            .cancelled => "was cancelled",
+            else => "did not start",
         };
     }
 
@@ -658,7 +659,7 @@ const Engine = struct {
                 logging.thousands(w, c.count - 1) catch {};
                 w.writeAll(" more   ") catch {};
             }
-            if (c.root) |r| w.print("{s} {s}, {s}", .{ if (c.count > 1) "need" else "needs", self.names.word[r], self.rootText(r) }) catch {} else w.writeAll("needs a rule that did not complete") catch {};
+            if (c.root) |r| w.print("after {s} {s}", .{ self.names.word[r], self.rootText(r) }) catch {} else w.writeAll("after a rule it needs did not complete") catch {};
             self.say(.blocked, c.first);
         }
     }
@@ -3071,12 +3072,20 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     try writeSummary(gpa, a, &events, summary);
     engine.drawPage();
+    engine.milestones();
+    if (engine.log.sinks[1]) |file| {
+        var text: std.Io.Writer.Allocating = .init(gpa);
+        defer text.deinit();
+        try text.writer.writeAll("\n");
+        summary_text.write(gpa, &text.writer, launch.dir, .{ .marks = file.style.marks }) catch {};
+        engine.log.raw(1, text.written());
+    }
     engine.endLog();
     if (!opts.json and term.isTerminal(1)) {
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         if (engine.finished > 0 and !opts.quiet) try out.writer.writeAll("\n");
-        try monitor.writeSummary(gpa, a, &out.writer, launch.dir, opts.color and term.colorOn(1, environ));
+        try summary_text.write(gpa, &out.writer, launch.dir, .{ .color = opts.color and term.colorOn(1, environ), .marks = logging.marksFor(environ), .cols = term.size(1).cols });
         try sys.writeAll(1, out.written());
         return outcome;
     }

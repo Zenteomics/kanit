@@ -32,7 +32,7 @@ kanit 0.7.0   rnaseq-demo   launch 20261108T085933.139-20885d0a
                                  │ Mapping reads
                                  │ STAR: genome index is incomplete: missing SA file
                                  kanit logs align/S2   .workz/latest/attempts/S2__align/001/
-01:59:35  blocked    count   S2  +1 more   need align/S2, which failed
+01:59:35  blocked    count   S2  +1 more   after align/S2 failed
 01:59:35  sample             S2  1 of 3 steps completed, 1 failed, 1 blocked in 2.1 s
 01:59:37  sample             S1  all 3 steps completed in 3.8 s
 ```
@@ -45,7 +45,7 @@ kanit 0.7.0   rnaseq-demo   launch 20261108T085933.139-20885d0a
 - Off a terminal, the `started` lines are kept, and a `progress` line every five minutes carries the footer's counts.
 - `launch.log` in the launch directory keeps every line, `started` included, whole and without color, so `tail -f .workz/latest/launch.log` follows a launch from anywhere. `.workz/latest` always points to the newest launch.
 
-When the launch ends, a short summary follows on standard output. Off a terminal it is one line of JSON, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)); `--json` prints it on a terminal too.
+When the launch ends, a summary follows on standard output: the outcome and counts, a matrix of samples by steps or a list of steps, the failed rules with their reasons, the rules they blocked, the slowest rules, where the records are and what to type next. `kanit status` prints the same summary later ([status](Watching-a-Launch.md#status)), and `launch.log` keeps it at its end. Off a terminal the summary on standard output is one line of JSON, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)); `--json` prints it on a terminal too.
 
 Every launch keeps a page of its own, `report.html` in its launch directory, which a browser can keep open to follow the launch ([The HTML report](Reports.md#the-html-report)).
 
@@ -95,28 +95,28 @@ If the engine itself is killed, the process holding its network namespace detect
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-kanit 0.7.0   failures   launch 20261108T091454.543-5d92b806
+kanit 0.7.0   failures   launch 20261108T092833.628-973e323c
           plan       5 rules
           budget     4 threads, 1.0 GiB, 4 jobs, isolated
           records    .workz/latest/   log launch.log   page report.html
-02:14:55  failed     no_output  exited 0 without output d.txt
-02:14:55  failed     exits      exit 2 after 9 ms
+02:28:34  failed     exits      exit 2 after 3 ms
                                 │ sort: cannot read: samples.tsv: No such file or directory
                                 kanit logs exits   .workz/latest/attempts/exits/001/
-02:14:55  blocked    after      needs exits, which failed
-02:14:55  failed     too_big    out of memory at its 64 MiB
+02:28:34  failed     no_output  exited 0 without output d.txt
+02:28:34  blocked    after      after exits failed
+02:28:34  failed     too_big    out of memory at its 64 MiB
                                 raise its memory, or see kanit report --suggest
-02:14:57  failed     slow       timed out at 2.0 s
+02:28:36  failed     slow       timed out at 2.0 s
 
- failed    after 2.5 s: 0 completed, 0 reused, 4 failed, 1 blocked
- failures  exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
-           no_output  exited 0 without output d.txt
-           slow       timed out after 2 s
-           too_big    out of memory: could not stay within its 64 MiB request
- blocked   after
- page      .workz/launches/20261108T091454.543-5d92b806/report.html
- next      kanit logs exits   the output of the failed attempt
-           run the same command again: rules that completed are reused
+          failed     0 of 5 rules done in 2.5 s: 4 failed, 1 blocked
+          failed     exits      exited with status 2: sort: cannot read: samples.tsv: No such file or directory
+                     no_output  exited 0 without output d.txt
+                     too_big    out of memory: could not stay within its 64 MiB request
+                     slow       timed out after 2 s
+          blocked    after      after exits failed
+          records    .workz/latest/   log launch.log   page report.html
+          next       kanit logs exits   the output of the failed attempt
+                     kanit run          run again
 ```
 
 The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. A failure whose standard error or kept [diagnostics](Writing-Workflows.md#diagnostics) has lines quotes the last three and names the `kanit logs` command that shows them whole, with the attempt's directory: under `.workz/latest/` on a terminal, and under the launch's own directory off a terminal and in `launch.log`, where the path must stay true after later launches.

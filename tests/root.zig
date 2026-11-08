@@ -38,6 +38,7 @@ test {
     testing.refAllDecls(workz.names);
     testing.refAllDecls(workz.clock);
     testing.refAllDecls(workz.log);
+    testing.refAllDecls(workz.summary);
     _ = @import("test_workflow.zig");
     _ = @import("test_reuse.zig");
     _ = @import("test_engine.zig");

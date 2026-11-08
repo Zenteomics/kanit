@@ -1165,7 +1165,7 @@ new run-lines
 "$kanit" run wf.toml "${iso[@]}" -k > s.json 2> err.txt
 first_log="$(last_launch)/launch.log"
 "$kanit" run wf.toml "${iso[@]}" -k > s2.json 2> err2.txt
-check "run opens with its launch, plan, budget and records, and launch.log under .workz/latest keeps the same lines" '[ "$(sed -n 1p err.txt | cut -d" " -f1)" = kanit ] && grep -qE "^ +plan +2 rules$" err.txt && grep -qE "^ +budget +4 threads, 2.0 GiB, 4 jobs, (isolated|no isolation)$" err.txt && grep -qE "^ +records +\.workz/latest/ +log launch.log +page report.html$" err.txt && grep -qE "^[0-9]{2}:[0-9]{2}:[0-9]{2}  failed +bad +exit 4 after" err.txt && cmp -s err.txt "$first_log" && [ "$(readlink .workz/latest)" = "launches/$(basename "$(last_launch)")" ] && cmp -s err2.txt .workz/latest/launch.log && [ -s "$(last_launch)/report.html" ]'
+check "run opens with its launch, plan, budget and records, and launch.log under .workz/latest keeps the same lines and the summary" '[ "$(sed -n 1p err.txt | cut -d" " -f1)" = kanit ] && grep -qE "^ +plan +2 rules$" err.txt && grep -qE "^ +budget +4 threads, 2.0 GiB, 4 jobs, (isolated|no isolation)$" err.txt && grep -qE "^ +records +\.workz/latest/ +log launch.log +page report.html$" err.txt && grep -qE "^[0-9]{2}:[0-9]{2}:[0-9]{2}  failed +bad +exit 4 after" err.txt && head -n "$(wc -l < err.txt)" "$first_log" | cmp -s - err.txt && grep -qE "^ +failed +1 of 2 rules done in .*: 1 completed, 1 failed$" "$first_log" && [ "$(readlink .workz/latest)" = "launches/$(basename "$(last_launch)")" ] && head -n "$(wc -l < err2.txt)" .workz/latest/launch.log | cmp -s - err2.txt && [ -s "$(last_launch)/report.html" ]'
 fi
 
 # --- Terminal ---
@@ -1249,7 +1249,7 @@ new run-tty
 } > wf.toml
 sess=r1; start -s "$sess" -x 120 -y 20 "NO_COLOR=1 \"$kanit\" run wf.toml ${iso[*]} -k; echo \$? > exit.txt; sleep 30"
 wait_until 100 '[ -s exit.txt ]'
-check "on a terminal run prints a failure's last error lines, the blocked rules, no footer and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -qE "failed +bad +exit 3 after" && screen | grep -qE "^ +[|│] last-error-line" && screen | grep -qE "blocked +after +needs bad, which failed" && ! screen | grep -q " of 3 rules" && screen | grep -q "^ failed  *after .* 1 completed, 0 reused, 1 failed, 1 blocked" && screen | grep -q "^ next  *kanit logs bad" && ! screen | grep -q "{"'
+check "on a terminal run prints a failure's last error lines, the blocked rules, no footer and a readable summary" '[ "$(cat exit.txt)" = 1 ] && screen | grep -qE "failed +bad +exit 3 after" && screen | grep -qE "^ +[|│] last-error-line" && screen | grep -qE "blocked +after +after bad failed" && ! screen | grep -qE " of 3 rules   " && screen | grep -qE "^ +failed +1 of 3 rules done in .*: 1 completed, 1 failed, 1 blocked$" && screen | grep -qE "^ +next +kanit logs bad " && ! screen | grep -q "{"'
 rm -f exit.txt
 sess=r3; start -s "$sess" -x 400 -y 20 "\"$kanit\" run wf.toml ${iso[*]} -k --json --no-color; echo \$? > exit.txt; sleep 30"
 wait_until 100 '[ -s exit.txt ]'
