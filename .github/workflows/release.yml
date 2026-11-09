@@ -1,0 +1,143 @@
+# Publishes a GitHub release for an annotated vX.Y.Z tag on main's head.
+#
+# - build: the tag must name the build.zig.zon version, which needs a dated CHANGELOG.md section.
+#   The tests run in Debug and in the shipped ReleaseSafe mode, then the release package is built,
+#   unpacked and run. This job holds only a read token.
+# - publish: the tested package and its SHA256SUMS go up as a draft release with the changelog
+#   section as its notes, so a failed upload or attestation reruns against the draft; then the
+#   package is attested and the release published.
+#
+# Run by hand on main, it rehearses the build job for main's version and publishes nothing.
+name: release
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: Check, test and package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Check the tag, the version and the notes
+        id: tag
+        run: |
+          set -euo pipefail
+          version=$(bash .github/scripts/release.sh version)
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            test "$GITHUB_REF" = refs/heads/main || { echo "a rehearsal runs on main, not $GITHUB_REF" >&2; exit 1; }
+            tag="v$version"
+          else
+            tag="$GITHUB_REF_NAME"
+            kind=$(gh api "repos/$GH_REPO/git/ref/tags/$tag" --jq .object.type)
+            test "$kind" = tag || { echo "$tag is not an annotated tag" >&2; exit 1; }
+            main=$(gh api "repos/$GH_REPO/commits/main" --jq .sha)
+            test "$GITHUB_SHA" = "$main" || { echo "$tag names $GITHUB_SHA, not main's head $main" >&2; exit 1; }
+          fi
+          bash .github/scripts/release.sh notes "$tag" > /dev/null
+          printf 'tag=%s\nversion=%s\n' "$tag" "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+          use-cache: false
+
+      - name: Test in Debug
+        run: zig build test --summary all
+
+      - name: Test in ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
+      - name: Build, package and run the release binary
+        run: bash .github/scripts/release.sh package "$RUNNER_TEMP/release"
+
+      - name: Keep the package for the publish job
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release
+          path: ${{ runner.temp }}/release/*.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  publish:
+    name: Publish
+    needs: build
+    if: github.event_name == 'push'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ needs.build.outputs.tag }}
+      VERSION: ${{ needs.build.outputs.version }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the tested package
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: release
+          path: ${{ runner.temp }}/assets
+
+      - name: Write the checksums and the notes
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/assets"
+          archive="kanit-$VERSION-x86_64-linux.tar.gz"
+          test "$(ls)" = "$archive" || { echo "expected only $archive, found: $(ls)" >&2; exit 1; }
+          sha256sum "$archive" > SHA256SUMS
+          cd "$GITHUB_WORKSPACE"
+          bash .github/scripts/release.sh notes "$TAG" > "$RUNNER_TEMP/notes.md"
+
+      - name: Create or resume the draft release
+        run: |
+          set -euo pipefail
+          if draft=$(gh release view "$TAG" --json isDraft --jq .isDraft 2>/dev/null); then
+            test "$draft" = true || { echo "release $TAG is already published" >&2; exit 1; }
+          else
+            gh release create "$TAG" --draft --verify-tag --title "kanit $VERSION" --notes-file "$RUNNER_TEMP/notes.md"
+          fi
+          gh release upload "$TAG" "$RUNNER_TEMP/assets"/* --clobber
+
+      - name: Attest the package
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
+        with:
+          subject-checksums: ${{ runner.temp }}/assets/SHA256SUMS
+
+      - name: Publish the release
+        run: gh release edit "$TAG" --draft=false --latest --verify-tag
