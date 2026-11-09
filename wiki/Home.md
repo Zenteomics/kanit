@@ -33,4 +33,3 @@ flowchart LR
    - [Command reference](Command-Reference.md): every command and option, and the exit statuses.
    - [Records](Records.md): the files under `.workz/` and the event stream.
    - [Troubleshooting](Troubleshooting.md): common errors and what to do about them.
-

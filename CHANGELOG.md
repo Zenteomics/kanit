@@ -6,36 +6,49 @@ All notable changes to kanit are documented in this file. Versions up to 0.6.0 w
 
 ## [Unreleased]
 
-Large workflows run faster in less memory, a launch writes its resume state in small appends, and the run log, the summary and the inspection commands show each step and sample. Two changes need action:
+The run log becomes one aligned table by tool, step and sample, and `run`, `status` and `watch` share its columns and summary. Large workflows run in about a quarter less time and a third less memory.
 
-- `kanit run` and `kanit status` print text wherever their output goes; a script that reads their JSON adds `--json`.
-- Scripts that read the progress lines of `kanit run`, or the text of `plan`, `verify`, `clean` or `status --history`, need the new layouts, or `--json` and `events.jsonl`.
+Two changes need action:
+
+- **Add `--json` where a script reads `kanit run` or `kanit status`.** Both print text wherever their output goes.
+- **Read the new layouts, or `events.jsonl`.** The progress lines of `run` and the text of `plan`, `verify`, `clean` and `status --history` changed.
 
 ### Added
 
-- Every command and option that takes a rule also takes its step and sample as `STEP/SAMPLE`, such as `kanit logs align/S2` for the rule `S2__align`; bash completion offers both.
-- Each launch keeps its run log as text in `launch.log`, and `.workz/latest` links to the newest launch, so `tail -f .workz/latest/launch.log` follows a launch.
-- `run -v` keeps a line for every rule that starts on a terminal.
-- The run log names each rule's tool in its own column. The launch's header has a table of the steps with each one's tool, version and rule count, and the summary lists every tool's version. A host rule without a `tool` label takes the program its `version` command runs, also in reports.
-- `plan` prints one row per step and `plan --rules` one row per rule by step and sample; `plan --json`, `verify --json` and `status --history --json` print JSON.
-- `kanit logs` without a rule prints the newest launch's failed attempts; each stream opens with a line naming the rule, the attempt, how it ended and its size, and `-n N` prints the last N lines.
-- The summary that `run` ends with, and that `kanit status` prints for a running or ended launch, shows a matrix of samples by steps, or each step's counts and tool, names the failure that blocked each blocked rule, and ends with the commands to type next; `launch.log` keeps it at its end.
+- **Steps and samples**
+  - Every command and option that takes a rule also takes its step and sample as `STEP/SAMPLE`, such as `kanit logs align/S2` for the rule `S2__align`, and bash completion offers both.
+  - `plan` prints one row per step, and `plan --rules` one row per rule by step and sample.
+  - The summary that `run` ends with, and that `status` prints, shows samples by steps, names the failure behind each blocked rule, and ends with the commands to type next.
+- **Tools**
+  - The run log names each rule's tool, and the launch's header lists each step's tool, version and rule count.
+  - The summary lists every tool's version.
+  - A host rule without a `tool` label takes the program its `version` command runs, also in reports.
+- **Logs**
+  - Each launch keeps its run log in `launch.log`, with the summary at its end, and `.workz/latest` links to the newest launch.
+  - `kanit logs` without a rule prints the newest launch's failed attempts, each stream headed by the rule, attempt, outcome and size, and `-n N` prints the last N lines.
+  - `run -v` keeps a line for every rule that starts on a terminal.
+- `plan --json`, `verify --json` and `status --history --json` print JSON.
 
 ### Changed
 
-- The run log is one table: under a column header, a row per event with the local time, the rules done of those selected, a status tag (`START`, `DONE`, `RETRY`, `FAIL`, `BLOCK`, `STOP`, and `INFO` or `WARN` for shared inputs, commands and problems), the rule's tool, step and sample, the time it took, its memory and CPU against its request, and a note. The column widths are set from every selected rule when the launch starts, so the rows stay aligned, and on a terminal no line is wider than the window. `-q` keeps the column header above the failures it prints. The log opens with the launch's steps, tools and samples, names each failure's reason in a few words with the command that shows its output, and reports the rules a failure blocks once. On a terminal the `START` rows are left out and a footer shows a row per step with its tool, a bar and its rules done, then the counts and the running rules; off a terminal the same table follows an `INFO` row of the counts every five minutes. The summary counts the rules done, reused, failed, blocked and stopped. Scripts that read the old `[N/M] verb` lines need the new layout or `events.jsonl`.
-- The text tables of `report --bottlenecks`, `report --compare` and the sizing suggestions make their step, sample, category, tool and shared-input columns as wide as the longest name, up to 30 columns, instead of always 30.
-- `kanit watch` shows a launch in the run log's columns, tags, units and marks: under its gauges, the table of the steps, then a row per rule with its `RUN`, `WAIT`, `DONE`, `FAIL` or other tag, its tool, step and sample, its time, memory and CPU, and a note that says what a waiting rule waits for and which failure blocked a rule. `watch --once`, and a watch whose output is not a terminal, print the same view as text.
-- On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.
-- On a launch of 20,000 rules, `status` takes about a third less time, `watch` a fifth less, and `report --bottlenecks`, `report --format html` and a rerun that reuses every rule a tenth less: kanit reads an event line that is a flat object without building a JSON tree, and `run` reads its launch once for the summary it prints and keeps in `launch.log`.
-- With isolation, the engine reaches each attempt's cgroup through one open directory and reads its counters with fewer system calls: on 2,000 short rules it uses about 5% less CPU and a fifth less memory. The recorded counters are unchanged.
-- Version commands run before the first rule, at most four at a time, for every selected rule, reused ones included; kanit waits at most 5 s for them, and slower ones go on beside the rules. A container's version that an earlier launch recorded for the same image ID is taken without starting the container.
-- A launch appends each completed rule to `.workz/state.log`, synced at most once a second, instead of rewriting `state.json`; `state.json` is rewritten when the launch ends. kanit 0.7.0 ignores the log and reruns the rules recorded only there.
+- **The run log**
+  - It is one table of the time, the rules done, a tag (`START`, `DONE`, `RETRY`, `FAIL`, `BLOCK`, `STOP`, `INFO` or `WARN`), the tool, step and sample, the time taken, memory and CPU against the request, and a note.
+  - Its columns are sized from every selected rule when the launch starts, and on a terminal no line is wider than the window.
+  - It opens with the launch's steps, tools and samples, names each failure's reason with the command that shows its output, and reports the rules a failure blocks once.
+  - On a terminal a footer shows each step's progress in place of `START` rows; off a terminal the step table follows an `INFO` row of the counts every five minutes.
+  - `-q` keeps the column header above the failures it prints, and the summary counts the rules done, reused, failed, blocked and stopped.
+- **Speed and memory**
+  - On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` a third less time and a fifth less memory.
+  - On a launch of 20,000 rules, `status` takes about a third less time, `watch` a fifth less, and `report --bottlenecks`, `report --format html` and a rerun that reuses every rule a tenth less.
+  - With isolation, on 2,000 short rules, the engine uses about 5% less CPU and a fifth less memory and records the same counters.
+- `kanit watch` shows the run log's columns, tags and units: the step table, then a row per rule whose note says what a waiting rule waits for and which failure blocked a rule; `watch --once`, and a watch off a terminal, print it as text.
+- The text tables of `report --bottlenecks`, `report --compare` and the sizing suggestions make their name columns as wide as the longest name, up to 30 columns.
+- Version commands run before the first rule, at most four at a time, for every selected rule; kanit waits at most 5 s for them, and takes a container's version that an earlier launch recorded for the same image ID.
+- A launch appends each completed rule to `.workz/state.log`, synced at most once a second, and rewrites `state.json` when it ends; kanit 0.7.0 ignores the log and reruns the rules recorded only there.
 
 ### Fixed
 
 - `kanit watch` counts blocked rules as blocked, not as failed, and a view started before its launch wrote its records shows the launch's names once they are written.
-
 - `report --format html` and the launch page draw a launch whose `launch_started` event selects none of the rules that ran, instead of stopping on an index out of bounds.
 
 ## [0.7.0] - 2026-11-06

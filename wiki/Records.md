@@ -245,4 +245,3 @@ To cite a run, in a lab notebook or a methods section, note its launch ID and ke
 - `attempts/RULE/NNN/`, each attempt's command, request, record, standard output and standard error.
 
 `kanit report --methods` turns these records into a description of what produced the results ([Reports](Reports.md#methods)); give each rule a `tool` label and a `version` command so it can name them. `kanit report --format json` lists every attempt's measures in one file.
-
