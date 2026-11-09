@@ -1,0 +1,72 @@
+# Tests every change to what is built, on the one supported target, Linux x86-64: the format, the
+# unit tests in Debug and in the shipped ReleaseSafe mode, and the release package, built, unpacked
+# and run as a user would. Changes to the guide and other text run nothing here.
+name: ci
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".zig-version"
+      - "LICENSE"
+      - "THIRD_PARTY.md"
+      - ".github/workflows/ci.yml"
+      - ".github/scripts/release.sh"
+  pull_request:
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "build.zig"
+      - "build.zig.zon"
+      - ".zig-version"
+      - "LICENSE"
+      - "THIRD_PARTY.md"
+      - ".github/workflows/ci.yml"
+      - ".github/scripts/release.sh"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  test:
+    name: Test and package (Linux x86-64)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29
+        with:
+          version: 0.16.0
+
+      - name: Check the Zig version and the format
+        run: |
+          set -euo pipefail
+          test "$(zig version)" = "$(cat .zig-version)"
+          zig fmt --check build.zig build.zig.zon src tests
+
+      - name: Test in Debug
+        run: zig build test --summary all
+
+      - name: Test in ReleaseSafe
+        run: zig build test -Doptimize=ReleaseSafe --summary all
+
+      - name: Build, package and run the release binary
+        run: bash .github/scripts/release.sh package "$RUNNER_TEMP/release"
