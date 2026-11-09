@@ -9,6 +9,7 @@
     <a href="https://ziglang.org/download/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat-square&amp;logo=zig&amp;logoColor=white" alt="Zig 0.16.0"></a>
     <a href="https://github.com/zenteomics/kanit/wiki/Installation"><img src="https://img.shields.io/badge/Linux-x86--64%20%7C%20cgroup%20v2-1793D1?style=flat-square&amp;logo=linux&amp;logoColor=white" alt="Linux x86-64 with cgroup v2"></a>
     <a href="#status"><img src="https://img.shields.io/badge/status-development-C17D10?style=flat-square" alt="Status: development"></a>
+    <a href="https://github.com/zenteomics/kanit/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zenteomics/kanit/ci.yml?branch=main&amp;style=flat-square&amp;label=build" alt="Build status"></a>
     <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-4B9D6E?style=flat-square" alt="Apache-2.0 License"></a>
   </p>
   <p>
@@ -124,6 +125,8 @@ The [user guide](https://github.com/zenteomics/kanit/wiki/Home) follows a workfl
 ## Status
 
 kanit is in development, and its current version is 0.7.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the [changelog](CHANGELOG.md) says first what each change needs from you. Versions up to 0.6.0 were released as workz, whose names remain in `.workz/`, the `WORKZ_` variables and the Zig module `workz`.
+
+Issues are welcome on [GitHub](https://github.com/zenteomics/kanit/issues); open one before a pull request, so the change can be agreed first.
 
 ## License
 
