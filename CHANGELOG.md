@@ -24,12 +24,15 @@ Large workflows run faster in less memory, a launch writes its resume state in s
 ### Changed
 
 - The run log is one table: under a column header, a row per event with the local time, the rules done of those selected, a status tag (`START`, `DONE`, `RETRY`, `FAIL`, `BLOCK`, `STOP`, and `INFO` or `WARN` for shared inputs, commands and problems), the rule's tool, step and sample, the time it took, its memory and CPU against its request, and a note. The column widths are set from every selected rule when the launch starts, so the rows stay aligned, and on a terminal no line is wider than the window. `-q` keeps the column header above the failures it prints. The log opens with the launch's steps, tools and samples, names each failure's reason in a few words with the command that shows its output, and reports the rules a failure blocks once. On a terminal the `START` rows are left out and a footer shows a row per step with its tool, a bar and its rules done, then the counts and the running rules; off a terminal the same table follows an `INFO` row of the counts every five minutes. The summary counts the rules done, reused, failed, blocked and stopped. Scripts that read the old `[N/M] verb` lines need the new layout or `events.jsonl`.
+- `kanit watch` shows a launch in the run log's columns, tags, units and marks: under its gauges, the table of the steps, then a row per rule with its `RUN`, `WAIT`, `DONE`, `FAIL` or other tag, its tool, step and sample, its time, memory and CPU, and a note that says what a waiting rule waits for and which failure blocked a rule. `watch --once`, and a watch whose output is not a terminal, print the same view as text.
 - On a workflow of 20,000 rules, a launch takes about a quarter less time and a third less memory, and `validate` and `plan` take a third less time and a fifth less memory.
 - With isolation, the engine reaches each attempt's cgroup through one open directory and reads its counters with fewer system calls: on 2,000 short rules it uses about 5% less CPU and a fifth less memory. The recorded counters are unchanged.
 - Version commands run before the first rule, at most four at a time, for every selected rule, reused ones included; kanit waits at most 5 s for them, and slower ones go on beside the rules. A container's version that an earlier launch recorded for the same image ID is taken without starting the container.
 - A launch appends each completed rule to `.workz/state.log`, synced at most once a second, instead of rewriting `state.json`; `state.json` is rewritten when the launch ends. kanit 0.7.0 ignores the log and reruns the rules recorded only there.
 
 ### Fixed
+
+- `kanit watch` counts blocked rules as blocked, not as failed, and a view started before its launch wrote its records shows the launch's names once they are written.
 
 - `report --format html` and the launch page draw a launch whose `launch_started` event selects none of the rules that ran, instead of stopping on an index out of bounds.
 

@@ -145,11 +145,11 @@ Runs the selected rules that are not reusable. The run log goes to standard erro
 kanit watch [WORKFLOW] [--once] [--interval MS] [--launch ID] [--no-color]
 ```
 
-Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([keys](Watching-a-Launch.md#keys)); otherwise it prints a plain view every interval until the launch ends, and with `--once` it prints one. A launch whose engine ended without recording its end shows as `unfinished`, and `watch` exits 1.
+Shows the newest launch, or `--launch ID`. On a terminal it is interactive ([keys](Watching-a-Launch.md#keys)); otherwise it prints the same view as text every interval until the launch ends, and with `--once` it prints one. A launch whose engine ended without recording its end shows as `unfinished`, and `watch` exits 1.
 
 | Option       | Argument | Default | Meaning                          |
 | ------------ | -------- | ------- | -------------------------------- |
-| `--once`     |          | off     | print one plain view and exit    |
+| `--once`     |          | off     | print the view once as text      |
 | `--interval` | MS       | 1000    | refresh period, at least 100     |
 | `--launch`   | ID       | newest  | the launch to show               |
 | `--no-color` |          | off     | no colors on a terminal          |

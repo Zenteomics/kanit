@@ -1106,7 +1106,7 @@ wait_until 50 'grep -qs working .workz/launches/*/attempts/w/001/stderr.log'
 ctl_rc=$?
 wait $runner
 check "status --json describes a running launch, and control refuses a rule it does not run" 'jq -e ".status == \"running\" and .counts.running == 1 and (.counts | has(\"not_started\")) and .finished == null and .failures == [] and .changed_outputs == [] and .engine_key == 4 and (.engine | startswith(\"kanit \"))" running.json > /dev/null && [ $ctl_rc = 1 ] && grep -q "rule nosuch is not part of the running launch" ctl.txt'
-check "watch shows the running rule with its memory and last output" 'grep -q "^w " view.txt && grep -q working view.txt && grep -q " [KMG]iB" view.txt'
+check "watch --once shows the running rule with its memory and last output, in the run log's columns" 'grep -qE "^  RUN +w " view.txt && grep -q working view.txt && grep -qE "[0-9] [KMG]iB / +64 MiB" view.txt && grep -qE "^  STATUS  STEP" view.txt'
 
 new logs-command
 { header logs
@@ -1209,9 +1209,9 @@ new watch-tty
 runner=$!
 wait_until 50 '[ -d .workz/launches ]'
 sess=w1; start -s "$sess" -x 100 -y 14 "NO_COLOR=1 \"$kanit\" watch -d . --interval 200; echo \$? > exit.txt; stty -a > stty.txt"
-check "the interactive view lists the running rule first with its last output and the reservations" 'wait_for "running  *slow .*to-stderr" && screen | grep -q "1/4 reserved" && screen | grep -q "64M/2.0G reserved"'
+check "the interactive view lists the running rule first with its last output and the reservations" 'wait_for "RUN  *slow .*to-stderr" && screen | grep -q "1 of 4 reserved" && screen | grep -q "64 MiB of 2.0 GiB reserved"'
 tm send-keys -t "$sess" Enter
-check "enter follows the selected attempt's standard error, and o switches to standard output" 'wait_for "slow .*attempt 1  running  stderr" && screen | grep -q "^to-stderr" && tm send-keys -t "$sess" o && wait_for "^to-stdout"'
+check "enter follows the selected attempt's standard error, and o switches to standard output" 'wait_for "slow .*attempt 1  RUN  stderr" && screen | grep -q "^to-stderr" && tm send-keys -t "$sess" o && wait_for "^to-stdout"'
 tm send-keys -t "$sess" q t
 check "t shows the timeline" 'wait_for "slow  *>>>"'
 wait $runner
@@ -1241,11 +1241,11 @@ new watch-control
 runner=$!
 wait_until 50 '[ -d .workz/launches ]'
 sess=w4; start -s "$sess" -x 120 -y 16 "NO_COLOR=1 \"$kanit\" watch -d . --interval 200; echo \$? > exit.txt"
-check "the view lists a rule that has yet to start as pending" 'wait_for "pending  *after"'
+check "the view lists a rule that has yet to start as waiting for its producer" 'wait_for "WAIT  *after .*after long"'
 tm send-keys -t "$sess" / l o n g Enter
-check "/ keeps the rules whose name matches" 'wait_for "running  *long" && ! screen | grep -q "pending  *after"'
+check "/ keeps the rules whose name matches" 'wait_for "RUN  *long" && ! screen | grep -q "WAIT  *after"'
 tm send-keys -t "$sess" i
-check "i shows the selected rule's request and live counters" 'wait_for "request  *1 threads, 64M" && screen | grep -q "^  memory  "'
+check "i shows the selected rule's request and live counters" 'wait_for "request  *1 thread, 64 MiB" && screen | grep -q "^  memory  "'
 tm send-keys -t "$sess" S
 wait $runner
 check "S stops the selected running rule through the control file" 'jq -e "select(.event == \"control\" and .command == \"stop\" and .rule == \"long\")" "$(last_launch)/events.jsonl" > /dev/null && [ "$(status_of s.json cancelled)" = 1 ]'

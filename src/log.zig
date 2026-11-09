@@ -91,10 +91,10 @@ pub const Word = enum {
 
 /// The width of the labels of the header and the summary.
 pub const label_width = 11;
-const status_width = 6;
+pub const status_width = 6;
 const time_width = 8;
-const gap = "  ";
-const took_width = 7;
+pub const gap = "  ";
+pub const took_width = 7;
 
 pub const Table = struct {
     total: usize = 0,
@@ -144,11 +144,11 @@ pub const Table = struct {
         return f;
     }
 
-    fn memoryColumn(t: Table) usize {
+    pub fn memoryColumn(t: Table) usize {
         return 2 * t.memory + 3;
     }
 
-    fn cpuColumn(t: Table) usize {
+    pub fn cpuColumn(t: Table) usize {
         return t.cores + 3 + t.threads;
     }
 
@@ -191,11 +191,11 @@ pub const Style = struct {
         return s.table.nameColumn();
     }
 
-    fn on(s: Style, code: []const u8) []const u8 {
+    pub fn on(s: Style, code: []const u8) []const u8 {
         return if (s.color) code else "";
     }
 
-    fn off(s: Style) []const u8 {
+    pub fn off(s: Style) []const u8 {
         return if (s.color) "\x1b[0m" else "";
     }
 };
@@ -204,7 +204,7 @@ pub fn timeText(buf: *[8]u8, c: clock.Civil) []const u8 {
     return std.fmt.bufPrint(buf, "{d:0>2}:{d:0>2}:{d:0>2}", .{ c.hour, c.minute, c.second }) catch unreachable;
 }
 
-fn pad(w: *Writer, text: []const u8, width: usize) !void {
+pub fn pad(w: *Writer, text: []const u8, width: usize) !void {
     try w.writeAll(text);
     try w.splatByteAll(' ', width -| names.columns(text));
 }
@@ -278,7 +278,7 @@ fn fitLines(w: *Writer, s: Style, text: []const u8) !void {
 }
 
 /// The columns `text` takes on a terminal, without its escape sequences.
-fn visible(text: []const u8) usize {
+pub fn visible(text: []const u8) usize {
     var n: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
@@ -300,17 +300,25 @@ fn lead(w: *Writer, s: Style, time: []const u8, done: usize) !void {
     try w.writeAll(gap);
 }
 
-fn right(w: *Writer, text: []const u8, width: usize) !void {
+pub fn right(w: *Writer, text: []const u8, width: usize) !void {
     try w.splatByteAll(' ', width -| names.columns(text));
     try w.writeAll(text);
 }
 
 fn row(w: *Writer, s: Style, time: []const u8, done: usize, word: Word, who: Who, f: Figures, note: []const u8) !void {
-    const t = s.table;
     try lead(w, s, time, done);
     try w.writeAll(s.on(word.tint()));
     try pad(w, word.tag(), status_width);
     try w.print("{s}{s}", .{ s.off(), gap });
+    try whoCells(w, s, who);
+    try figureCells(w, s, f);
+    try w.writeAll(note);
+}
+
+/// The columns that name a rule: its tool, step and sample, each followed
+/// by the gap. `watch` writes its rows with them too.
+pub fn whoCells(w: *Writer, s: Style, who: Who) !void {
+    const t = s.table;
     if (t.tool > 0) {
         try w.writeAll(s.on("\x1b[2m"));
         try fit(w, s, who.tool, t.tool);
@@ -323,44 +331,42 @@ fn row(w: *Writer, s: Style, time: []const u8, done: usize, word: Word, who: Who
         try fit(w, s, who.sample, t.sample);
         try w.writeAll(gap);
     }
+}
+
+/// The time, memory and CPU columns, each followed by the gap; memory and
+/// CPU only when the table keeps its figures.
+pub fn figureCells(w: *Writer, s: Style, f: Figures) !void {
+    const t = s.table;
     var tb: [32]u8 = undefined;
     var tw: Writer = .fixed(&tb);
     if (f.took_s) |sec| units.duration(&tw, sec) catch {};
     try right(w, tw.buffered(), took_width);
     try w.writeAll(gap);
-    if (t.figures) {
-        if (f.request_mib) |req| {
-            var ub: [32]u8 = undefined;
-            var uw: Writer = .fixed(&ub);
-            if (f.used_mib) |m| units.size(&uw, m) catch {} else uw.writeAll("-") catch {};
-            try right(w, uw.buffered(), t.memory);
-            try w.writeAll(" / ");
-            var rb: [32]u8 = undefined;
-            var rw: Writer = .fixed(&rb);
-            units.size(&rw, @floatFromInt(req)) catch {};
-            try right(w, rw.buffered(), t.memory);
-        } else try w.splatByteAll(' ', t.memoryColumn());
-        try w.writeAll(gap);
-        if (f.threads) |n| {
-            var cb: [32]u8 = undefined;
-            try right(w, if (f.cores) |c| std.fmt.bufPrint(&cb, "{d:.1}", .{c}) catch "" else "-", t.cores);
-            try w.print(" / {d}", .{n});
-            try w.splatByteAll(' ', t.threads -| digits(n));
-        } else try w.splatByteAll(' ', t.cpuColumn());
-        try w.writeAll(gap);
-    }
-    try w.writeAll(note);
+    if (!t.figures) return;
+    if (f.request_mib) |req| {
+        var ub: [32]u8 = undefined;
+        var uw: Writer = .fixed(&ub);
+        if (f.used_mib) |m| units.size(&uw, m) catch {} else uw.writeAll("-") catch {};
+        try right(w, uw.buffered(), t.memory);
+        try w.writeAll(" / ");
+        var rb: [32]u8 = undefined;
+        var rw: Writer = .fixed(&rb);
+        units.size(&rw, @floatFromInt(req)) catch {};
+        try right(w, rw.buffered(), t.memory);
+    } else try w.splatByteAll(' ', t.memoryColumn());
+    try w.writeAll(gap);
+    if (f.threads) |n| {
+        var cb: [32]u8 = undefined;
+        try right(w, if (f.cores) |c| std.fmt.bufPrint(&cb, "{d:.1}", .{c}) catch "" else "-", t.cores);
+        try w.print(" / {d}", .{n});
+        try w.splatByteAll(' ', t.threads -| digits(n));
+    } else try w.splatByteAll(' ', t.cpuColumn());
+    try w.writeAll(gap);
 }
 
-pub fn columnHeader(w: *Writer, s: Style) !void {
+/// The header of `whoCells`.
+pub fn whoHeader(w: *Writer, s: Style) !void {
     const t = s.table;
-    try w.writeAll(s.on("\x1b[1m"));
-    try pad(w, "TIME", time_width);
-    try w.writeAll(gap);
-    try right(w, "RULES", t.done);
-    try w.writeAll(gap);
-    try pad(w, "STATUS", status_width);
-    try w.writeAll(gap);
     if (t.tool > 0) {
         try pad(w, "TOOL", t.tool);
         try w.writeAll(gap);
@@ -371,6 +377,11 @@ pub fn columnHeader(w: *Writer, s: Style) !void {
         try pad(w, "SAMPLE", t.sample);
         try w.writeAll(gap);
     }
+}
+
+/// The header of `figureCells`.
+pub fn figureHeader(w: *Writer, s: Style) !void {
+    const t = s.table;
     try right(w, "TOOK", took_width);
     try w.writeAll(gap);
     if (t.figures) {
@@ -379,6 +390,18 @@ pub fn columnHeader(w: *Writer, s: Style) !void {
         try right(w, "CPU", t.cpuColumn());
         try w.writeAll(gap);
     }
+}
+
+pub fn columnHeader(w: *Writer, s: Style) !void {
+    try w.writeAll(s.on("\x1b[1m"));
+    try pad(w, "TIME", time_width);
+    try w.writeAll(gap);
+    try right(w, "RULES", s.table.done);
+    try w.writeAll(gap);
+    try pad(w, "STATUS", status_width);
+    try w.writeAll(gap);
+    try whoHeader(w, s);
+    try figureHeader(w, s);
     try w.print("NOTE{s}\n", .{s.off()});
 }
 
@@ -693,7 +716,7 @@ fn countWidth(p: Progress) usize {
 
 /// Writes `text` cut to `cols` visible columns, skipping escape sequences,
 /// so that no line on a terminal wraps.
-fn clipped(w: *Writer, s: Style, text: []const u8, cols: usize) !void {
+pub fn clipped(w: *Writer, s: Style, text: []const u8, cols: usize) !void {
     var n: usize = 0;
     var i: usize = 0;
     while (i < text.len) {
@@ -717,7 +740,7 @@ fn clipped(w: *Writer, s: Style, text: []const u8, cols: usize) !void {
 /// The step table, at most `room` rows: every step when they fit, else the
 /// steps still running or with failures and one row counting the rest.
 /// Each row ends with a newline and is cut to `width` when it is set.
-fn stepTable(w: *Writer, s: Style, p: Progress, indent: usize, room: usize, width: ?usize) !usize {
+pub fn stepTable(w: *Writer, s: Style, p: Progress, indent: usize, room: usize, width: ?usize) !usize {
     const count_w = countWidth(p);
     const all = p.steps.len <= room;
     var shown: usize = 0;

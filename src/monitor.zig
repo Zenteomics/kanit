@@ -7,6 +7,7 @@ const sys = @import("sys.zig");
 const records = @import("records.zig");
 const cgroup = @import("cgroup.zig");
 const tui = @import("tui.zig");
+const log = @import("log.zig");
 const term = @import("term.zig");
 const model = @import("model.zig");
 const units = @import("units.zig");
@@ -25,11 +26,6 @@ const float = fields.float;
 
 fn seconds(ns: i128) f64 {
     return @as(f64, @floatFromInt(@max(ns, 0))) / 1e9;
-}
-
-fn memory(w: *std.Io.Writer, width: usize, n: ?u64) !void {
-    const v = n orelse return w.print("{s:>[1]}", .{ "-", width });
-    try units.right(w, width, units.size, .{@as(f64, @floatFromInt(v)) / 1048576.0});
 }
 
 pub fn shownPath(a: Allocator, path: []const u8) []const u8 {
@@ -66,73 +62,6 @@ pub fn lastOutput(gpa: Allocator, a: Allocator, dir: []const u8, max: usize) []c
     return lastLine(gpa, a, std.fs.path.join(a, &.{ dir, "stdout.log" }) catch return "", max);
 }
 
-pub fn render(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, now_ns: i128, alive: bool) !void {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    try w.print("launch {s}  ", .{t.launch});
-    if (t.finished) {
-        try w.print("{s}", .{t.final_status});
-        if (t.final_error.len > 0) try w.print(": {s}", .{t.final_error});
-    } else if (!alive) {
-        try w.writeAll("unfinished: its engine ended without recording its end");
-    } else {
-        if (t.started_ns == 0) try w.writeAll("running, started at an unknown time") else {
-            try w.writeAll("running for ");
-            try units.duration(w, seconds(now_ns - t.started_ns));
-        }
-    }
-    if (t.unreadable_lines > 0) try w.print("\n{d} {s} of events.jsonl could not be read and {s} left out", .{ t.unreadable_lines, if (t.unreadable_lines == 1) "line" else "lines", if (t.unreadable_lines == 1) "is" else "are" });
-    try w.print("\n{d} selected:", .{t.selected});
-    for (std.enums.values(Status)) |s| {
-        const k = t.count(s);
-        if (k > 0) try w.print(" {d} {s},", .{ k, s.label() });
-    }
-    try w.print(" {d} done\n", .{t.count(.completed) + t.count(.reused)});
-    for (t.shared.items) |s| try w.print("shared {s}: {s}\n", .{ s.name, s.state });
-
-    if (!t.finished and alive) {
-        try w.writeAll("\nRUNNING                                      ATT   ELAPSED   MEM NOW  MEM PEAK  LAST OUTPUT\n");
-        var shown: usize = 0;
-        for (t.rules.items) |r| {
-            if (!r.status.active()) continue;
-            shown += 1;
-            try w.print("{f} {d:>3}  ", .{ units.field(r.shown, 44), r.attempt });
-            try units.right(w, 8, units.duration, .{seconds(now_ns - r.started_ns)});
-            try w.writeAll("  ");
-            try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.current") else null);
-            try w.writeAll("  ");
-            try memory(w, 8, if (r.cg) |cg| cgroup.readNumber(gpa, cg, "memory.peak") else null);
-            try w.print("  {s}\n", .{lastOutput(gpa, a, r.dir, 60)});
-        }
-        if (shown == 0) try w.writeAll("(none)\n");
-    }
-
-    var failures: usize = 0;
-    for (t.rules.items) |r| {
-        if (r.status != .failed) continue;
-        if (failures == 0) try w.writeAll("\nFAILED\n");
-        failures += 1;
-        if (failures > 10) continue;
-        try w.print("{s}: {s}", .{ r.shown, r.reason });
-        if (r.dir.len > 0) try w.print("  ({s}/stderr.log)", .{shownPath(a, r.dir)});
-        try w.writeAll("\n");
-    }
-    if (failures > 10) try w.print("... and {d} more\n", .{failures - 10});
-    var blocked: std.ArrayList([]const u8) = .empty;
-    for (t.rules.items) |r| if (r.status == .blocked) try blocked.append(a, r.shown);
-    if (blocked.items.len > 0) {
-        try w.writeAll("\nBLOCKED\n");
-        try writeNames(w, blocked.items, 10);
-        try w.writeAll("\n");
-    }
-}
-
-fn writeNames(w: *std.Io.Writer, names: []const []const u8, most: usize) !void {
-    for (names[0..@min(names.len, most)], 0..) |n, i| try w.print("{s}{s}", .{ if (i == 0) "" else ", ", n });
-    if (names.len > most) try w.print(" and {d} more", .{names.len - most});
-}
-
 pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]const u8) !?[]const u8 {
     const rec = try records.recordsDir(a, root);
     if (launch) |id| {
@@ -147,23 +76,24 @@ pub fn findLaunch(gpa: Allocator, a: Allocator, root: []const u8, launch: ?[]con
     };
 }
 
-pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_ms: u64, color: bool) !bool {
+pub fn watch(gpa: Allocator, io: std.Io, dir: []const u8, once: bool, interval_ms: u64, style: log.Style) !bool {
     var tr = try Tracker.init(gpa, dir);
     defer tr.deinit();
-    var names_arena = std.heap.ArenaAllocator.init(gpa);
-    defer names_arena.deinit();
-    const shown: ?naming.Names = naming.ofLaunch(gpa, names_arena.allocator(), dir);
-    if (shown) |*n| tr.names = n;
-    if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tr, interval_ms, color);
+    var late: tui.Late = .{};
+    defer late.deinit();
+    late.read(gpa, &tr, dir);
+    if (!once and term.isTerminal(0) and term.isTerminal(1)) return tui.run(gpa, &tr, &late, interval_ms, style.color, style.marks);
     const tty = term.isTerminal(1);
     var obuf: [16384]u8 = undefined;
     var out = std.Io.File.stdout().writerStreaming(io, &obuf);
     while (true) {
         _ = try tr.update();
+        late.read(gpa, &tr, dir);
         var alive = tr.finished or records.launchActive(gpa, dir);
         if (!alive) alive = (try tr.update()) and tr.finished;
         if (tty and !once) try out.interface.writeAll("\x1b[H\x1b[2J");
-        try render(gpa, &out.interface, &tr, sys.realNs(), alive);
+        if (!alive) tr.markUnfinished();
+        try tui.snapshot(gpa, &out.interface, &tr, &late.links, if (style.cols > 0) style.cols else 120, style.color, style.marks, sys.realNs());
         try out.interface.flush();
         if (!alive) {
             std.debug.print("kanit: launch {s} did not finish: its engine ended without recording its end\n", .{std.fs.path.basename(dir)});

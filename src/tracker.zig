@@ -3,8 +3,8 @@
 //! samples and the waits for resource groups. The stream is read
 //! incrementally: an update parses only the complete lines appended since
 //! the previous one. The live views and the reports both build on it. Given
-//! the launch's names (`names.zig`), each rule also carries the step and
-//! sample word the views show.
+//! the launch's names (`names.zig`), each rule also carries the tool, step
+//! and sample the views show.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -46,6 +46,11 @@ pub const Status = enum {
 pub const RuleView = struct {
     name: []const u8,
     shown: []const u8 = "",
+    tool: []const u8 = "",
+    step: []const u8 = "",
+    sample: []const u8 = "",
+    /// The rule's step in the launch's names, when they are known.
+    step_index: ?u32 = null,
     status: Status = .waiting,
     attempt: u32 = 0,
     shared: []const []const u8 = &.{},
@@ -107,6 +112,11 @@ pub const Tracker = struct {
 
     launch: []const u8 = "",
     workdir_name: []const u8 = "",
+    /// The workflow's name, for the views' titles, and whether the launch
+    /// held its rules to their requests.
+    workflow_name: []const u8 = "",
+    isolated: bool = true,
+    launch_read: bool = false,
     selected: u32 = 0,
     started_ns: i128 = 0,
     launch_ns: i128 = 0,
@@ -141,15 +151,45 @@ pub const Tracker = struct {
         const a = t.arena.allocator();
         t.events_path = try std.fs.path.join(a, &.{ launch_dir, "events.jsonl" });
         t.launch = try a.dupe(u8, std.fs.path.basename(launch_dir));
-        if (sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20)) |text| {
-            defer gpa.free(text);
-            if (std.json.parseFromSliceLeaky(std.json.Value, a, text, .{ .allocate = .alloc_always })) |v| {
-                if (str(v, "workdir")) |wd| t.workdir_name = std.fs.path.basename(wd);
-                if (str(v, "engine")) |e| t.engine = e;
-                t.engine_key = int(v, "engine_key");
-            } else |_| {}
-        } else |_| {}
+        _ = t.readLaunch();
         return t;
+    }
+
+    /// Reads the launch's `launch.json`, which a launch writes just after
+    /// its directory; a view that started first reads it again until it
+    /// exists. The file is parsed in a scratch arena and only its fields
+    /// are kept, so a failed read keeps nothing. Returns whether it was read.
+    pub fn readLaunch(self: *Tracker) bool {
+        var scratch = std.heap.ArenaAllocator.init(self.gpa);
+        defer scratch.deinit();
+        const s = scratch.allocator();
+        const dir = std.fs.path.dirname(self.events_path) orelse return false;
+        const path = std.fs.path.join(s, &.{ dir, "launch.json" }) catch return false;
+        const text = sys.readFile(self.gpa, path, 1 << 20) catch return false;
+        defer self.gpa.free(text);
+        const v = std.json.parseFromSliceLeaky(std.json.Value, s, text, .{}) catch return false;
+        const a = self.arena.allocator();
+        if (str(v, "workdir")) |wd| self.workdir_name = a.dupe(u8, std.fs.path.basename(wd)) catch "";
+        if (str(v, "engine")) |e| self.engine = a.dupe(u8, e) catch "";
+        if (str(v, "workflow_name")) |n| self.workflow_name = a.dupe(u8, n) catch "";
+        if (v == .object) if (v.object.get("isolation")) |iso| if (iso == .bool) {
+            self.isolated = iso.bool;
+        };
+        self.engine_key = int(v, "engine_key");
+        self.launch_read = true;
+        return true;
+    }
+
+    /// Takes the launch's names, and names the rules already seen by them.
+    pub fn applyNames(self: *Tracker, n: *const naming.Names) void {
+        self.names = n;
+        for (self.rules.items) |*r| if (n.find(r.name)) |k| {
+            r.shown = n.word[k];
+            r.tool = n.tool[k];
+            r.step = n.step[k];
+            r.sample = n.sample[k];
+            r.step_index = n.step_of[k];
+        };
     }
 
     pub fn deinit(self: *Tracker) void {
@@ -211,8 +251,15 @@ pub const Tracker = struct {
             const owned = try self.arena.allocator().dupe(u8, name);
             gop.key_ptr.* = owned;
             gop.value_ptr.* = self.rules.items.len;
-            const shown = if (self.names) |n| (if (n.find(owned)) |k| n.word[k] else owned) else owned;
-            try self.rules.append(self.arena.allocator(), .{ .name = owned, .shown = shown });
+            var view: RuleView = .{ .name = owned, .shown = owned, .step = owned };
+            if (self.names) |n| if (n.find(owned)) |k| {
+                view.shown = n.word[k];
+                view.tool = n.tool[k];
+                view.step = n.step[k];
+                view.sample = n.sample[k];
+                view.step_index = n.step_of[k];
+            };
+            try self.rules.append(self.arena.allocator(), view);
         }
         return &self.rules.items[gop.value_ptr.*];
     }

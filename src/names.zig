@@ -44,6 +44,8 @@ pub const Names = struct {
     steps: []const Step,
     samples: []const []const u8,
     by_word: std.StringHashMapUnmanaged(u32),
+    /// The largest memory request of the rules.
+    max_request_mib: u64 = 0,
 
     pub fn init(a: Allocator, rules: anytype) !Names {
         const n = rules.len;
@@ -104,7 +106,12 @@ pub const Names = struct {
                 sample_of[i] = mg.value_ptr.*;
             }
         }
+        var largest: u64 = 0;
+        if (comptime @hasField(std.meta.Elem(@TypeOf(rules)), "memory_mib")) for (rules) |r| {
+            largest = @max(largest, r.memory_mib);
+        };
         return .{
+            .max_request_mib = largest,
             .rule = rule,
             .step = step,
             .sample = sample,

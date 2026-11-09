@@ -1,11 +1,11 @@
 //! Interactive `watch` on a terminal. A header shows the launch's progress
-//! and its use of the budget; below it, one of five views: the table of
-//! rules, a timeline, the details of one rule, its output as it grows, or
-//! the keys. The terminal is put in raw mode on the alternate screen and
-//! restored on every exit; each refresh writes one frame in place.
-//!
-//! Frames are ASCII. With color, bars and badges are colored cells; without
-//! it, the same layout uses characters, so every view reads the same.
+//! and its use of the budget, then a table of its steps; below it, one of
+//! five views: the table of rules, a timeline, the details of one rule, its
+//! output as it grows, or the keys. The rows use the run log's columns,
+//! tags, units and marks (`log.zig`), so the view and the log read alike.
+//! The terminal is put in raw mode on the alternate screen and restored on
+//! every exit; each refresh writes one frame in place. `snapshot` writes the
+//! same view once as text, for `watch --once` and a watch into a file.
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
@@ -16,6 +16,9 @@ const tracker = @import("tracker.zig");
 const workflow = @import("workflow.zig");
 const graph = @import("graph.zig");
 const term = @import("term.zig");
+const log = @import("log.zig");
+const naming = @import("names.zig");
+const units = @import("units.zig");
 const Allocator = std.mem.Allocator;
 const Tracker = tracker.Tracker;
 const Status = tracker.Status;
@@ -122,6 +125,7 @@ pub const Ui = struct {
     message_until: i128 = 0,
     page: usize = 20,
     color: bool = false,
+    marks: *const log.Marks = &log.ascii,
     clock_ns: i128 = 0,
     confirm_until: i128 = 0,
 
@@ -333,12 +337,16 @@ pub fn visible(a: Allocator, t: *const Tracker, f: Filter, sort: Sort, query: []
     return out.items;
 }
 
+/// The bytes of `s` that fit in `cols` columns.
 pub fn fit(s: []const u8, cols: usize) usize {
     var n: usize = 0;
-    for (s, 0..) |c, i| {
-        if (c & 0xc0 == 0x80) continue;
-        if (n == cols) return i;
-        n += 1;
+    var i: usize = 0;
+    while (i < s.len) {
+        const c = naming.codepoint(s, i);
+        const w = naming.width(c.value);
+        if (n + w > cols) return i;
+        n += w;
+        i += c.len;
     }
     return s.len;
 }
@@ -366,6 +374,7 @@ const green = "\x1b[32m";
 const yellow = "\x1b[33m";
 const magenta = "\x1b[35m";
 const cyan = "\x1b[36m";
+const blue = "\x1b[34m";
 const on_green = "\x1b[42m";
 const on_yellow = "\x1b[43m";
 const on_red = "\x1b[41m";
@@ -397,7 +406,7 @@ const Line = struct {
         self.raw(cut);
         const shown = term.blankControls(self.buf[start..self.len]);
         self.len = start + shown.len;
-        for (shown) |c| self.used += @intFromBool(c & 0xc0 != 0x80);
+        self.used += naming.columns(shown);
     }
 
     fn clipped(self: *Line, s: []const u8) void {
@@ -428,8 +437,7 @@ const Line = struct {
 
     fn field(self: *Line, s: []const u8, width: usize, right: bool) void {
         const cut = s[0..fit(s, width)];
-        var shown: usize = 0;
-        for (cut) |c| shown += @intFromBool(c & 0xc0 != 0x80);
+        const shown = naming.columns(cut);
         if (right) self.spaces(width - shown);
         self.text(cut);
         if (!right) self.spaces(width - shown);
@@ -459,7 +467,22 @@ const Line = struct {
         }
     }
 
-    fn bar(self: *Line, width: usize, total: f64, parts: []const Part) void {
+    /// Writes `mark` `n` times in `fg`.
+    fn marks(self: *Line, n: usize, fg: []const u8, mark: []const u8) void {
+        if (n == 0) return;
+        self.sgr(fg);
+        var i: usize = 0;
+        while (i < n and self.used < self.cols) : (i += 1) {
+            self.raw(mark);
+            self.used += 1;
+        }
+        self.sgr(reset);
+    }
+
+    /// A bar of `width` marks, the parts in their colors and the rest dim,
+    /// as the run log draws its steps. Without color only the first part
+    /// is drawn full, and the counts beside the bar say the rest.
+    fn bar(self: *Line, m: *const log.Marks, width: usize, total: f64, parts: []const Part) void {
         var cells_of: [8]usize = @splat(0);
         var taken: usize = 0;
         if (total > 0) for (parts, 0..) |p, i| {
@@ -470,20 +493,21 @@ const Line = struct {
             cells_of[i] = n;
             taken += n;
         };
-        if (!self.color) self.text("[");
-        for (parts, 0..) |p, i| self.cells(cells_of[i], p.bg, p.ch);
-        self.cells(width - taken, on_track, '.');
-        if (!self.color) self.text("]");
+        for (parts, 0..) |p, i| self.marks(cells_of[i], p.fg, if (i == 0 or self.color) m.full else m.empty);
+        self.marks(width - taken, dim, m.empty);
     }
 };
 
-const Part = struct { value: f64, bg: []const u8, ch: u8 };
+const Part = struct { value: f64, fg: []const u8 };
 
 const Frame = struct {
     w: *std.Io.Writer,
     cols: usize,
     rows: usize,
     color: bool,
+    /// Lines end in newlines, without cursor movement or erasing, for a
+    /// snapshot.
+    plain: bool = false,
     line: usize = 0,
 
     fn begin(self: *const Frame) Line {
@@ -492,11 +516,31 @@ const Frame = struct {
 
     fn put(self: *Frame, l: *const Line) !void {
         if (self.line >= self.rows) return;
+        if (self.plain) {
+            try self.w.writeAll(std.mem.trimEnd(u8, l.buf[0..l.len], " "));
+            if (self.color) try self.w.writeAll(reset);
+            try self.w.writeAll("\n");
+            self.line += 1;
+            return;
+        }
         if (self.line > 0) try self.w.writeAll("\r\n");
         try self.w.writeAll(l.buf[0..l.len]);
         if (self.color) try self.w.writeAll(reset);
         try self.w.writeAll("\x1b[K");
         self.line += 1;
+    }
+
+    /// Puts a line already written in the run log's styles, cut to the
+    /// width with the `more` mark.
+    fn putRaw(self: *Frame, s: log.Style, text: []const u8) !void {
+        var l = self.begin();
+        var b: std.Io.Writer = .fixed(&l.buf);
+        if (self.cols > 1 and log.visible(text) > self.cols - 1) {
+            log.clipped(&b, s, text, self.cols - 2) catch {};
+            b.writeAll(s.marks.more) catch {};
+        } else b.writeAll(text) catch {};
+        l.len = b.buffered().len;
+        try self.put(&l);
     }
 
     fn blank(self: *Frame) !void {
@@ -505,29 +549,9 @@ const Frame = struct {
     }
 
     fn finish(self: *Frame) !void {
-        try self.w.writeAll("\x1b[J");
+        if (!self.plain) try self.w.writeAll("\x1b[J");
     }
 };
-
-fn clock(buf: []u8, ns: i128) []const u8 {
-    const s: u64 = @intCast(@max(@divFloor(ns, std.time.ns_per_s), 0));
-    const r = if (s >= 3600) std.fmt.bufPrint(buf, "{d}:{d:0>2}:{d:0>2}", .{ s / 3600, s / 60 % 60, s % 60 }) else std.fmt.bufPrint(buf, "{d}:{d:0>2}", .{ s / 60, s % 60 });
-    return r catch "";
-}
-
-fn compact(buf: []u8, n: u64) []const u8 {
-    const f: f64 = @floatFromInt(n);
-    if (n == 0) return "0";
-    const r = if (n >= 1 << 30)
-        std.fmt.bufPrint(buf, "{d:.1}G", .{f / (1 << 30)})
-    else if (n >= 10 << 20)
-        std.fmt.bufPrint(buf, "{d:.0}M", .{f / (1 << 20)})
-    else if (n >= 1 << 20)
-        std.fmt.bufPrint(buf, "{d:.1}M", .{f / (1 << 20)})
-    else
-        std.fmt.bufPrint(buf, "{d:.0}K", .{f / 1024});
-    return r catch "";
-}
 
 fn tickLabel(buf: []u8, s: u64) []const u8 {
     const r = if (s == 0)
@@ -545,119 +569,140 @@ fn tickLabel(buf: []u8, s: u64) []const u8 {
     return r catch "";
 }
 
-const Look = struct { label: []const u8, badge: ?[]const u8 = null, fg: []const u8 = "" };
+/// A rule's state as the view shows it: a tag in the run log's style and
+/// its color. `WAIT` covers a rule whose producers have yet to end and one
+/// that waits for room in the budget; its note says which.
+const State = struct { tag: []const u8, tint: []const u8 };
 
-fn look(s: Status) Look {
+fn state(s: Status) State {
     return switch (s) {
-        .running => .{ .label = "running", .badge = "\x1b[46;30m" },
-        .cancelling => .{ .label = "stopping", .badge = "\x1b[45;30m" },
-        .failed => .{ .label = "failed", .badge = "\x1b[41;97;1m" },
-        .retrying => .{ .label = "retrying", .fg = "\x1b[33;1m" },
-        .waiting => .{ .label = "waiting", .fg = yellow },
-        .pending => .{ .label = "pending", .fg = dim },
-        .completed => .{ .label = "completed", .fg = green },
-        .reused => .{ .label = "reused", .fg = "\x1b[32;2m" },
-        .blocked => .{ .label = "blocked", .fg = red },
-        .cancelled => .{ .label = "cancelled", .fg = magenta },
+        .running => .{ .tag = "RUN", .tint = cyan },
+        .cancelling => .{ .tag = "STOP", .tint = magenta },
+        .retrying => .{ .tag = "RETRY", .tint = yellow },
+        .waiting => .{ .tag = "WAIT", .tint = yellow },
+        .pending => .{ .tag = "WAIT", .tint = dim },
+        .completed => .{ .tag = "DONE", .tint = green },
+        .reused => .{ .tag = "REUSE", .tint = "\x1b[32;2m" },
+        .failed => .{ .tag = "FAIL", .tint = "\x1b[31;1m" },
+        .blocked => .{ .tag = "BLOCK", .tint = red },
+        .cancelled => .{ .tag = "STOP", .tint = magenta },
     };
 }
 
-fn pressure(ratio: f64) []const u8 {
-    return if (ratio >= 0.9) on_red else if (ratio >= 0.7) on_yellow else on_green;
+fn seconds(ns: i128) f64 {
+    return @as(f64, @floatFromInt(ns)) / 1e9;
 }
 
-pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols: usize, rows: usize, now_ns: i128, live: bool) !void {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-    const a = arena.allocator();
-    var f: Frame = .{ .w = w, .cols = cols, .rows = rows, .color = ui.color };
-    try w.writeAll("\x1b[H");
-    const end_ns = if (t.finished) t.finished_ns else now_ns;
-    try drawHeader(&f, t, end_ns);
-    if (rows >= 24) try f.blank();
+fn duration(buf: []u8, s: f64) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    units.duration(&w, s) catch {};
+    return w.buffered();
+}
 
-    const list = try visible(a, t, ui.filter, ui.sort, ui.queryText(), now_ns);
-    const footer = 1;
-    const head = f.line + 1;
-    const page = rows -| (head + footer);
-    ui.page = page;
-    ui.settle(list, page);
-    const space = rows -| (f.line + footer);
-    switch (ui.mode) {
-        .table => try drawTable(gpa, a, &f, t, ui, list, page, now_ns, live),
-        .timeline => try drawTimeline(&f, t, ui, list, page, end_ns),
-        .log => try drawLog(gpa, a, &f, t, ui, space, live),
-        .details => try drawDetails(gpa, a, &f, t, ui, space, now_ns, live),
-        .help => try drawHelp(&f, space),
+fn size(buf: []u8, bytes: u64) []const u8 {
+    var w: std.Io.Writer = .fixed(buf);
+    units.size(&w, @as(f64, @floatFromInt(bytes)) / 1048576.0) catch {};
+    return w.buffered();
+}
+
+/// The rule's step and sample word, or its name when the launch's names
+/// are not known.
+fn wordOf(t: *const Tracker, name: []const u8) []const u8 {
+    const i = t.index.get(name) orelse return name;
+    return t.rules.items[i].shown;
+}
+
+/// The run log's table for the view's rows: the same columns, as wide as
+/// the launch's rules need, held to their largest request (else the
+/// budget's) and the budget's thread count so that they never move while
+/// the launch runs. A row is the selection mark and the tag, then the log's
+/// name columns and figures; on a terminal the names narrow to fit, and the
+/// figures stay while the note keeps a dozen columns.
+fn styleOf(t: *const Tracker, ui: *const Ui, cols: usize) log.Style {
+    var w: naming.Widths = .{ .step = 0, .sample = 0 };
+    for (t.rules.items) |r| {
+        w.step = @max(w.step, naming.columns(r.step));
+        w.sample = @max(w.sample, naming.columns(r.sample));
+        w.tool = @max(w.tool, naming.columns(r.tool));
     }
-    while (f.line < rows -| footer) try f.blank();
-    try drawFooter(&f, ui, now_ns);
-    try f.finish();
+    const largest = if (t.names) |n| (if (n.max_request_mib > 0) n.max_request_mib else t.max_memory_mib) else t.max_memory_mib;
+    const budget = [_]u64{largest};
+    const threads: u32 = @intCast(@max(t.max_threads, 1));
+    var table = log.Table.of(t.selected, w, &budget, threads);
+    if (!t.isolated) table = table.unbounded();
+    if (cols > 0 and rowWidth(table) + note_room > cols) {
+        table = log.Table.of(t.selected, w.capped(), &budget, threads);
+        if (!t.isolated) table = table.unbounded();
+    }
+    if (cols > 0) {
+        table.figures = rowWidth(table) + note_room <= cols;
+        table = table.fitted(cols + table.nameColumn() - lead_width);
+    }
+    return .{ .color = ui.color, .marks = ui.marks, .table = table, .cols = cols };
 }
 
-fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
-    var cb: [16]u8 = undefined;
-    const state = if (t.finished) t.final_status else "running";
-    const elapsed = if (t.started_ns == 0) "-:--" else clock(&cb, end_ns - t.started_ns);
+const lead_width = 2 + log.status_width + log.gap.len;
+const note_room = 12;
+
+fn rowWidth(table: log.Table) usize {
+    return table.width() - table.nameColumn() + lead_width;
+}
+
+fn drawHeader(f: *Frame, t: *const Tracker, ui: *const Ui, end_ns: i128) !void {
+    var tb: [32]u8 = undefined;
+    const run_state = if (t.finished) t.final_status else "running";
+    const elapsed = if (t.started_ns == 0) "-" else duration(&tb, seconds(end_ns - t.started_ns));
+    var engine_words = std.mem.tokenizeScalar(u8, t.engine, ' ');
+    const program = engine_words.next() orelse "kanit";
+    const version = engine_words.next() orelse "";
+    const name = if (t.workflow_name.len > 0) t.workflow_name else t.workdir_name;
+
     var l = f.begin();
-    l.sgr(reverse ++ bold);
-    l.text(" kanit ");
-    l.sgr(reset ++ reverse);
-    if (t.workdir_name.len > 0) l.print(" {s} ", .{t.workdir_name});
+    if (!f.plain) l.sgr(reverse ++ bold);
+    l.print(" {s}{s}{s} ", .{ program, if (version.len > 0) " " else "", version });
+    l.sgr(reset);
+    if (!f.plain) l.sgr(reverse);
+    if (name.len > 0) l.print("  {s}  ", .{name}) else l.text(" ");
     if (f.cols >= 70) l.print(" launch {s} ", .{t.launch});
-    const right = state.len + elapsed.len + 5;
+    const right = run_state.len + elapsed.len + 5;
     if (f.cols > l.used + right) l.spaces(f.cols - l.used - right);
     l.sgr(reset);
-    l.sgr(if (std.mem.eql(u8, state, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, state, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, state, "interrupted") or std.mem.eql(u8, state, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m");
-    l.print(" {s} ", .{state});
-    l.sgr(reset ++ reverse);
+    l.sgr(if (std.mem.eql(u8, run_state, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, run_state, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, run_state, "interrupted") or std.mem.eql(u8, run_state, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m");
+    l.print(" {s} ", .{run_state});
+    l.sgr(reset);
+    if (!f.plain) l.sgr(reverse);
     l.print(" {s} ", .{elapsed});
-    l.to(f.cols);
+    if (!f.plain) l.to(f.cols);
     try f.put(&l);
 
-    const bar_w = std.math.clamp(f.cols -| 76, 10, 40);
+    const bar_w = std.math.clamp(f.cols -| 80, 12, 40);
     const done = t.count(.completed) + t.count(.reused);
-    const running = t.count(.running) + t.count(.cancelling);
-    const waiting = t.count(.waiting) + t.count(.retrying);
-    const failed = t.count(.failed) + t.count(.blocked);
-    const cancelled = t.count(.cancelled);
-    const pending = t.count(.pending);
+    const running = t.count(.running) + t.count(.cancelling) + t.count(.retrying);
+    const waiting = t.count(.waiting) + t.count(.pending);
+    const failed = t.count(.failed);
+    const blocked = t.count(.blocked);
+    const stopped = t.count(.cancelled);
     l = f.begin();
-    l.sgr(dim);
-    l.text(" progress  ");
-    l.sgr(reset);
-    l.bar(bar_w, @floatFromInt(t.rules.items.len), &.{
-        .{ .value = @floatFromInt(done), .bg = on_green, .ch = '#' },
-        .{ .value = @floatFromInt(running), .bg = on_cyan, .ch = '>' },
-        .{ .value = @floatFromInt(failed), .bg = on_red, .ch = '!' },
-        .{ .value = @floatFromInt(cancelled), .bg = on_magenta, .ch = 'x' },
-        .{ .value = @floatFromInt(waiting), .bg = on_yellow, .ch = '~' },
+    gaugeLabel(&l, "rules");
+    l.bar(ui.marks, bar_w, @floatFromInt(@max(t.selected, 1)), &.{
+        .{ .value = @floatFromInt(done), .fg = green },
+        .{ .value = @floatFromInt(running), .fg = cyan },
+        .{ .value = @floatFromInt(failed + blocked + stopped), .fg = red },
     });
-    l.sgr(bold);
-    l.print("  {d}/{d} done", .{ done, t.selected });
-    if (t.selected > 0) l.print(" ({d}%)", .{done * 100 / t.selected});
-    l.sgr(reset);
-    if (running > 0) {
-        l.sgr(cyan);
-        l.print("  {d} running", .{running});
-    }
-    if (waiting > 0) {
-        l.sgr(reset ++ yellow);
-        l.print("  {d} waiting", .{waiting});
-    }
-    if (pending > 0) {
-        l.sgr(reset ++ dim);
-        l.print("  {d} pending", .{pending});
-    }
-    l.sgr(reset);
-    l.sgr(if (failed > 0) red ++ bold else dim);
-    l.print("  {d} failed", .{failed});
-    l.sgr(reset);
-    if (cancelled > 0) {
-        l.sgr(magenta);
-        l.print("  {d} cancelled", .{cancelled});
+    l.print("  {d} of {d} done", .{ done, t.selected });
+    const counts = [_]struct { n: usize, what: []const u8, fg: []const u8 }{
+        .{ .n = running, .what = "running", .fg = cyan },
+        .{ .n = waiting, .what = "waiting", .fg = yellow },
+        .{ .n = failed, .what = "failed", .fg = red ++ bold },
+        .{ .n = blocked, .what = "blocked", .fg = red },
+        .{ .n = stopped, .what = "stopped", .fg = magenta },
+    };
+    for (counts) |c| if (c.n > 0) {
+        l.text("   ");
+        l.sgr(c.fg);
+        l.print("{d} {s}", .{ c.n, c.what });
         l.sgr(reset);
-    }
+    };
     try f.put(&l);
 
     const res = t.reserved();
@@ -666,49 +711,50 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     const in_use: ?u64 = if (t.finished) null else t.memory_current;
     const busy = @min(cores orelse 0, reserved_th);
     l = f.begin();
-    l.sgr(dim);
-    l.text(" threads   ");
-    l.sgr(reset);
-    l.bar(bar_w, @floatFromInt(@max(t.max_threads, 1)), &.{
-        .{ .value = busy, .bg = on_cyan, .ch = '#' },
-        .{ .value = reserved_th - busy, .bg = on_blue, .ch = '=' },
+    gaugeLabel(&l, "threads");
+    l.bar(ui.marks, bar_w, @floatFromInt(@max(t.max_threads, 1)), &.{
+        .{ .value = busy, .fg = cyan },
+        .{ .value = reserved_th - busy, .fg = blue },
     });
-    l.print("  {d}/{d} reserved", .{ res.threads, t.max_threads });
+    l.print("  {d} of {d} reserved", .{ res.threads, t.max_threads });
     if (cores) |c| l.print("   {d:.1} cores busy", .{c});
     try f.put(&l);
 
     const mib: f64 = 1 << 20;
     const reserved_b: f64 = @as(f64, @floatFromInt(res.memory_mib)) * mib;
     const used_b: f64 = if (in_use) |m| @floatFromInt(m) else 0;
-    var mb: [3][16]u8 = undefined;
+    var mb: [3][24]u8 = undefined;
     l = f.begin();
-    l.sgr(dim);
-    l.text(" memory    ");
-    l.sgr(reset);
-    l.bar(bar_w, @as(f64, @floatFromInt(@max(t.max_memory_mib, 1))) * mib, &.{
-        .{ .value = @min(used_b, @max(reserved_b, used_b)), .bg = on_cyan, .ch = '#' },
-        .{ .value = reserved_b - @min(used_b, reserved_b), .bg = on_blue, .ch = '=' },
+    gaugeLabel(&l, "memory");
+    l.bar(ui.marks, bar_w, @as(f64, @floatFromInt(@max(t.max_memory_mib, 1))) * mib, &.{
+        .{ .value = @min(used_b, @max(reserved_b, used_b)), .fg = cyan },
+        .{ .value = reserved_b - @min(used_b, reserved_b), .fg = blue },
     });
-    l.print("  {s}/{s} reserved", .{ compact(&mb[0], res.memory_mib << 20), compact(&mb[1], t.max_memory_mib << 20) });
-    if (in_use) |m| l.print("   {s} in use", .{compact(&mb[2], m)});
+    l.print("  {s} of {s} reserved", .{ if (res.memory_mib == 0) "0" else size(&mb[0], res.memory_mib << 20), size(&mb[1], t.max_memory_mib << 20) });
+    if (in_use) |m| l.print("   {s} in use", .{size(&mb[2], m)});
     try f.put(&l);
 
-    for (t.shared.items, 0..) |s, i| {
+    for (t.shared.items, 0..) |sh, i| {
         l = f.begin();
-        l.sgr(dim);
-        l.text(if (i == 0) " shared    " else "           ");
-        l.sgr(reset);
+        gaugeLabel(&l, if (i == 0) "shared" else "");
         l.sgr(bold);
-        l.text(s.name);
+        l.text(sh.name);
         l.sgr(reset);
-        l.text("  ");
-        const held = std.mem.eql(u8, s.state, "loading") or std.mem.eql(u8, s.state, "ready");
-        l.sgr(if (std.mem.eql(u8, s.state, "ready")) green else if (std.mem.eql(u8, s.state, "loading")) yellow else if (std.mem.eql(u8, s.state, "failed")) red else dim);
-        l.text(s.state);
+        l.text("   ");
+        const held = std.mem.eql(u8, sh.state, "loading") or std.mem.eql(u8, sh.state, "ready");
+        l.sgr(if (std.mem.eql(u8, sh.state, "ready")) green else if (std.mem.eql(u8, sh.state, "loading")) yellow else if (std.mem.eql(u8, sh.state, "failed")) red else dim);
+        l.text(sh.state);
         l.sgr(reset);
-        const amount: ?u64 = if (held) s.live_memory orelse s.memory_peak else s.memory_peak;
-        if (amount) |m| l.print("  {s} {s}", .{ compact(&mb[0], m), if (held) "held" else "peak" });
-        if (s.users.items.len > 0) l.print(", used by {d} {s}", .{ s.users.items.len, if (s.users.items.len == 1) "rule" else "rules" });
+        const amount: ?u64 = if (held) sh.live_memory orelse sh.memory_peak else sh.memory_peak;
+        if (amount) |m| l.print("   {s} {s}", .{ size(&mb[0], m), if (held) "held" else "peak" });
+        if (sh.users.items.len > 0) l.print(", used by {d} {s}", .{ sh.users.items.len, if (sh.users.items.len == 1) "rule" else "rules" });
+        try f.put(&l);
+    }
+    if (t.unreadable_lines > 0) {
+        l = f.begin();
+        gaugeLabel(&l, "");
+        l.sgr(yellow);
+        l.print("{d} {s} of events.jsonl could not be read and {s} left out", .{ t.unreadable_lines, if (t.unreadable_lines == 1) "line" else "lines", if (t.unreadable_lines == 1) "is" else "are" });
         try f.put(&l);
     }
     if (t.final_error.len > 0) {
@@ -719,151 +765,250 @@ fn drawHeader(f: *Frame, t: *const Tracker, end_ns: i128) !void {
     }
 }
 
-const Columns = struct {
-    name: usize,
-    cpu: bool,
-    bar: bool,
-    mem: bool,
+fn gaugeLabel(l: *Line, name: []const u8) void {
+    l.sgr(dim);
+    l.text(" ");
+    l.field(name, 9, false);
+    l.sgr(reset);
+}
 
-    const gutter = 2;
-    const status_w = 11;
-    const att_w = 4;
-    const time_w = 9;
-    const cpu_w = 9;
-    const bar_w = 9;
-    const mem_w = 11;
-
-    fn of(cols: usize) Columns {
-        const name = std.math.clamp(cols * 28 / 100, 12, 40);
-        var rest = cols -| (gutter + status_w + name + 1 + att_w + time_w);
-        var c: Columns = .{ .name = name, .cpu = false, .bar = false, .mem = false };
-        if (rest >= mem_w + 8) {
-            c.mem = true;
-            rest -= mem_w;
+/// How far each step is, from the rules the launch selected.
+fn progressOf(a: Allocator, t: *const Tracker, now_ns: i128) !?log.Progress {
+    const n = t.names orelse return null;
+    if (n.steps.len == 0) return null;
+    const steps = try a.alloc(log.StepProgress, n.steps.len);
+    for (steps, n.steps) |*st, ns| st.* = .{ .name = ns.name, .tool = ns.tool orelse "", .selected = 0, .done = 0, .failed = 0, .running = 0, .ended = false };
+    var samples = false;
+    for (t.rules.items) |r| {
+        const k = r.step_index orelse continue;
+        samples = samples or r.sample.len > 0;
+        const st = &steps[k];
+        st.selected += 1;
+        switch (r.status) {
+            .completed, .reused => st.done += 1,
+            .failed => st.failed += 1,
+            .blocked => st.blocked += 1,
+            .cancelled => st.stopped += 1,
+            .running, .cancelling, .retrying => st.running += 1,
+            else => {},
         }
-        if (rest >= cpu_w + 8) {
-            c.cpu = true;
-            rest -= cpu_w;
-        }
-        if (rest >= bar_w + 16) c.bar = true;
-        return c;
     }
-};
+    var shown: std.ArrayList(log.StepProgress) = .empty;
+    for (steps) |*st| if (st.selected > 0) {
+        if (st.tool.len == 0) for (t.rules.items) |r| if (r.step_index != null and &steps[r.step_index.?] == st and r.tool.len > 0) {
+            st.tool = r.tool;
+            break;
+        };
+        st.ended = st.done + st.failed + st.blocked + st.stopped == st.selected;
+        try shown.append(a, st.*);
+    };
+    return .{
+        .selected = t.selected,
+        .done = t.count(.completed) + t.count(.reused),
+        .running = t.count(.running) + t.count(.cancelling) + t.count(.retrying),
+        .failed = t.count(.failed),
+        .blocked = t.count(.blocked),
+        .cancelled = t.count(.cancelled),
+        .elapsed_s = if (t.started_ns > 0) seconds(now_ns - t.started_ns) else 0,
+        .steps = shown.items,
+        .grouped = shown.items.len < t.rules.items.len or samples,
+        .running_list = &.{},
+    };
+}
 
-fn drawTable(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page: usize, now_ns: i128, live: bool) !void {
-    const c = Columns.of(f.cols);
-    var l = f.begin();
-    l.sgr(bold);
-    l.text("  ");
-    l.field(" STATUS", Columns.status_w, false);
-    l.field("RULE", c.name + 1, false);
-    l.field("ATT", Columns.att_w - 1, true);
-    l.field("TIME", Columns.time_w, true);
-    if (c.cpu) l.field("CPU", Columns.cpu_w, true);
-    if (c.bar) {
-        l.spaces(1);
-        l.spaces(1);
-        l.field("MEMORY", Columns.bar_w - 2, false);
+/// The table of the steps, under the rule table's tool and step columns,
+/// at most `room` rows; returns the rows written.
+fn drawSteps(a: Allocator, f: *Frame, t: *const Tracker, s: log.Style, room: usize, now_ns: i128) !usize {
+    const p = (try progressOf(a, t, now_ns)) orelse return 0;
+    if (!p.grouped) return 0;
+    var out: std.Io.Writer.Allocating = .init(a);
+    _ = try log.stepTable(&out.writer, s, p, lead_width, room, null);
+    var lines: usize = 0;
+    var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, out.written(), "\n"), '\n');
+    while (it.next()) |line| {
+        try f.putRaw(s, line);
+        lines += 1;
     }
-    if (c.mem) l.field(if (c.bar) "" else "MEMORY", Columns.mem_w, true);
-    const room = l.cols -| l.used;
-    l.text(if (room >= 22) "  LAST OUTPUT / REASON" else if (room >= 13) "  LAST OUTPUT" else "");
-    try f.put(&l);
+    return lines;
+}
+
+fn drawTable(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *const Ui, s: log.Style, list: []const usize, page: usize, now_ns: i128, live: bool) !void {
+    var head: std.Io.Writer.Allocating = .init(a);
+    try head.writer.writeAll(s.on(bold));
+    try head.writer.writeAll("  ");
+    try log.pad(&head.writer, "STATUS", log.status_width);
+    try head.writer.writeAll(log.gap);
+    try log.whoHeader(&head.writer, s);
+    try log.figureHeader(&head.writer, s);
+    try head.writer.print("NOTE{s}", .{s.off()});
+    try f.putRaw(s, head.written());
     const end = @min(ui.top + page, list.len);
     for (list[ui.top..end]) |ri| {
-        const r = &t.rules.items[ri];
-        const selected = ui.selected != null and ui.selected.? == ri;
-        l = f.begin();
-        try drawRow(gpa, a, &l, r, selected, c, now_ns, live);
-        try f.put(&l);
+        const selected = !f.plain and ui.selected != null and ui.selected.? == ri;
+        var row: std.Io.Writer.Allocating = .init(a);
+        try ruleRow(gpa, a, &row.writer, t, &ui.links, s, ri, selected, now_ns, live);
+        try f.putRaw(s, row.written());
     }
     if (list.len == 0) {
-        l = f.begin();
+        var l = f.begin();
         l.sgr(dim);
         l.text(if (ui.query_len > 0) "  no rule name contains the search" else "  no rules in this view");
         try f.put(&l);
     }
 }
 
-fn drawRow(gpa: Allocator, a: Allocator, l: *Line, r: *const RuleView, selected: bool, c: Columns, now_ns: i128, live: bool) !void {
-    const lk = look(r.status);
-    var buf: [4][24]u8 = undefined;
+/// One rule's row: the selection mark, its tag, the run log's name columns
+/// and figures, and a note. A selected row is drawn in
+/// reverse video, without the colors of its cells.
+fn ruleRow(gpa: Allocator, a: Allocator, w: *std.Io.Writer, t: *const Tracker, links: *const Links, s0: log.Style, ri: usize, selected: bool, now_ns: i128, live: bool) !void {
+    const r = &t.rules.items[ri];
+    const st = state(r.status);
+    var s = s0;
     if (selected) {
-        l.sgr(cyan ++ bold);
-        l.text("> ");
-        l.sgr(reset);
-    } else l.text("  ");
-    if (lk.badge) |b| {
-        l.sgr(b);
-        l.print(" {s} ", .{lk.label});
-        l.sgr(reset);
-        l.spaces(Columns.status_w -| (lk.label.len + 2));
-    } else {
-        l.sgr(lk.fg);
-        l.text(" ");
-        l.field(lk.label, Columns.status_w - 1, false);
-        l.sgr(reset);
+        s.color = false;
+        if (s0.color) try w.writeAll(reverse);
+        try w.writeAll("> ");
+    } else try w.writeAll("  ");
+    try w.writeAll(s.on(st.tint));
+    try log.pad(w, st.tag, log.status_width);
+    try w.print("{s}{s}", .{ s.off(), log.gap });
+    if (r.status == .pending) try w.writeAll(s.on(dim));
+    try log.whoCells(w, s, .{ .tool = r.tool, .step = r.step, .sample = r.sample });
+    try w.writeAll(s.off());
+    try log.figureCells(w, s, figuresOf(r, now_ns));
+    try note(gpa, a, w, t, links, s, r, now_ns, live);
+    if (selected and s0.color) try w.writeAll(reset);
+}
+
+fn figuresOf(r: *const RuleView, now_ns: i128) log.Figures {
+    var f: log.Figures = .{};
+    if (r.status == .waiting or r.status == .pending) return f;
+    const active = r.status.active() or r.status == .retrying;
+    if (r.started_ns > 0) {
+        if (active) f.took_s = seconds(now_ns - r.started_ns) else if (r.finished_ns > 0) f.took_s = r.wall_s orelse seconds(r.finished_ns - r.started_ns);
     }
-    if (selected) l.sgr(reverse);
-    if (r.status == .pending) l.sgr(dim);
-    l.name(r.shown, c.name);
-    l.sgr(reset);
-    l.spaces(1);
-    const muted = r.status == .pending or r.status.done();
+    if (r.memory_mib > 0 and r.started_ns > 0) f.request_mib = r.memory_mib;
+    const mem: ?u64 = if (active) r.live_memory else r.memory_peak;
+    if (mem) |m| f.used_mib = @as(f64, @floatFromInt(m)) / 1048576.0;
+    if (r.threads > 0 and r.started_ns > 0) f.threads = r.threads;
+    if (active) f.cores = r.live_cores else if (r.cpu_s) |cpu| if (f.took_s) |took| if (took >= 0.1) {
+        f.cores = cpu / took;
+    };
+    return f;
+}
 
-    var att: []const u8 = "";
-    if (r.attempt > 0) att = std.fmt.bufPrint(&buf[0], "{d}", .{r.attempt}) catch "";
-    l.sgr(if (r.attempt > 1) yellow else if (muted) dim else "");
-    l.field(att, Columns.att_w - 1, true);
-    l.sgr(reset);
-
-    const time_ns: i128 = if (r.started_ns > 0) elapsedOf(r, now_ns) else if (r.ready_ns > 0 and r.status == .waiting) now_ns - r.ready_ns else -1;
-    l.sgr(if (r.started_ns == 0 or muted) dim else "");
-    l.field(if (time_ns >= 0) clock(&buf[1], time_ns) else "", Columns.time_w, true);
-    l.sgr(reset);
-
-    if (c.cpu) {
-        const cores: ?f64 = if (r.status.active()) r.live_cores else if (r.cpu_s != null and r.finished_ns > r.started_ns) r.cpu_s.? / (@as(f64, @floatFromInt(r.finished_ns - r.started_ns)) / 1e9) else null;
-        const text = if (cores) |v| std.fmt.bufPrint(&buf[2], "{d:.1}/{d}", .{ v, r.threads }) catch "" else "";
-        l.sgr(if (muted) dim else "");
-        l.field(text, Columns.cpu_w, true);
-        l.sgr(reset);
+/// What a row says after its figures: the attempt of a rule tried more
+/// than once, the last line a running rule wrote, what a waiting rule
+/// waits for, and why a rule failed, was blocked or was stopped.
+fn note(gpa: Allocator, a: Allocator, w: *std.Io.Writer, t: *const Tracker, links: *const Links, s: log.Style, r: *const RuleView, now_ns: i128, live: bool) !void {
+    var buf: [32]u8 = undefined;
+    switch (r.status) {
+        .running => {
+            const last = if (live) monitor.lastOutput(gpa, a, r.dir, 200) else "";
+            if (r.attempt > 1) try w.print("attempt {d}{s}", .{ r.attempt, if (last.len > 0) ": " else "" });
+            try w.print("{s}{s}{s}", .{ s.on(dim), last, s.off() });
+        },
+        .completed => if (r.attempt > 1) try w.print("after {d} attempts", .{r.attempt}),
+        .cancelling => try w.writeAll("stopping"),
+        .waiting => {
+            const why = if (std.mem.startsWith(u8, r.reason, "group:")) r.reason["group:".len..] else r.reason;
+            if (r.attempt > 0) try w.print("attempt {d}, ", .{r.attempt + 1});
+            try w.print("{s}for {s}{s}", .{ s.on(yellow), if (why.len > 0) why else "room", s.off() });
+            const since = @max(r.ready_ns, r.finished_ns);
+            if (since > 0) try w.print(", {s}", .{duration(&buf, seconds(now_ns - since))});
+        },
+        .pending => if (firstUnfinished(t, links, r.name)) |p| {
+            try w.print("{s}after {s}{s}", .{ s.on(dim), p, s.off() });
+        },
+        .blocked => {
+            if (cause(t, links, r.name, 0)) |c| try w.print("after {s} {s}", .{ c.word, c.what }) else try w.writeAll("after a rule it needs did not complete");
+        },
+        .failed, .retrying => try w.print("{s}{s}{s}", .{ s.on(red), r.reason, s.off() }),
+        .cancelled => try w.writeAll(if (std.mem.startsWith(u8, r.reason, "cancelled: ")) r.reason["cancelled: ".len..] else r.reason),
+        else => {},
     }
+}
 
-    const mem: ?u64 = if (r.status.active()) r.live_memory else r.memory_peak;
-    const limit: u64 = r.memory_mib << 20;
-    if (c.bar) {
-        l.spaces(2);
-        const width = Columns.bar_w - 2;
-        if (mem != null and limit > 0 and r.status.active()) {
-            const ratio = @as(f64, @floatFromInt(mem.?)) / @as(f64, @floatFromInt(limit));
-            const n: usize = @min(width, @as(usize, @intFromFloat(@ceil(@min(ratio, 1) * @as(f64, @floatFromInt(width))))));
-            l.cells(n, pressure(ratio), if (ratio >= 0.9) '!' else '#');
-            l.cells(width - n, on_track, '.');
-        } else l.spaces(width);
+fn firstUnfinished(t: *const Tracker, links: *const Links, name: []const u8) ?[]const u8 {
+    const parents = links.after.get(name) orelse return null;
+    for (parents) |p| {
+        const i = t.index.get(p) orelse continue;
+        if (!t.rules.items[i].status.done()) return t.rules.items[i].shown;
     }
-    if (c.mem) {
-        var mtext: []const u8 = "";
-        if (mem) |m| {
-            mtext = if (limit > 0) std.fmt.bufPrint(&buf[3], "{s}/{s}", .{ compact(&buf[2], m), compact(&buf[1], limit) }) catch "" else compact(&buf[3], m);
+    return null;
+}
+
+const Cause = struct { word: []const u8, what: []const u8 };
+
+/// The failure at the root of a blocked rule's chain, as the run log
+/// names it.
+fn cause(t: *const Tracker, links: *const Links, name: []const u8, depth: usize) ?Cause {
+    if (depth > 64) return null;
+    const parents = links.after.get(name) orelse return null;
+    for (parents) |p| {
+        const i = t.index.get(p) orelse continue;
+        const pr = &t.rules.items[i];
+        switch (pr.status) {
+            .failed => return .{ .word = pr.shown, .what = "failed" },
+            .cancelled => return .{ .word = pr.shown, .what = "was stopped" },
+            .blocked => if (cause(t, links, p, depth + 1)) |c| return c,
+            else => {},
         }
-        l.sgr(if (muted) dim else "");
-        l.field(mtext, Columns.mem_w, true);
-        l.sgr(reset);
+    }
+    return null;
+}
+
+pub fn draw(gpa: Allocator, w: *std.Io.Writer, t: *const Tracker, ui: *Ui, cols: usize, rows: usize, now_ns: i128, live: bool) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var f: Frame = .{ .w = w, .cols = cols, .rows = rows, .color = ui.color };
+    try w.writeAll("\x1b[H");
+    const end_ns = if (t.finished) t.finished_ns else now_ns;
+    try drawHeader(&f, t, ui, end_ns);
+    if (rows >= 24) try f.blank();
+    const s = styleOf(t, ui, cols);
+    if (ui.mode == .table and rows >= 16) {
+        if (try drawSteps(a, &f, t, s, @max(rows / 3, 4), now_ns) > 0 and rows >= 24) try f.blank();
     }
 
-    l.text("  ");
-    if (r.status.active() and live) {
-        l.clipped(monitor.lastOutput(gpa, a, r.dir, l.cols));
-    } else if (r.reason.len > 0) {
-        l.sgr(switch (r.status) {
-            .failed => red,
-            .waiting, .retrying => yellow,
-            else => dim,
-        });
-        l.clipped(r.reason);
-        l.sgr(reset);
+    const list = try visible(a, t, ui.filter, ui.sort, ui.queryText(), now_ns);
+    const footer = 1;
+    const head = f.line + 1;
+    const page = rows -| (head + footer);
+    ui.page = page;
+    ui.settle(list, page);
+    const space = rows -| (f.line + footer);
+    switch (ui.mode) {
+        .table => try drawTable(gpa, a, &f, t, ui, s, list, page, now_ns, live),
+        .timeline => try drawTimeline(&f, t, ui, list, page, end_ns),
+        .log => try drawLog(gpa, a, &f, t, ui, space, live),
+        .details => try drawDetails(gpa, a, &f, t, ui, space, now_ns, live),
+        .help => try drawHelp(&f, space),
     }
+    while (f.line < rows -| footer) try f.blank();
+    try drawFooter(&f, ui, now_ns);
+    try f.finish();
+}
+
+/// Writes the view once as text: the header, the steps and every rule,
+/// for `watch --once` and a watch whose output is not a terminal. `links`
+/// are the launch's, loaded once by the caller (`Late`).
+pub fn snapshot(gpa: Allocator, w: *std.Io.Writer, t: *Tracker, links: *const Links, cols: usize, color: bool, marks: *const log.Marks, now_ns: i128) !void {
+    var arena = std.heap.ArenaAllocator.init(gpa);
+    defer arena.deinit();
+    const a = arena.allocator();
+    var sampler: Sampler = .{};
+    sampler.sample(gpa, t, sys.monoNs());
+    var ui: Ui = .{ .color = color, .marks = marks, .links = links.* };
+    var f: Frame = .{ .w = w, .cols = cols, .rows = std.math.maxInt(usize), .color = color, .plain = true };
+    const end_ns = if (t.finished) t.finished_ns else now_ns;
+    try drawHeader(&f, t, &ui, end_ns);
+    try f.blank();
+    const s = styleOf(t, &ui, cols);
+    if (try drawSteps(a, &f, t, s, std.math.maxInt(usize), now_ns) > 0) try f.blank();
+    const list = try visible(a, t, .all, .status, "", now_ns);
+    try drawTable(gpa, a, &f, t, &ui, s, list, list.len, now_ns, true);
 }
 
 fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page: usize, end_ns: i128) !void {
@@ -913,7 +1058,7 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
             l.text("> ");
             l.sgr(reset);
         } else l.text("  ");
-        l.sgr(if (selected) reverse else if (r.status == .pending) dim else look(r.status).fg);
+        l.sgr(if (selected) reverse else if (r.status == .pending) dim else state(r.status).tint);
         l.name(r.shown, name_w);
         l.sgr(reset);
         l.text(" ");
@@ -952,28 +1097,22 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
 fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, space: usize, now_ns: i128, live: bool) !void {
     const ri = ui.selected orelse return;
     const r = &t.rules.items[ri];
-    const lk = look(r.status);
-    var b: [4][24]u8 = undefined;
+    const st = state(r.status);
+    var b: [4][32]u8 = undefined;
     var l = f.begin();
     l.sgr(bold);
     l.print("  {s}", .{r.shown});
     l.sgr(reset);
     l.text("   ");
-    if (lk.badge) |badge| {
-        l.sgr(badge);
-        l.print(" {s} ", .{lk.label});
-    } else {
-        l.sgr(lk.fg);
-        l.text(lk.label);
-    }
+    l.sgr(st.tint);
+    l.text(st.tag);
     l.sgr(reset);
     if (r.attempt > 0) l.print("   attempt {d}", .{r.attempt});
     try f.put(&l);
     l = f.begin();
     l.sgr(dim);
     l.text("  ");
-    var i: usize = 0;
-    while (i < f.cols -| 4) : (i += 1) l.text("-");
+    l.marks(f.cols -| 4, dim, ui.marks.empty);
     try f.put(&l);
 
     const Row = struct {
@@ -984,6 +1123,12 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
             line.sgr(reset);
         }
     };
+    if (r.tool.len > 0) {
+        l = f.begin();
+        Row.label(&l, "tool");
+        l.text(r.tool);
+        try f.put(&l);
+    }
     if (r.reason.len > 0) {
         l = f.begin();
         Row.label(&l, if (r.status == .waiting) "waits for" else "reason");
@@ -994,7 +1139,7 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
     if (r.threads > 0) {
         l = f.begin();
         Row.label(&l, "request");
-        l.print("{d} threads, {s}", .{ r.threads, compact(&b[0], r.memory_mib << 20) });
+        l.print("{d} {s}, {s}", .{ r.threads, if (r.threads == 1) "thread" else "threads", size(&b[0], r.memory_mib << 20) });
         try f.put(&l);
     }
     for ([_]struct { []const u8, ?[]const []const u8 }{
@@ -1006,19 +1151,20 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
         if (names.len == 0) continue;
         l = f.begin();
         Row.label(&l, row[0]);
-        for (names, 0..) |n, k| l.print("{s}{s}", .{ if (k == 0) "" else ", ", n });
+        const words = std.mem.eql(u8, row[0], "shared");
+        for (names, 0..) |n, k| l.print("{s}{s}", .{ if (k == 0) "" else ", ", if (words) n else wordOf(t, n) });
         try f.put(&l);
     }
     if (r.ready_ns > 0) {
         l = f.begin();
         Row.label(&l, "ready");
-        l.print("{s} after the launch started", .{clock(&b[0], r.ready_ns - t.started_ns)});
+        l.print("{s} after the launch started", .{duration(&b[0], seconds(r.ready_ns - t.started_ns))});
         try f.put(&l);
     }
     if (r.started_ns > 0) {
         l = f.begin();
         Row.label(&l, "started");
-        l.print("{s}; {s} {s}", .{ clock(&b[0], r.started_ns - t.started_ns), if (r.finished_ns > 0) "ran for" else "running for", clock(&b[1], elapsedOf(r, now_ns)) });
+        l.print("{s} after the launch started; {s} {s}", .{ duration(&b[0], seconds(r.started_ns - t.started_ns)), if (r.finished_ns > 0) "ran for" else "running for", duration(&b[1], seconds(elapsedOf(r, now_ns))) });
         try f.put(&l);
     }
     const gauge_w = std.math.clamp(f.cols / 4, 10, 30);
@@ -1027,9 +1173,9 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
         if (r.live_cores) |cores| {
             l = f.begin();
             Row.label(&l, "cpu");
-            l.bar(gauge_w, @floatFromInt(@max(r.threads, 1)), &.{.{ .value = cores, .bg = on_cyan, .ch = '#' }});
-            l.print("  {d:.1} of {d} threads", .{ cores, r.threads });
-            if (counters) |cn| if (cn.cpu_usage_usec) |us| l.print(", {d:.1} s so far", .{@as(f64, @floatFromInt(us)) / 1e6});
+            l.bar(ui.marks, gauge_w, @floatFromInt(@max(r.threads, 1)), &.{.{ .value = cores, .fg = cyan }});
+            l.print("  {d:.1} of {d} {s}", .{ cores, r.threads, if (r.threads == 1) "thread" else "threads" });
+            if (counters) |cn| if (cn.cpu_usage_usec) |us| l.print(", {s} so far", .{duration(&b[0], @as(f64, @floatFromInt(us)) / 1e6)});
             try f.put(&l);
         }
         if (r.live_memory) |m| {
@@ -1037,10 +1183,10 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
             const ratio = @as(f64, @floatFromInt(m)) / limit;
             l = f.begin();
             Row.label(&l, "memory");
-            l.bar(gauge_w, limit, &.{.{ .value = @floatFromInt(m), .bg = pressure(ratio), .ch = '#' }});
-            l.print("  {s} now", .{compact(&b[0], m)});
-            if (r.live_peak) |p| l.print(", {s} peak", .{compact(&b[1], p)});
-            l.print(", of {s}", .{compact(&b[2], r.memory_mib << 20)});
+            l.bar(ui.marks, gauge_w, limit, &.{.{ .value = @floatFromInt(m), .fg = if (ratio >= 0.9) red else if (ratio >= 0.7) yellow else green }});
+            l.print("  {s} now", .{size(&b[0], m)});
+            if (r.live_peak) |p| l.print(", {s} peak", .{size(&b[1], p)});
+            l.print(", of {s}", .{size(&b[2], r.memory_mib << 20)});
             if (counters) |cn| if (cn.memory_max_events > 0) {
                 l.sgr(yellow);
                 l.print(" ({d} times at its limit)", .{cn.memory_max_events});
@@ -1055,22 +1201,22 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
             }.of;
             l = f.begin();
             Row.label(&l, "stalled");
-            l.print("cpu {d:.1} s, memory {d:.1} s, I/O {d:.1} s", .{ sec(cn.cpu_some_us), sec(cn.memory_some_us), sec(cn.io_some_us) });
+            l.print("cpu {s}, memory {s}, I/O {s}", .{ duration(&b[0], sec(cn.cpu_some_us)), duration(&b[1], sec(cn.memory_some_us)), duration(&b[2], sec(cn.io_some_us)) });
             try f.put(&l);
         }
     } else {
         if (r.cpu_s) |cpu| {
             l = f.begin();
             Row.label(&l, "cpu");
-            l.print("{d:.2} s", .{cpu});
-            if (r.finished_ns > r.started_ns) l.print(", {d:.1} of {d} threads on average", .{ cpu / (@as(f64, @floatFromInt(r.finished_ns - r.started_ns)) / 1e9), r.threads });
+            l.text(duration(&b[0], cpu));
+            if (r.finished_ns > r.started_ns) l.print(", {d:.1} of {d} {s} on average", .{ cpu / seconds(r.finished_ns - r.started_ns), r.threads, if (r.threads == 1) "thread" else "threads" });
             try f.put(&l);
         }
         if (r.memory_peak) |m| {
             l = f.begin();
             Row.label(&l, "memory");
-            l.print("{s} peak", .{compact(&b[0], m)});
-            if (r.memory_mib > 0) l.print(" of {s}", .{compact(&b[1], r.memory_mib << 20)});
+            l.print("{s} peak", .{size(&b[0], m)});
+            if (r.memory_mib > 0) l.print(" of {s}", .{size(&b[1], r.memory_mib << 20)});
             try f.put(&l);
         }
     }
@@ -1126,7 +1272,7 @@ fn drawLog(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, 
     l.sgr(reverse ++ bold);
     l.print(" {s} ", .{r.shown});
     l.sgr(reset ++ reverse);
-    l.print(" attempt {d}  {s}  {s} ", .{ r.attempt, look(r.status).label, stream });
+    l.print(" attempt {d}  {s}  {s} ", .{ r.attempt, state(r.status).tag, stream });
     l.sgr(reset);
     l.sgr(dim);
     l.print("  o: {s}", .{if (ui.stderr) "stdout" else "stderr"});
@@ -1150,6 +1296,12 @@ fn drawLog(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, 
     var lines: std.ArrayList([]const u8) = .empty;
     var it = std.mem.splitScalar(u8, std.mem.trimEnd(u8, tail, "\n"), '\n');
     while (it.next()) |line| try lines.append(a, line);
+    if (lines.items.len == 1 and lines.items[0].len == 0) {
+        l = f.begin();
+        l.sgr(dim);
+        l.print("  nothing on {s} yet", .{stream});
+        return f.put(&l);
+    }
     for (lines.items[lines.items.len -| want..]) |line| {
         l = f.begin();
         logLine(&l, line);
@@ -1220,11 +1372,11 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
         .help => &.{.{ .key = "q", .what = "back" }},
     };
     var sb: [128]u8 = undefined;
-    const state = if (ui.query_len > 0)
+    const view = if (ui.query_len > 0)
         std.fmt.bufPrint(&sb, "{s} | {s} | \"{s}\" ", .{ @tagName(ui.filter), @tagName(ui.sort), ui.queryText() }) catch ""
     else
         std.fmt.bufPrint(&sb, "{s} | {s} ", .{ @tagName(ui.filter), @tagName(ui.sort) }) catch "";
-    const room = f.cols -| (state.len + 1);
+    const room = f.cols -| (view.len + 1);
     l.text(" ");
     for (hints) |h| {
         if (l.used + h.key.len + h.what.len + 4 > room) break;
@@ -1233,10 +1385,10 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
         l.sgr(reset);
         l.print(" {s} ", .{h.what});
     }
-    if (f.cols > l.used + state.len) {
-        l.to(f.cols - state.len);
+    if (f.cols > l.used + view.len) {
+        l.to(f.cols - view.len);
         l.sgr(dim);
-        l.text(state);
+        l.text(view);
     }
     try f.put(&l);
 }
@@ -1320,7 +1472,7 @@ fn send(gpa: Allocator, t: *const Tracker, ui: *Ui, act: Action) void {
     ui.say(std.fmt.bufPrint(&said, "sent: {s}", .{std.mem.trimEnd(u8, line, "\n")}) catch "sent", sys.realNs());
 }
 
-pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
+pub fn run(gpa: Allocator, t: *Tracker, late: *Late, interval_ms: u64, color: bool, marks: *const log.Marks) !bool {
     var set = linux.sigemptyset();
     for ([_]linux.SIG{ .INT, .TERM, .HUP, .WINCH }) |s| linux.sigaddset(&set, s);
     _ = try sys.check(linux.sigprocmask(linux.SIG.BLOCK, &set, null));
@@ -1329,10 +1481,9 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
 
     const terminal = try Terminal.enter();
     defer terminal.leave();
-    var ui: Ui = .{ .color = color };
-    var links_arena = std.heap.ArenaAllocator.init(gpa);
-    defer links_arena.deinit();
-    ui.links = try loadLinks(gpa, links_arena.allocator(), std.fs.path.dirname(t.events_path) orelse ".");
+    var ui: Ui = .{ .color = color, .marks = marks };
+    const launch_dir = std.fs.path.dirname(t.events_path) orelse ".";
+    ui.links = late.links;
     var sampler: Sampler = .{};
     var frame: std.Io.Writer.Allocating = .init(gpa);
     defer frame.deinit();
@@ -1346,6 +1497,10 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
         if (now >= next_ns) {
             _ = try t.update();
             _ = try t.settleEnd();
+            if (late.pending(t)) {
+                late.read(gpa, t, launch_dir);
+                ui.links = late.links;
+            }
             sampler.sample(gpa, t, now);
             next_ns = now + @as(i128, interval_ms) * std.time.ns_per_ms;
         }
@@ -1394,22 +1549,69 @@ pub fn run(gpa: Allocator, t: *Tracker, interval_ms: u64, color: bool) !bool {
     return true;
 }
 
+/// The launch's facts, names and the links between its rules, which a view
+/// loads once. A view that started before its launch wrote its records
+/// reads them again on later refreshes: the facts until `launch.json` is
+/// there, then the names and links for at most `max_tries` refreshes,
+/// since a launch recorded by an older engine or with an unreadable
+/// workflow never has them. A failed attempt keeps nothing.
+pub const Late = struct {
+    arena: ?std.heap.ArenaAllocator = null,
+    names: naming.Names = undefined,
+    links: Links = .{},
+    tries: u32 = 0,
+
+    const max_tries = 50;
+
+    pub fn pending(self: *const Late, t: *const Tracker) bool {
+        if (!t.launch_read) return true;
+        return self.tries < max_tries and (t.names == null or self.links.after.count() == 0);
+    }
+
+    pub fn read(self: *Late, gpa: Allocator, t: *Tracker, launch_dir: []const u8) void {
+        if (!t.launch_read and !t.readLaunch()) return;
+        if (!self.pending(t)) return;
+        self.tries += 1;
+        if (self.arena) |*a| _ = a.reset(.free_all) else self.arena = std.heap.ArenaAllocator.init(gpa);
+        const got = loadLaunch(gpa, self.arena.?.allocator(), launch_dir) catch return;
+        if (got.names) |n| {
+            self.names = n;
+            t.applyNames(&self.names);
+        }
+        self.links = got.links;
+    }
+
+    pub fn deinit(self: *Late) void {
+        if (self.arena) |*a| a.deinit();
+    }
+};
+
 pub const Links = struct {
     after: std.StringHashMapUnmanaged([]const []const u8) = .empty,
     before: std.StringHashMapUnmanaged([]const []const u8) = .empty,
 };
 
 pub fn loadLinks(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Links {
+    return (try loadLaunch(gpa, a, launch_dir)).links;
+}
+
+pub const Loaded = struct { names: ?naming.Names = null, links: Links = .{} };
+
+/// The launch's names and the links between its rules, from one read of its
+/// recorded workflow; none when the workflow cannot be read.
+pub fn loadLaunch(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Loaded {
+    var out: Loaded = .{};
     var links: Links = .{};
-    const info = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return links;
+    const info = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "launch.json" }), 1 << 20) catch return out;
     defer gpa.free(info);
-    const v = std.json.parseFromSliceLeaky(std.json.Value, a, info, .{}) catch return links;
-    const workdir = if (v == .object) (if (v.object.get("workdir")) |w| (if (w == .string) w.string else return links) else return links) else return links;
+    const v = std.json.parseFromSliceLeaky(std.json.Value, a, info, .{}) catch return out;
+    const workdir = if (v == .object) (if (v.object.get("workdir")) |w| (if (w == .string) w.string else return out) else return out) else return out;
     var problem: workflow.Problem = .{};
     defer if (problem.message.len > 0) gpa.free(problem.message);
-    var wf = workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), workdir, &problem) catch return links;
+    var wf = workflow.loadRecorded(gpa, try std.fs.path.join(a, &.{ launch_dir, "workflow" }), workdir, &problem) catch return out;
     defer wf.deinit();
-    var g = graph.build(gpa, &wf, &problem) catch return links;
+    out.names = naming.Names.init(a, wf.rules) catch null;
+    var g = graph.build(gpa, &wf, &problem) catch return out;
     defer g.deinit();
     for (wf.rules, 0..) |r, i| {
         const name = try a.dupe(u8, r.name);
@@ -1419,5 +1621,6 @@ pub fn loadLinks(gpa: Allocator, a: Allocator, launch_dir: []const u8) !Links {
             try pair[1].put(a, name, names);
         }
     }
-    return links;
+    out.links = links;
+    return out;
 }

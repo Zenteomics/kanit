@@ -106,7 +106,7 @@ test "[regression] - [watch]: S then R act on the same rule after its row moves"
     try testing.expectEqual(@as(?usize, 0), ui.action.?.rule);
 }
 
-test "[unit] - [watch]: a frame fits the terminal width, shortens long names in the middle and lists running rules first" {
+test "[unit] - [watch]: a frame fits the terminal width, cuts long names with a mark and lists running rules first" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("events.jsonl", ev_start ++ ev_rules);
@@ -134,7 +134,8 @@ test "[unit] - [watch]: a frame fits the terminal width, shortens long names in 
             cols += 1;
         }
         try testing.expect(cols <= 40);
-        for ([_][]const u8{ "align...name", "merge", "trim" }, 0..) |name, k| if (std.mem.indexOf(u8, line, name) != null) {
+        for ([_][]const u8{ "align_sam", "merge", "trim" }, 0..) |name, k| if (std.mem.indexOf(u8, line, name) != null) {
+            if (k == 0) try testing.expect(std.mem.indexOf(u8, line, "~") != null);
             order[found] = k;
             found += 1;
         };
@@ -200,7 +201,7 @@ fn visibleColumns(line: []const u8) usize {
     return cols;
 }
 
-test "[unit] - [watch]: without color a frame has no SGR sequences and draws bars with characters" {
+test "[unit] - [watch]: without color a frame has no SGR sequences, draws bars with marks and counts like the run log" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("events.jsonl", ev_start ++ ev_rules);
@@ -219,9 +220,10 @@ test "[unit] - [watch]: without color a frame has no SGR sequences and draws bar
         while (j < frame.len and (frame[j] < 0x40 or frame[j] > 0x7e)) j += 1;
         try testing.expect(frame[j] != 'm');
     }
-    try testing.expect(std.mem.indexOf(u8, frame, " progress  [") != null);
-    try testing.expect(std.mem.indexOf(u8, frame, "!") != null);
-    try testing.expect(std.mem.indexOf(u8, frame, "1 failed") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, " rules    ----") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, "0 of 3 done   1 running   1 waiting   1 failed") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, "  FAIL    trim ") != null);
+    try testing.expect(std.mem.indexOf(u8, frame, "  WAIT    merge ") != null);
 }
 
 test "[unit] - [watch]: with color a frame keeps its width and shows sampled memory against the request" {
@@ -246,8 +248,8 @@ test "[unit] - [watch]: with color a frame keeps its width and shows sampled mem
         var lines = std.mem.splitSequence(u8, out.written(), "\r\n");
         while (lines.next()) |line| try testing.expect(visibleColumns(line) <= width);
         if (width >= 120) {
-            try testing.expect(std.mem.indexOf(u8, out.written(), "202M/1.5G") != null);
-            try testing.expect(std.mem.indexOf(u8, out.written(), "2.9/3") != null);
+            try testing.expect(std.mem.indexOf(u8, out.written(), "202 MiB /  1.5 GiB") != null);
+            try testing.expect(std.mem.indexOf(u8, out.written(), "2.9 / 3") != null);
         }
     }
 }
@@ -296,7 +298,7 @@ test "[unit] - [watch]: the selection follows the top row until a key moves it" 
     try testing.expectEqual(@as(?usize, 2), ui.selected);
 }
 
-test "[unit] - [run]: the text view of a launch whose engine died says it did not finish and shows nothing running" {
+test "[unit] - [watch]: the text view of a launch whose engine died says it did not finish and shows nothing running" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("events.jsonl", ev_start ++ ev_rules);
@@ -305,11 +307,13 @@ test "[unit] - [run]: the text view of a launch whose engine died says it did no
     _ = try t.update();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.monitor.render(testing.allocator, &out.writer, &t, 0, false);
+    t.markUnfinished();
+    try workz.tui.snapshot(testing.allocator, &out.writer, &t, &.{}, 120, false, &workz.log.ascii, 0);
     const text = out.written();
-    try testing.expect(std.mem.indexOf(u8, text, "unfinished: its engine ended without recording its end") != null);
-    try testing.expect(std.mem.indexOf(u8, text, "running for") == null);
-    try testing.expect(std.mem.indexOf(u8, text, "RUNNING") == null);
+    try testing.expect(std.mem.indexOf(u8, text, " unfinished ") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  RUN ") == null);
+    try testing.expect(std.mem.indexOf(u8, text, " running") == null);
+    try testing.expect(std.mem.indexOf(u8, text, "  STOP    align_sample_with_a_long_name") != null);
 }
 
 fn summaryLaunch(s: *Scratch, events: []const u8, summary: ?[]const u8) ![]const u8 {
@@ -341,6 +345,35 @@ const summary_events = event("00", "\"event\":\"launch_started\",\"selected\":5,
     event("02", "\"event\":\"task_started\",\"rule\":\"S2__align\",\"attempt\":1,\"directory\":\"\"") ++
     event("03", "\"event\":\"task_finished\",\"rule\":\"S2__align\",\"attempt\":1,\"status\":\"failed\",\"reason\":\"exited with status 2: index is incomplete\"") ++
     event("03", "\"event\":\"task_blocked\",\"rule\":\"merge\"");
+
+test "[unit] - [watch]: the view shows each step's progress and names a blocked rule's cause, with the run log's tags" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const launch = try summaryLaunch(&s, summary_events, null);
+    var t = try workz.tracker.Tracker.init(testing.allocator, launch);
+    defer t.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const names = workz.names.ofLaunch(testing.allocator, arena.allocator(), launch).?;
+    t.names = &names;
+    _ = try t.update();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const links = try workz.tui.loadLinks(testing.allocator, arena.allocator(), launch);
+    try workz.tui.snapshot(testing.allocator, &out.writer, &t, &links, 120, false, &workz.log.ascii, workz.tracker.parseTime("2026-01-01T00:00:06.000Z").?);
+    const text = out.written();
+    try testing.expect(std.mem.indexOf(u8, text, "  trim   ################  2/2  +\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  align  ########--------  1/2  x 1 failed\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "  merge  ----------------  0/1  1 blocked\n") != null);
+    var blocked: ?[]const u8 = null;
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| if (std.mem.indexOf(u8, line, "BLOCK   merge") != null) {
+        blocked = line;
+    };
+    try testing.expect(std.mem.endsWith(u8, blocked.?, "after align/S2 failed"));
+    try testing.expect(std.mem.indexOf(u8, text, "\n  REUSE   trim   S2") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "\n  FAIL    align  S2") != null);
+}
 
 test "[unit] - [summary]: an ended launch shows its counts, a sample matrix, its failure, what it blocked and what to type next" {
     var s = try Scratch.init();
@@ -415,7 +448,7 @@ test "[edge] - [run]: program output becomes valid UTF-8 and cuts never split a 
     try testing.expectEqual(@as(usize, 20), try std.unicode.utf8CountCodepoints(short));
 }
 
-test "[failure] - [run]: the text view of a running launch whose events cannot be read shows an unknown start, not 1970" {
+test "[failure] - [watch]: the text view of a running launch whose events cannot be read shows an unknown start, not 1970" {
     var s = try Scratch.init();
     defer s.deinit();
     _ = try s.file("events.jsonl", "garbage\n");
@@ -424,9 +457,9 @@ test "[failure] - [run]: the text view of a running launch whose events cannot b
     _ = try t.update();
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
-    try workz.monitor.render(testing.allocator, &out.writer, &t, 0, true);
+    try workz.tui.snapshot(testing.allocator, &out.writer, &t, &.{}, 100, false, &workz.log.ascii, 0);
     const text = out.written();
-    try testing.expect(std.mem.indexOf(u8, text, "running, started at an unknown time") != null);
+    try testing.expect(std.mem.endsWith(u8, text[0..std.mem.indexOfScalar(u8, text, '\n').?], " running  -"));
     try testing.expect(std.mem.indexOf(u8, text, "1 line of events.jsonl could not be read and is left out") != null);
 }
 
@@ -477,7 +510,7 @@ test "[failure] - [watch]: the interactive view of a launch with no readable eve
         var ui: workz.tui.Ui = .{ .mode = mode };
         out.clearRetainingCapacity();
         try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 12, now, false);
-        try testing.expect(std.mem.indexOf(u8, out.written(), "-:--") != null);
+        try testing.expect(std.mem.indexOf(u8, out.written(), " running  - ") != null);
         try testing.expect(std.mem.indexOf(u8, out.written(), "49") == null);
     }
 }
@@ -609,12 +642,12 @@ test "[unit] - [watch]: enter follows the selected attempt's stderr, and o switc
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
-    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  running  stderr ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  RUN  stderr ") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") != null);
     ui.key(.{ .char = 'o' }, &rows, 10);
     out.clearRetainingCapacity();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
-    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  running  stdout ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  RUN  stdout ") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stdout") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") == null);
 }
@@ -660,7 +693,7 @@ test "[unit] - [watch]: i shows the selected rule's request and its live memory"
     defer out.deinit();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 12, now, true);
     const request = lineWith(out.written(), "request") orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, request, "1 threads, 64M") != null);
+    try testing.expect(std.mem.indexOf(u8, request, "1 thread, 64 MiB") != null);
     const memory = lineWith(out.written(), "  memory  ") orelse return error.TestUnexpectedResult;
-    try testing.expect(std.mem.indexOf(u8, memory, "202M now") != null);
+    try testing.expect(std.mem.indexOf(u8, memory, "202 MiB now") != null);
 }
