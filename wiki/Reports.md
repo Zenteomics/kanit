@@ -89,44 +89,44 @@ resource groups (while their rules waited)
   disk                              30.2 s waited; no run samples while they waited
 
 steps (the latest completed run of every rule)
-  STEP                            RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER
-  qc                                 6      3.0 s      99%        1    256 MiB  <=4.0 MiB    1.9 MiB     64 MiB  CPU-bound; ...
-  trim                               6      4.0 s      50%        2    512 MiB  <=3.9 MiB    1.7 MiB     64 MiB  runs fewer threads; ...
-  align                              6     17.0 s      92%        3    1.5 GiB    403 MiB    403 MiB    512 MiB  CPU-bound; ...
-  count                              6      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.6 MiB     64 MiB  CPU-bound; ...
-  report                             1      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.9 MiB     64 MiB  CPU-bound; ...
+  STEP    RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER
+  qc         6      3.0 s      99%        1    256 MiB  <=4.0 MiB    1.9 MiB     64 MiB  CPU-bound; ...
+  trim       6      4.0 s      50%        2    512 MiB  <=3.9 MiB    1.7 MiB     64 MiB  runs fewer threads; ...
+  align      6     17.0 s      92%        3    1.5 GiB    403 MiB    403 MiB    512 MiB  CPU-bound; ...
+  count      6      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.6 MiB     64 MiB  CPU-bound; ...
+  report     1      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.9 MiB     64 MiB  CPU-bound; ...
   USED: the largest resident memory of one process, or the cgroup peak for rules with shared inputs or containers
   PEAK: the memory charged to the rule's cgroup, page cache included; libraries already in memory count in USED only
   <=: at most this; a process started from the engine counts the engine's memory, which was larger
 
 time per category (the latest run of every rule)
-  CATEGORY                       STEPS  RUNS       WALL        CPU  CPU SHARE
-  alignment                          1     6     1m 42s     4m 43s        84%
-  trimming                           1     6     24.0 s     23.9 s         7%
-  qc                                 1     6     18.0 s     17.9 s         5%
-  quantification                     1     6     12.0 s     12.0 s         4%
-  report                             1     1      2.0 s      2.0 s         1%
+  CATEGORY        STEPS  RUNS       WALL        CPU  CPU SHARE
+  alignment           1     6     1m 42s     4m 43s        84%
+  trimming            1     6     24.0 s     23.9 s         7%
+  qc                  1     6     18.0 s     17.9 s         5%
+  quantification      1     6     12.0 s     12.0 s         4%
+  report              1     1      2.0 s      2.0 s         1%
 
 time per tool (the latest run of every rule)
-  TOOL                           STEPS  RUNS       WALL        CPU  CPU SHARE
-  bowtie2                            1     6     1m 42s     4m 43s        84%
-  fastp                              1     6     24.0 s     23.9 s         7%
-  fastqc                             1     6     18.0 s     17.9 s         5%
-  featureCounts                      1     6     12.0 s     12.0 s         4%
-  multiqc                            1     1      2.0 s      2.0 s         1%
+  TOOL           STEPS  RUNS       WALL        CPU  CPU SHARE
+  bowtie2            1     6     1m 42s     4m 43s        84%
+  fastp              1     6     24.0 s     23.9 s         7%
+  fastqc             1     6     18.0 s     17.9 s         5%
+  featureCounts      1     6     12.0 s     12.0 s         4%
+  multiqc            1     1      2.0 s      2.0 s         1%
 
 samples (the latest run of every rule), most CPU time first
-  SAMPLE                         STEPS  RUNS       WALL        CPU  SLOWEST STEP
-  S5                                 4     4     30.0 s     1m 06s  align 20.0 s
-  S2                                 4     4     28.0 s     1m 04s  align 20.0 s
-  S1                                 4     4     27.0 s     56.8 s  align 17.0 s
-  S4                                 4     4     25.0 s     55.1 s  align 16.9 s
-  S3                                 4     4     24.0 s     48.2 s  align 14.0 s
-  S6                                 4     4     22.0 s     46.3 s  align 14.0 s
+  SAMPLE  STEPS  RUNS       WALL        CPU  SLOWEST STEP
+  S5          4     4     30.0 s     1m 06s  align 20.0 s
+  S2          4     4     28.0 s     1m 04s  align 20.0 s
+  S1          4     4     27.0 s     56.8 s  align 17.0 s
+  S4          4     4     25.0 s     55.1 s  align 16.9 s
+  S3          4     4     24.0 s     48.2 s  align 14.0 s
+  S6          4     4     22.0 s     46.3 s  align 14.0 s
 
 shared inputs
-  NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
-  genome                         mapped        1      6      0.2 s     1m 06s    600 MiB    602 MiB          -
+  NAME    TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
+  genome  mapped        1      6      0.2 s     1m 06s    600 MiB    602 MiB          -
 
 use of the budget while rules ran (run samples every 5 s)
   threads reserved 5.4 of 6 on average; CPU cores in use 4.8 on average
@@ -206,13 +206,13 @@ note: the budgets differ, so the elapsed time compares the budgets as well as th
   thread-seconds reserved        386        386      0%
 
 per step (latest run of every rule)
-                                       WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL
-  STEP                           RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE
-  qc                                6      3.00    3.00      0%         2       2       -      17.9    17.9      0%
-  trim                              6      4.01    4.00      0%         2       2       -      23.9    23.9      0%  wall time within its runs' spread
-  align                             6     16.97   16.99      0%       403     404      0%     282.7   283.3      0%  wall time within its runs' spread
-  count                             6      2.00    2.00      0%         2       1       -      12.0    12.0      0%  wall time within its runs' spread
-  report                            1      2.00    2.00      0%         2       2       -       2.0     2.0      0%
+                WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL
+  STEP    RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE
+  qc         6      3.00    3.00      0%         2       2       -      17.9    17.9      0%
+  trim       6      4.01    4.00      0%         2       2       -      23.9    23.9      0%  wall time within its runs' spread
+  align      6     16.97   16.99      0%       403     404      0%     282.7   283.3      0%  wall time within its runs' spread
+  count      6      2.00    2.00      0%         2       1       -      12.0    12.0      0%  wall time within its runs' spread
+  report     1      2.00    2.00      0%         2       2       -       2.0     2.0      0%
 ```
 
 - The lines above the table give both budgets; notes say when the budgets, the workflow file or the engine differ, as the elapsed time then compares those too.

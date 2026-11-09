@@ -158,8 +158,8 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 
 ```text
 shared inputs
-  NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
-  genome                         service       1      2      0.2 s      0.8 s    1.0 GiB    191 MiB    256 MiB  declares 768 MiB more than the suggestion
+  NAME    TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST
+  genome  service       1      2      0.2 s      0.8 s    1.0 GiB    191 MiB    256 MiB  declares 768 MiB more than the suggestion
 ```
 
 A service holds mostly what it loaded, so its suggestion is the peak plus a twentieth, rounded up to a multiple of 64 MiB. A service loaded more than once, or one that failed, says so at the end of its line.
