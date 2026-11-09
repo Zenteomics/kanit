@@ -397,11 +397,11 @@ check "a service above its memory is reported as out of memory, and failed servi
 new service-dies
 { header service-dies
   service seg '"ipcmk -M 1048576"' 64M
-  srule u '[]' '["u.txt"]' '"sleep 20; touch u.txt"' seg
+  srule u '[]' '["u.txt"]' '"touch started.txt; sleep 20; touch u.txt"' seg
 } > wf.toml
 timeout 60 "$kanit" run wf.toml "${iso[@]}" --grace 1 -q --json > s.json 2> /dev/null &
 launcher=$!
-wait_until 100 'jq -e "select(.event == \"task_started\")" "$(last_launch)/events.jsonl" > /dev/null 2>&1'
+wait_until 100 '[ -f started.txt ]'
 podman kill "$(podman ps --quiet --filter "label=workz.workdir=$PWD" --filter name=-shared-seg-)" > /dev/null
 wait $launcher
 rc=$?
