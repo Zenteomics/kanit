@@ -3198,20 +3198,24 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     try writeSummary(gpa, a, &events, summary);
     engine.drawPage();
+    var source: summary_text.Source = undefined;
+    const read = source.load(gpa, launch.dir);
+    defer if (read) |_| source.deinit() else |_| {};
     if (engine.log.sinks[1]) |file| {
         var text: std.Io.Writer.Allocating = .init(gpa);
         defer text.deinit();
         try text.writer.writeAll("\n");
-        summary_text.write(gpa, &text.writer, launch.dir, .{ .marks = file.style.marks }) catch {};
+        if (read) |_| summary_text.render(&source, &text.writer, .{ .marks = file.style.marks }) catch {} else |_| {}
         engine.log.raw(1, text.written());
     }
     engine.endLog();
     if (!opts.json) {
+        try read;
         const tty = term.isTerminal(1);
         var out: std.Io.Writer.Allocating = .init(gpa);
         defer out.deinit();
         if (tty and engine.finished > 0 and !opts.quiet) try out.writer.writeAll("\n");
-        try summary_text.write(gpa, &out.writer, launch.dir, .{ .color = opts.color and term.colorOn(1, environ), .marks = logging.marksFor(environ), .cols = if (tty) term.size(1).cols else 0 });
+        try summary_text.render(&source, &out.writer, .{ .color = opts.color and term.colorOn(1, environ), .marks = logging.marksFor(environ), .cols = if (tty) term.size(1).cols else 0 });
         try sys.writeAll(1, out.written());
         return outcome;
     }

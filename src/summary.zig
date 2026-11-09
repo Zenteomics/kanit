@@ -157,22 +157,66 @@ const Row = struct {
     index: ?usize,
 };
 
+/// What a summary is drawn from: the launch's events, its `summary.json`
+/// and its recorded workflow. Reading them is most of a summary's cost, so
+/// `run`, which draws one for `launch.log` and one for standard output,
+/// reads them once.
+pub const Source = struct {
+    gpa: Allocator,
+    arena: std.heap.ArenaAllocator,
+    launch_dir: []const u8,
+    tr: tracker.Tracker,
+    summary_text: ?[]u8,
+    sum: ?std.json.Value,
+    snap: ?Snapshot,
+    live: bool,
+
+    /// Reads the launch in place; `deinit` frees it.
+    pub fn load(self: *Source, gpa: Allocator, launch_dir: []const u8) !void {
+        self.gpa = gpa;
+        self.launch_dir = launch_dir;
+        self.arena = std.heap.ArenaAllocator.init(gpa);
+        errdefer self.arena.deinit();
+        const a = self.arena.allocator();
+        self.tr = try tracker.Tracker.init(gpa, launch_dir);
+        errdefer self.tr.deinit();
+        _ = try self.tr.update();
+        self.live = !self.tr.finished and records.launchActive(gpa, launch_dir);
+        if (!self.tr.finished and !self.live) self.tr.markUnfinished();
+        self.summary_text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), records.launch_record_max) catch null;
+        self.sum = if (self.summary_text) |t| std.json.parseFromSliceLeaky(std.json.Value, a, t, .{ .allocate = .alloc_always }) catch null else null;
+        var blocked_n: usize = 0;
+        for (self.tr.rules.items) |r| blocked_n += @intFromBool(r.status == .blocked);
+        self.snap = snapshot(gpa, a, launch_dir, blocked_n > 0);
+    }
+
+    pub fn deinit(self: *Source) void {
+        if (self.summary_text) |t| self.gpa.free(t);
+        self.tr.deinit();
+        self.arena.deinit();
+    }
+};
+
 pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.Style) !void {
+    var src: Source = undefined;
+    try src.load(gpa, launch_dir);
+    defer src.deinit();
+    try render(&src, w, style);
+}
+
+/// Draws the summary of a launch read by `Source.load`.
+pub fn render(src: *Source, w: *Writer, style: logging.Style) !void {
+    const gpa = src.gpa;
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
     const a = arena.allocator();
-    var tr = try tracker.Tracker.init(gpa, launch_dir);
-    defer tr.deinit();
-    _ = try tr.update();
-    const live = !tr.finished and records.launchActive(gpa, launch_dir);
-    if (!tr.finished and !live) tr.markUnfinished();
-    const summary_text = sys.readFile(gpa, try std.fs.path.join(a, &.{ launch_dir, "summary.json" }), records.launch_record_max) catch null;
-    defer if (summary_text) |t| gpa.free(t);
-    const sum: ?std.json.Value = if (summary_text) |t| std.json.parseFromSliceLeaky(std.json.Value, a, t, .{ .allocate = .alloc_always }) catch null else null;
-
+    const launch_dir = src.launch_dir;
+    const tr = &src.tr;
+    const live = src.live;
+    const sum = src.sum;
+    const snap = src.snap;
     var blocked_n: usize = 0;
     for (tr.rules.items) |r| blocked_n += @intFromBool(r.status == .blocked);
-    const snap = snapshot(gpa, a, launch_dir, blocked_n > 0);
 
     const rows = try a.alloc(Row, tr.rules.items.len);
     for (tr.rules.items, rows) |r, *row| {
@@ -290,7 +334,7 @@ pub fn write(gpa: Allocator, w: *Writer, launch_dir: []const u8, style: logging.
             try nameCell(w, style, r.sample, widths.sample);
             try w.writeAll("  ");
         }
-        if (cause(&tr, snap, r)) |root| try w.print("after {s} {s}\n", .{ root.word, root.what }) else try w.writeAll("after a rule it needs did not complete\n");
+        if (cause(tr, snap, r)) |root| try w.print("after {s} {s}\n", .{ root.word, root.what }) else try w.writeAll("after a rule it needs did not complete\n");
         blocked_shown += 1;
     }
     if (blocked_n > blocked_shown) {
