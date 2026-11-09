@@ -148,9 +148,11 @@ pub fn writeSuggestions(w: *std.Io.Writer, l: *const model.Launch, format: Sugge
     }
     if (format == .json) return w.print("{f}\n", .{std.json.fmt(list.items, .{})});
     if (format == .table) {
-        try w.writeAll("  STEP                            RUNS  THREADS  SUGGEST     MEMORY       USED    SUGGEST  NOTE\n");
+        var sw: usize = "STEP".len;
+        for (list.items) |s| widen(&sw, s.step);
+        try w.print("  {f}  RUNS  THREADS  SUGGEST     MEMORY       USED    SUGGEST  NOTE\n", .{units.field("STEP", sw)});
         for (list.items) |s| {
-            try w.print("  {f} {d:>5} {d:>8.0} {d:>8.0} ", .{ units.field(s.step, 30), s.runs, s.threads, s.suggest_threads });
+            try w.print("  {f} {d:>5} {d:>8.0} {d:>8.0} ", .{ units.field(s.step, sw), s.runs, s.threads, s.suggest_threads });
             try units.right(w, 10, units.size, .{s.memory_mib});
             try w.writeAll(" ");
             try usedCell(w, s.used_mib, std.mem.eql(u8, s.used_basis, "engine_bound"));
@@ -225,11 +227,14 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
     try w.print("\n  attempts                {d:>10} {d:>10}\n  thread-seconds reserved {d:>10.0} {d:>10.0}", .{ was.rows.len, now.rows.len, reserved(was.rows), reserved(now.rows) });
     try change(w, reserved(was.rows), reserved(now.rows), 0, 1);
     try w.writeAll("\n\nper step (latest run of every rule)\n");
-    try w.writeAll("                                       WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL\n");
-    try w.writeAll("  STEP                           RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE\n");
     var names: std.StringArrayHashMapUnmanaged(void) = .empty;
     for (was.steps) |s| try names.put(a, s.name, {});
     for (now.steps) |s| try names.put(a, s.name, {});
+    var sw: usize = "STEP".len;
+    for (names.keys()) |name| widen(&sw, name);
+    try w.splatByteAll(' ', sw + 10);
+    try w.writeAll("WALL S, MEDIAN            PEAK MiB, LARGEST           CPU S, TOTAL\n");
+    try w.print("  {f}  RUNS  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE  BASELINE  LAUNCH CHANGE\n", .{units.field("STEP", sw)});
     for (names.keys()) |name| {
         const x = for (was.steps) |s| {
             if (std.mem.eql(u8, s.name, name)) break s;
@@ -237,7 +242,7 @@ pub fn writeCompare(gpa: Allocator, a: Allocator, w: *std.Io.Writer, was_dir: []
         const y = for (now.steps) |s| {
             if (std.mem.eql(u8, s.name, name)) break s;
         } else model.Step{ .name = name };
-        try w.print("  {f} {d:>4}", .{ units.field(name, 30), y.runs });
+        try w.print("  {f}  {d:>4}", .{ units.field(name, sw), y.runs });
         if (x.runs == 0 or y.runs == 0) {
             const ran = if (x.runs == 0) y else x;
             if (x.runs == 0) {
@@ -495,15 +500,25 @@ fn writeWaits(w: *std.Io.Writer, l: *const model.Launch) !void {
     }
 }
 
+/// A table's name column is as wide as its longest name, from its header's
+/// width up to `name_max`; a longer name is shortened in its middle.
+const name_max = 30;
+
+fn widen(width: *usize, name: []const u8) void {
+    width.* = @max(width.*, @min(name.len, name_max));
+}
+
 fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
     var reused: usize = 0;
     for (l.steps) |s| reused += s.reused;
     try w.writeAll("\nsteps (the latest completed run of every rule");
     if (reused > 0) try w.print("; {d} reused from earlier launches", .{reused});
     try w.writeAll(")\n");
-    try w.writeAll("  STEP                            RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER\n");
+    var sw: usize = "STEP".len;
+    for (l.steps) |s| widen(&sw, s.name);
+    try w.print("  {f}  RUNS     MEDIAN  CPU USE  THREADS    REQUEST       USED       PEAK    SUGGEST  CHARACTER\n", .{units.field("STEP", sw)});
     for (l.steps) |s| {
-        try w.print("  {f} {d:>5} ", .{ units.field(s.name, 30), s.runs });
+        try w.print("  {f} {d:>5} ", .{ units.field(s.name, sw), s.runs });
         if (s.runs == 0) {
             try w.print("{s:>10} {s:>8} {d:>8.0} ", .{ "-", "-", s.threads });
             try units.right(w, 10, units.size, .{s.request_mib});
@@ -570,9 +585,12 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
         const list = try l.totals(a, by);
         if (list.len > 0) {
             try w.print("\ntime per {s} (the latest run of every rule)\n", .{@tagName(by)});
-            try w.print("  {s:<30} STEPS  RUNS       WALL        CPU  CPU SHARE\n", .{if (by == .category) "CATEGORY" else "TOOL"});
+            const label = if (by == .category) "CATEGORY" else "TOOL";
+            var nw: usize = label.len;
+            for (list) |t| widen(&nw, t.name);
+            try w.print("  {f}  STEPS  RUNS       WALL        CPU  CPU SHARE\n", .{units.field(label, nw)});
             for (list) |t| {
-                try w.print("  {f} {d:>5} {d:>5} ", .{ units.field(t.name, 30), t.steps, t.runs });
+                try w.print("  {f}  {d:>5} {d:>5} ", .{ units.field(t.name, nw), t.steps, t.runs });
                 try units.right(w, 10, units.duration, .{t.wall_s});
                 try w.writeAll(" ");
                 try units.right(w, 10, units.duration, .{t.cpu_s});
@@ -584,9 +602,11 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
     const samples = try l.sampleRows(a);
     if (samples.len == 0) return;
     try w.writeAll("\nsamples (the latest run of every rule), most CPU time first\n");
-    try w.writeAll("  SAMPLE                         STEPS  RUNS       WALL        CPU  SLOWEST STEP\n");
+    var nw: usize = "SAMPLE".len;
+    for (samples) |row| widen(&nw, row.name);
+    try w.print("  {f}  STEPS  RUNS       WALL        CPU  SLOWEST STEP\n", .{units.field("SAMPLE", nw)});
     for (samples) |row| {
-        try w.print("  {f} {d:>5} {d:>5} ", .{ units.field(row.name, 30), row.steps, row.runs });
+        try w.print("  {f}  {d:>5} {d:>5} ", .{ units.field(row.name, nw), row.steps, row.runs });
         try units.right(w, 10, units.duration, .{row.wall_s});
         try w.writeAll(" ");
         try units.right(w, 10, units.duration, .{row.cpu_s});
@@ -603,10 +623,12 @@ fn writeTime(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !void {
 fn writeShared(w: *std.Io.Writer, l: *const model.Launch) !void {
     if (l.shared().len == 0) return;
     try w.writeAll("\nshared inputs\n");
-    try w.writeAll("  NAME                           TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST\n");
+    var nw: usize = "NAME".len;
+    for (l.shared()) |s| widen(&nw, s.name);
+    try w.print("  {f}  TYPE     STARTS  USERS       LOAD       HELD     MEMORY       PEAK    SUGGEST\n", .{units.field("NAME", nw)});
     for (l.shared()) |s| {
         const peak: f64 = if (s.memory_peak) |p| @as(f64, @floatFromInt(p)) / 1048576.0 else 0;
-        try w.print("  {f} {s:<8} {d:>6} {d:>6} ", .{ units.field(s.name, 30), if (s.service) "service" else "mapped", s.starts, s.users.items.len });
+        try w.print("  {f}  {s:<8} {d:>6} {d:>6} ", .{ units.field(s.name, nw), if (s.service) "service" else "mapped", s.starts, s.users.items.len });
         try units.right(w, 10, units.duration, .{s.load_s});
         try w.writeAll(" ");
         try units.right(w, 10, units.duration, .{s.held_s});

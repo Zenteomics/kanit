@@ -586,6 +586,29 @@ test "[unit] - [report]: the bottleneck report leads with its verdict, and a com
     try testing.expect(std.mem.indexOf(u8, out.written(), "note: the budgets differ") != null);
 }
 
+test "[unit] - [report]: a step table's STEP column is as wide as its longest step name" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try chainLaunch(&s, a, "one", 1);
+    try chainLaunch(&s, a, "two", 2);
+    const one = try std.fs.path.join(a, &.{ s.path, "one" });
+    const two = try std.fs.path.join(a, &.{ s.path, "two" });
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    try workz.report.writeBottlenecks(testing.allocator, a, &out.writer, one, null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n  STEP  RUNS     MEDIAN  CPU USE  THREADS") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n  join     1 ") != null);
+
+    out.clearRetainingCapacity();
+    try workz.report.writeCompare(testing.allocator, a, &out.writer, one, two, null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n              WALL S, MEDIAN            PEAK MiB, LARGEST") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n  STEP  RUNS  BASELINE  LAUNCH CHANGE") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "\n  join     1 ") != null);
+}
+
 test "[edge] - [report]: record fields that do not fit their type read as missing" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
