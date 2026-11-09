@@ -17,6 +17,7 @@ test {
     testing.refAllDecls(workz.monitor);
     testing.refAllDecls(workz.tracker);
     testing.refAllDecls(workz.fields);
+    testing.refAllDecls(workz.flat);
     testing.refAllDecls(workz.report);
     testing.refAllDecls(workz.sys);
     testing.refAllDecls(workz.run);
@@ -48,6 +49,7 @@ test {
     _ = @import("test_schedule.zig");
     _ = @import("test_names.zig");
     _ = @import("test_log.zig");
+    _ = @import("test_flat.zig");
 }
 
 test "the version is a semantic version" {

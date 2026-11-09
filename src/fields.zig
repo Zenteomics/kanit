@@ -10,13 +10,11 @@ pub fn get(v: Value, key: []const u8) ?Value {
 }
 
 pub fn str(v: Value, key: []const u8) ?[]const u8 {
-    const x = get(v, key) orelse return null;
-    return if (x == .string) x.string else null;
+    return strOf(get(v, key));
 }
 
 pub fn int(v: Value, key: []const u8) ?i64 {
-    const x = get(v, key) orelse return null;
-    return if (x == .integer and x.integer >= 0) x.integer else null;
+    return intOf(get(v, key));
 }
 
 pub fn whole(comptime T: type, v: Value, key: []const u8) ?T {
@@ -25,6 +23,23 @@ pub fn whole(comptime T: type, v: Value, key: []const u8) ?T {
 
 pub fn float(v: Value, key: []const u8) ?f64 {
     return number(get(v, key));
+}
+
+/// The rules of `str`, `int` and `newer` for a field already found, so a
+/// record read without a JSON tree reads its fields the same way.
+pub fn strOf(x: ?Value) ?[]const u8 {
+    const y = x orelse return null;
+    return if (y == .string) y.string else null;
+}
+
+pub fn intOf(x: ?Value) ?i64 {
+    const y = x orelse return null;
+    return if (y == .integer and y.integer >= 0) y.integer else null;
+}
+
+pub fn newerOf(x: ?Value, known: i64) bool {
+    const y = x orelse return false;
+    return y != .integer or y.integer > known;
 }
 
 pub fn number(x: ?Value) ?f64 {
@@ -38,6 +53,5 @@ pub fn number(x: ?Value) ?f64 {
 }
 
 pub fn newer(v: Value, known: i64) bool {
-    const x = get(v, "v") orelse return false;
-    return x != .integer or x.integer > known;
+    return newerOf(get(v, "v"), known);
 }

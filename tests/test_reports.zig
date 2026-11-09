@@ -628,6 +628,31 @@ test "[failure] - [report]: a record or event of a newer format is left out and 
     try testing.expectEqualStrings("b", l.rows[0].rule);
 }
 
+test "[failure] - [report]: an event version that is not a known integer is counted the same in flat lines and in lines read as a tree" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.dir("launch");
+    _ = try s.file("launch/events.jsonl",
+        \\{"v":1,"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4}
+        \\{"v":[1],"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","attempt":1}
+        \\{"v":"1","time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","attempt":1}
+        \\{"v":1.0,"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","attempt":1}
+        \\{"v":{"n":1},"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","attempt":1}
+        \\{"v":[1],"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"a","reason":"\"","attempt":1}
+        \\{"time":"2026-01-01T00:00:01.000Z","event":"task_started","rule":"b","attempt":1}
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var tr = try workz.tracker.Tracker.init(testing.allocator, try std.fs.path.join(arena.allocator(), &.{ s.path, "launch" }));
+    defer tr.deinit();
+    _ = try tr.update();
+
+    try testing.expectEqual(@as(usize, 5), tr.unreadable_lines);
+    try testing.expect(tr.index.get("a") == null);
+    try testing.expectEqual(workz.tracker.Status.running, tr.rules.items[tr.index.get("b").?].status);
+}
+
 test "[failure] - [report]: the bottleneck report, a comparison and the page name the records they leave out" {
     var s = try Scratch.init();
     defer s.deinit();

@@ -9,6 +9,7 @@ const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
 const fields = @import("fields.zig");
+const flat = @import("flat.zig");
 const records = @import("records.zig");
 const naming = @import("names.zig");
 const event_version = records.event_version;
@@ -40,6 +41,73 @@ pub const Status = enum {
 
     pub fn done(s: Status) bool {
         return s == .completed or s == .reused;
+    }
+};
+
+/// An event line's fields, read from the flat line or from its JSON tree
+/// with the same rules (`fields.zig`).
+const Fields = union(enum) {
+    flat: *const flat.Flat,
+    tree: std.json.Value,
+
+    fn get(self: Fields, key: []const u8) ?std.json.Value {
+        return switch (self) {
+            .flat => |f| f.get(key),
+            .tree => |v| fields.get(v, key),
+        };
+    }
+
+    fn str(self: Fields, key: []const u8) ?[]const u8 {
+        return fields.strOf(self.get(key));
+    }
+
+    fn int(self: Fields, key: []const u8) ?i64 {
+        return fields.intOf(self.get(key));
+    }
+
+    fn whole(self: Fields, comptime T: type, key: []const u8) ?T {
+        return std.math.cast(T, self.int(key) orelse return null);
+    }
+
+    fn float(self: Fields, key: []const u8) ?f64 {
+        return fields.number(self.get(key));
+    }
+
+    /// An array version is newer too, as `fields.newer` reads one.
+    fn newer(self: Fields, known: i64) bool {
+        return self.isArray("v") or fields.newerOf(self.get("v"), known);
+    }
+
+    /// Whether `key` holds an array, and its string items in order.
+    fn isArray(self: Fields, key: []const u8) bool {
+        return switch (self) {
+            .flat => |f| f.isArray(key),
+            .tree => |v| if (fields.get(v, key)) |x| x == .array else false,
+        };
+    }
+
+    fn strings(self: Fields, key: []const u8) Strings {
+        return switch (self) {
+            .flat => |f| .{ .flat = f.strings(key) },
+            .tree => |v| .{ .tree = if (fields.get(v, key)) |x| (if (x == .array) x.array.items else &.{}) else &.{} },
+        };
+    }
+};
+
+const Strings = union(enum) {
+    flat: flat.Strings,
+    tree: []const std.json.Value,
+
+    fn next(self: *Strings) ?[]const u8 {
+        switch (self.*) {
+            .flat => |*f| return f.next(),
+            .tree => |*items| while (items.len > 0) {
+                const x = items.*[0];
+                items.* = items.*[1..];
+                if (x == .string) return x.string;
+            },
+        }
+        return null;
     }
 };
 
@@ -274,66 +342,68 @@ pub const Tracker = struct {
         if (line.len == 0) return;
         var scratch = std.heap.ArenaAllocator.init(self.gpa);
         defer scratch.deinit();
-        const v = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| {
+        var line_fields: flat.Flat = undefined;
+        const v: Fields = if (flat.read(&line_fields, line)) .{ .flat = &line_fields } else .{ .tree = std.json.parseFromSliceLeaky(std.json.Value, scratch.allocator(), line, .{}) catch |err| {
             if (err == error.OutOfMemory) return err;
             self.unreadable_lines += 1;
             return;
-        };
-        if (fields.newer(v, event_version)) {
+        } };
+        if (v.newer(event_version)) {
             self.unreadable_lines += 1;
             return;
         }
         const a = self.arena.allocator();
-        const ev = str(v, "event") orelse return;
-        const at = parseTime(str(v, "time") orelse "") orelse 0;
+        const ev = v.str("event") orelse return;
+        const at = parseTime(v.str("time") orelse "") orelse 0;
         if (self.started_ns == 0) self.started_ns = at;
         if (at > self.last_ns) self.last_ns = at;
         const eql = std.mem.eql;
         if (eql(u8, ev, "launch_started")) {
             self.launch_ns = at;
-            self.checks_s = @max(fields.float(v, "checks_s") orelse 0, 0);
-            self.selected = whole(u32, v, "selected") orelse 0;
-            self.max_threads = whole(u32, v, "max_threads") orelse 0;
-            self.max_memory_mib = whole(u64, v, "max_memory_mib") orelse 0;
-            self.max_jobs = whole(u32, v, "jobs") orelse 0;
-            self.run_cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-            if (v.object.get("rules")) |rs| if (rs == .array) for (rs.array.items) |n| if (n == .string) {
-                const r = try self.rule(n.string);
+            self.checks_s = @max(v.float("checks_s") orelse 0, 0);
+            self.selected = v.whole(u32, "selected") orelse 0;
+            self.max_threads = v.whole(u32, "max_threads") orelse 0;
+            self.max_memory_mib = v.whole(u64, "max_memory_mib") orelse 0;
+            self.max_jobs = v.whole(u32, "jobs") orelse 0;
+            self.run_cg = if (v.str("cgroup")) |cg| try a.dupe(u8, cg) else null;
+            var rule_names = v.strings("rules");
+            while (rule_names.next()) |n| {
+                const r = try self.rule(n);
                 r.status = .pending;
-            };
+            }
         } else if (eql(u8, ev, "launch_ending")) {
             self.ending = true;
         } else if (eql(u8, ev, "launch_finished")) {
             self.finished = true;
             self.finished_ns = at;
-            self.final_status = try a.dupe(u8, str(v, "status") orelse "");
-            self.final_error = try a.dupe(u8, str(v, "error") orelse "");
+            self.final_status = try a.dupe(u8, v.str("status") orelse "");
+            self.final_error = try a.dupe(u8, v.str("error") orelse "");
         } else if (eql(u8, ev, "output_preserved")) {
-            self.previous_bytes += whole(u64, v, "bytes") orelse 0;
+            self.previous_bytes += v.whole(u64, "bytes") orelse 0;
         } else if (eql(u8, ev, "sample")) {
-            self.memory_current = if (int(v, "memory_current")) |m| @intCast(m) else null;
-            self.cpu_cores = if (float(v, "cpu_cores_used")) |c| @max(c, 0) else null;
+            self.memory_current = if (v.int("memory_current")) |m| @intCast(m) else null;
+            self.cpu_cores = if (v.float("cpu_cores_used")) |c| @max(c, 0) else null;
             try self.samples.append(a, .{
                 .ns = at,
-                .threads_reserved = @max(float(v, "threads_reserved") orelse 0, 0),
-                .memory_reserved_mib = @max(float(v, "memory_reserved_mib") orelse 0, 0),
-                .shared_reserved_mib = @max(float(v, "shared_reserved_mib") orelse 0, 0),
+                .threads_reserved = @max(v.float("threads_reserved") orelse 0, 0),
+                .memory_reserved_mib = @max(v.float("memory_reserved_mib") orelse 0, 0),
+                .shared_reserved_mib = @max(v.float("shared_reserved_mib") orelse 0, 0),
                 .memory_current = self.memory_current,
                 .cpu_cores = self.cpu_cores,
             });
         } else if (std.mem.startsWith(u8, ev, "shared_")) {
-            const s = try self.sharedView(str(v, "name") orelse "?");
+            const s = try self.sharedView(v.str("name") orelse "?");
             s.state = if (eql(u8, ev, "shared_loading")) "loading" else if (eql(u8, ev, "shared_loaded")) "ready" else if (eql(u8, ev, "shared_released")) "released" else if (eql(u8, ev, "shared_failed")) "failed" else s.state;
-            if (int(v, "memory_peak")) |m| s.memory_peak = @max(s.memory_peak orelse 0, @as(u64, @intCast(m)));
+            if (v.int("memory_peak")) |m| s.memory_peak = @max(s.memory_peak orelse 0, @as(u64, @intCast(m)));
             if (eql(u8, ev, "shared_loading")) {
-                s.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
+                s.cg = if (v.str("cgroup")) |cg| try a.dupe(u8, cg) else null;
                 s.starts += 1;
                 s.loading_ns = at;
-                if (float(v, "memory_mib")) |m| {
+                if (v.float("memory_mib")) |m| {
                     s.service = true;
                     s.declared_mib = m;
-                    s.reserved_mib = float(v, "reserved_mib");
-                } else if (float(v, "bytes")) |b| s.declared_mib = b / 1048576.0;
+                    s.reserved_mib = v.float("reserved_mib");
+                } else if (v.float("bytes")) |b| s.declared_mib = b / 1048576.0;
             } else if (eql(u8, ev, "shared_loaded")) {
                 if (s.loading_ns > 0) s.load_s += @as(f64, @floatFromInt(at - s.loading_ns)) / 1e9;
             } else if (eql(u8, ev, "shared_failed")) s.failed = true;
@@ -343,7 +413,7 @@ pub const Tracker = struct {
                 s.held_s += @as(f64, @floatFromInt(at - s.held_since)) / 1e9;
                 s.held_since = 0;
             }
-        } else if (std.mem.startsWith(u8, ev, "task_")) if (str(v, "rule")) |name| {
+        } else if (std.mem.startsWith(u8, ev, "task_")) if (v.str("rule")) |name| {
             const r = try self.rule(name);
             const ri = self.index.get(name).?;
             if (eql(u8, ev, "task_waiting") or eql(u8, ev, "task_started")) {
@@ -352,9 +422,9 @@ pub const Tracker = struct {
             if (eql(u8, ev, "task_waiting")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .waiting;
-                if (whole(u32, v, "threads")) |n| r.threads = n;
-                if (whole(u64, v, "memory_mib")) |n| r.memory_mib = n;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
+                if (v.whole(u32, "threads")) |n| r.threads = n;
+                if (v.whole(u64, "memory_mib")) |n| r.memory_mib = n;
+                r.reason = try a.dupe(u8, v.str("reason") orelse "");
                 if (std.mem.startsWith(u8, r.reason, "group:")) {
                     try self.open_wait.put(a, ri, self.group_waits.items.len);
                     try self.group_waits.append(a, .{ .rule = ri, .group = r.reason["group:".len..], .from_ns = at });
@@ -362,36 +432,37 @@ pub const Tracker = struct {
             } else if (eql(u8, ev, "task_started")) {
                 if (r.ready_ns == 0) r.ready_ns = at;
                 r.status = .running;
-                r.attempt = whole(u32, v, "attempt") orelse 0;
-                r.dir = try a.dupe(u8, str(v, "directory") orelse "");
-                r.cg = if (str(v, "cgroup")) |cg| try a.dupe(u8, cg) else null;
-                r.threads = whole(u32, v, "threads") orelse 0;
-                r.memory_mib = whole(u64, v, "memory_mib") orelse 0;
+                r.attempt = v.whole(u32, "attempt") orelse 0;
+                r.dir = try a.dupe(u8, v.str("directory") orelse "");
+                r.cg = if (v.str("cgroup")) |cg| try a.dupe(u8, cg) else null;
+                r.threads = v.whole(u32, "threads") orelse 0;
+                r.memory_mib = v.whole(u64, "memory_mib") orelse 0;
                 r.started_ns = at;
                 r.finished_ns = 0;
                 r.wall_s = null;
-                if (v.object.get("shared")) |list| if (list == .array) {
+                if (v.isArray("shared")) {
                     var names: std.ArrayList([]const u8) = .empty;
-                    for (list.array.items) |item| if (item == .string) {
-                        try names.append(a, try a.dupe(u8, item.string));
-                        const sv = try self.sharedView(item.string);
+                    var items = v.strings("shared");
+                    while (items.next()) |item| {
+                        try names.append(a, try a.dupe(u8, item));
+                        const sv = try self.sharedView(item);
                         if (std.mem.indexOfScalar(usize, sv.users.items, ri) == null) try sv.users.append(a, ri);
-                    };
+                    }
                     r.shared = names.items;
-                };
+                }
                 r.reason = "";
                 r.live_memory = null;
                 r.live_peak = null;
                 r.live_cores = null;
                 r.live_cpu_usec = null;
             } else if (eql(u8, ev, "task_finished")) {
-                const st = str(v, "status") orelse "";
+                const st = v.str("status") orelse "";
                 r.status = if (eql(u8, st, "completed")) .completed else if (eql(u8, st, "cancelled")) .cancelled else .failed;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
+                r.reason = try a.dupe(u8, v.str("reason") orelse "");
                 r.finished_ns = at;
-                if (int(v, "memory_peak")) |m| r.memory_peak = @intCast(m);
-                r.cpu_s = float(v, "cpu_s");
-                r.wall_s = float(v, "wall_s");
+                if (v.int("memory_peak")) |m| r.memory_peak = @intCast(m);
+                r.cpu_s = v.float("cpu_s");
+                r.wall_s = v.float("wall_s");
             } else if (eql(u8, ev, "task_retry")) {
                 r.status = .retrying;
             } else if (eql(u8, ev, "task_reused")) {
@@ -400,7 +471,7 @@ pub const Tracker = struct {
                 r.status = .blocked;
             } else if (eql(u8, ev, "task_failed")) {
                 r.status = .failed;
-                r.reason = try a.dupe(u8, str(v, "reason") orelse "");
+                r.reason = try a.dupe(u8, v.str("reason") orelse "");
                 if (r.finished_ns == 0) r.finished_ns = at;
             } else if (eql(u8, ev, "task_cancelling")) {
                 r.status = .cancelling;

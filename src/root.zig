@@ -12,6 +12,7 @@ pub const plan = @import("plan.zig");
 pub const monitor = @import("monitor.zig");
 pub const tracker = @import("tracker.zig");
 pub const fields = @import("fields.zig");
+pub const flat = @import("flat.zig");
 pub const tui = @import("tui.zig");
 pub const term = @import("term.zig");
 pub const html = @import("html.zig");
