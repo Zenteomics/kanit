@@ -65,7 +65,7 @@ Rules connect through their files: a rule that reads `out/S1.count` runs after t
 
 ## Quick start
 
-kanit needs Linux on x86-64 with cgroup v2, a systemd user manager and unprivileged user namespaces; [Installation](https://github.com/zenteomics/kanit/wiki/Installation) checks each one. Building needs Zig 0.16.0.
+kanit needs Linux on x86-64 with cgroup v2, a systemd user manager and unprivileged user namespaces; [Installation](https://github.com/zenteomics/kanit/wiki/Installation) checks each one and installs a release binary. Building from a checkout needs Zig 0.16.0.
 
 ```sh
 zig build -Doptimize=ReleaseSafe

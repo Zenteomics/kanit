@@ -1,4 +1,4 @@
-kanit is one executable. This page lists what it needs from the system, builds it from source and checks that isolated runs work on your machine.
+kanit is one executable. This page lists what it needs from the system, installs a release or builds it from source, and checks that isolated runs work on your machine.
 
 ## Requirements
 
@@ -11,6 +11,21 @@ kanit is one executable. This page lists what it needs from the system, builds i
 - **Zig 0.16.0**, to build `kanit`.
 
 Without a systemd user manager or cgroup v2, `kanit run --no-isolation` still runs workflows within the budget, but without per-attempt limits, counters or a private network ([Running workflows](Running-Workflows.md#without-isolation)).
+
+## Download
+
+Each [release](https://github.com/zenteomics/kanit/releases) has a static binary for Linux x86-64, packed with its licence notices, and a `SHA256SUMS` file:
+
+```sh
+version=0.8.0
+curl -fLO https://github.com/zenteomics/kanit/releases/download/v$version/kanit-$version-x86_64-linux.tar.gz
+curl -fLO https://github.com/zenteomics/kanit/releases/download/v$version/SHA256SUMS
+sha256sum --check SHA256SUMS
+tar -xzf kanit-$version-x86_64-linux.tar.gz
+install -m 755 kanit-$version-x86_64-linux/kanit ~/.local/bin/kanit
+```
+
+`gh attestation verify kanit-$version-x86_64-linux.tar.gz --repo zenteomics/kanit` checks that the archive was built by this repository's release workflow from the tagged source. The binary is the same `ReleaseSafe` build as below.
 
 ## Build
 
