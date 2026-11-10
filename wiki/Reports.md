@@ -235,7 +235,7 @@ Results in .../methods: 3 rules, finished from 2026-11-07T06:09:35.603Z to 2026-
 workflow
   methods 2.1, file sha256:fa26c0dbdbdc30630c5c4568700781e8846cb512cf5001f0ab01cae77d6302f0
 engine
-  kanit 0.7.0 sha256:354e59f1b3f4282be083232c11faa0ce99e420e75f44741f6076c87a919eacda
+  kanit 0.8.0 sha256:...
 launches
   20261107T060935.595-2f3ad294 (2 rules)
   20261107T060935.630-4aa809c8 (1 rule)

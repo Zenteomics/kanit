@@ -37,7 +37,7 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 ```text
-kanit 0.7.0
+kanit 0.8.0
 ```
 
 `ReleaseSafe` keeps Zig's safety checks in the shipped executable. A plain `zig build` gives a Debug build for development, and `zig build test --summary all` runs the unit tests.

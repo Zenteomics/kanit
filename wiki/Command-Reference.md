@@ -252,7 +252,7 @@ kanit help [COMMAND]
 kanit COMMAND --help
 ```
 
-`kanit help` lists the commands grouped by job. `kanit help COMMAND`, `kanit COMMAND --help` and `kanit COMMAND -h` show a command's usage, options with their defaults, and examples. `kanit version` (or `--version`) prints the version, such as `kanit 0.7.0`.
+`kanit help` lists the commands grouped by job. `kanit help COMMAND`, `kanit COMMAND --help` and `kanit COMMAND -h` show a command's usage, options with their defaults, and examples. `kanit version` (or `--version`) prints the version, such as `kanit 0.8.0`.
 
 A mistyped command or option is named in the error with the one probably meant:
 

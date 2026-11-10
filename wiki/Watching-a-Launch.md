@@ -56,7 +56,7 @@ Here the qc and trim rules, which need one or two threads, run first. Each align
 When its output is not a terminal, `watch` prints the same view as text, without the keys, at every refresh until the launch ends; `--once` prints it once:
 
 ```text
- kanit 0.7.0   rnaseq-demo   launch 20261109T041754.108-aaf9b485                                       running  18.0 s
+ kanit 0.8.0   rnaseq-demo   launch 20261109T041754.108-aaf9b485                                       running  18.0 s
  rules    ━━━━━━━━━━━━────────────────────────────  8 of 25 done   3 running   14 waiting
  threads  ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━───────  6 of 6 reserved   5.0 cores busy
  memory   ━━━━━───────────────────────────────────  2.2 GiB of 6.0 GiB reserved   812 MiB in use
@@ -129,7 +129,7 @@ When its output is not a terminal, `watch` prints the same view as text, without
 The summary is the same text off a terminal, without colors. With `--json`, `status` prints the launch's [summary.json](Records.md#summaryjson) as written instead; while the launch runs, it prints the summary's fields so far, with `"status": "running"`, so a script can poll one command whatever the launch's state (shortened here):
 
 ```json
-{"engine":"kanit 0.7.0 sha256:...",...,"status":"running","counts":{"completed":10,...},...}
+{"engine":"kanit 0.8.0 sha256:...",...,"status":"running","counts":{"completed":10,...},...}
 ```
 
 `kanit status --history [N]` prints one line for each of the last N launches (default 10), newest first:

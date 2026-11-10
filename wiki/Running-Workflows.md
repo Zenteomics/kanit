@@ -18,7 +18,7 @@ Before a long launch, `kanit plan --budget` checks that every rule fits the budg
 `run` writes a row for every event of the launch, on standard error and in the launch's `launch.log`; a terminal leaves out the `START` rows and keeps a footer of the steps below the rows. Off a terminal:
 
 ```text
-kanit 0.7.0   rnaseq-mini   launch 20261108T121740.229-ab51811a
+kanit 0.8.0   rnaseq-mini   launch 20261108T121740.229-ab51811a
           plan         7 rules: 4 steps for 2 samples
           budget       4 threads, 4.0 GiB, 4 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html
@@ -143,7 +143,7 @@ If the engine itself is killed, the process holding its network namespace detect
 An attempt fails when its command exits with a non-zero status, is killed, runs out of memory, runs past its timeout, or exits 0 without writing a declared output. With `--keep-going`, four such failures look like this on a terminal:
 
 ```text
-kanit 0.7.0   failures   launch 20261108T121728.669-4d10cd11
+kanit 0.8.0   failures   launch 20261108T121728.669-4d10cd11
           plan         5 rules
           budget       4 threads, 1.0 GiB, 4 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html

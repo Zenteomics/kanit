@@ -113,7 +113,7 @@ kanit run workflow.toml --max-threads 4 --max-memory 4G
 ```
 
 ```text
-kanit 0.7.0   star-shared   launch 20261108T121727.146-6881d0a6
+kanit 0.8.0   star-shared   launch 20261108T121727.146-6881d0a6
           plan         2 rules: 1 step
           budget       4 threads, 4.0 GiB, 4 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html
