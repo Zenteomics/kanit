@@ -79,6 +79,9 @@ pub const commands = [_]Command{
         \\{name} takes a sample-sheet column, a [params] value or the step name; in
         \\shell, {input}, {output} and {threads} name the rule's own, and {name:q}
         \\quotes the value for the shell. Other braces, and ${name}, stay as written.
+        \\A step whose enabled is false, given or from a param, writes no rules, so
+        \\two routes of a step may share its name; shared inputs only it names are
+        \\left out.
         \\--params FILE is a run file: its [workflow] keys and [params] take the place
         \\of the template's, its [samples] replaces the template's with a sheet read
         \\beside it, and the workflow goes beside it. The result is checked as validate

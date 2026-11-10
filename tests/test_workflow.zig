@@ -635,6 +635,104 @@ test "[unit] - [prepare]: a template becomes one rule per sample, with labels, g
     };
 }
 
+test "[unit] - [prepare]: a step whose enabled is false writes no rules, and a shared input only it names is left out" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[params]
+        \\aligner_star = true
+        \\aligner_starz = "false"
+        \\[samples]
+        \\names = ["s1", "s2"]
+        \\[shared.genome]
+        \\path = "genome"
+        \\[shared.refz]
+        \\path = "{refz_dir}"
+        \\[shared.unused]
+        \\path = "unused"
+        \\[[steps]]
+        \\name = "star"
+        \\for_each = "sample"
+        \\enabled = "{aligner_star}"
+        \\output = ["{sample}.bam"]
+        \\shell = "star > {output}"
+        \\resources = { memory = "1M", shared = ["genome"] }
+        \\[[steps]]
+        \\name = "starz"
+        \\for_each = "sample"
+        \\enabled = "{aligner_starz}"
+        \\output = ["{sample}.bam"]
+        \\shell = "starz {refz_dir} > {output}"
+        \\resources = { memory = "1M", shared = ["refz"] }
+        \\[[steps]]
+        \\name = "extra"
+        \\enabled = false
+        \\output = ["extra.txt"]
+        \\shell = "true"
+        \\memory = "1M"
+        \\[[steps]]
+        \\name = "count"
+        \\for_each = "sample"
+        \\input = ["{sample}.bam"]
+        \\output = ["{sample}.txt"]
+        \\shell = "wc -l {input} > {output}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    try testing.expectEqual(@as(usize, 2), problem.left_out.items.len);
+    try testing.expectEqualStrings("starz", problem.left_out.items[0]);
+    try testing.expectEqualStrings("extra", problem.left_out.items[1]);
+    for ([_][]const u8{ "# Left out, since their enabled is false: starz, extra\n", "[shared.genome]", "[shared.unused]", "name = \"s1__star\"", "name = \"s2__star\"", "name = \"s2__count\"" }) |want|
+        if (std.mem.indexOf(u8, text, want) == null) {
+            std.debug.print("missing:\n{s}\nin:\n{s}\n", .{ want, text });
+            return error.TestUnexpectedResult;
+        };
+    for ([_][]const u8{ "[shared.refz]", "{refz_dir}", "__starz", "extra.txt", "enabled =" }) |unwanted|
+        if (std.mem.indexOf(u8, text, unwanted) != null) {
+            std.debug.print("unexpected {s} in:\n{s}\n", .{ unwanted, text });
+            return error.TestUnexpectedResult;
+        };
+}
+
+test "[unit] - [prepare]: two routes of a step share its name, one enabled at a time" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    const path = try s.file("pipeline.toml",
+        \\[workflow]
+        \\name = "p"
+        \\[params]
+        \\host = true
+        \\container = false
+        \\[[steps]]
+        \\name = "align"
+        \\enabled = "{container}"
+        \\container = "aligner:1"
+        \\output = ["a.bam"]
+        \\shell = "align > {output}"
+        \\memory = "1M"
+        \\[[steps]]
+        \\name = "align"
+        \\enabled = "{host}"
+        \\output = ["a.bam"]
+        \\shell = "alignz > {output}"
+        \\memory = "1M"
+        \\
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    var problem: workz.prepare.Problem = .{};
+    const text = try workz.prepare.compile(testing.allocator, arena.allocator(), path, "pipeline.toml", &problem);
+    try testing.expect(std.mem.indexOf(u8, text, "# Left out, since their enabled is false: another route of align\n") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "shell = \"alignz > a.bam\"") != null);
+    try testing.expect(std.mem.indexOf(u8, text, "aligner:1") == null);
+}
+
 test "[unit] - [prepare]: mistakes in a template are named" {
     var s = try Scratch.init();
     defer s.deinit();
@@ -649,6 +747,11 @@ test "[unit] - [prepare]: mistakes in a template are named" {
         .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\ninput = \"in.txt\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "step a: input must be a list of paths" },
         .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [1]\nshell = \"cat {output}\"\n", .want = "step a: output must be a list of paths" },
         .{ .text = "[workflow]\nname = \"p\"\n[samples]\nnames = []\n[[steps]]\nname = \"a\"\nfor_each = \"sample\"\noutput = [\"{sample}.txt\"]\nshell = \"true\"\n", .want = "samples.names lists no sample" },
+        .{ .text = "[workflow]\nname = \"p\"\n[params]\non = \"yes\"\n[[steps]]\nname = \"a\"\nenabled = \"{on}\"\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "step a: enabled is 'yes'; it takes true or false" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\nenabled = 1\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "step a: enabled takes true or false" },
+        .{ .text = "[workflow]\nname = \"p\"\n[samples]\nnames = [\"s1\"]\n[[steps]]\nname = \"a\"\nfor_each = \"sample\"\nenabled = \"{sample}\"\noutput = [\"{sample}.txt\"]\nshell = \"true\"\n", .want = "step a: enabled names {sample}, a column of the sample sheet" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\nenable = false\noutput = [\"a.txt\"]\nshell = \"true\"\n", .want = "unknown key 'enable'; did you mean 'enabled'?" },
+        .{ .text = "[workflow]\nname = \"p\"\n[[steps]]\nname = \"a\"\noutput = [\"a.txt\"]\nshell = \"true\"\n[[steps]]\nname = \"a\"\nenabled = true\noutput = [\"b.txt\"]\nshell = \"true\"\n", .want = "two enabled steps are named a" },
     }, 0..) |c, k| {
         var name_buf: [16]u8 = undefined;
         const path = try s.file(try std.fmt.bufPrint(&name_buf, "t{d}.toml", .{k}), c.text);

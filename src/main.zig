@@ -497,7 +497,10 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     }
     try sys.rename(c.gpa, tmp, out_path);
     keep_tmp = true;
-    try out(c.io, "wrote {s}: {d} {s} from {d} {s}. Next: kanit graph --by step, then kanit plan\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps" });
+    var left_out: std.ArrayList(u8) = .empty;
+    for (problem.left_out.items, 0..) |name, k| try left_out.print(c.a, "{s}{s}{s}", .{ if (k == 0) ", leaving out " else ", ", if (steps.contains(name)) "another route of " else "", name });
+    if (left_out.items.len > 0) try left_out.appendSlice(c.a, ", whose enabled is false");
+    try out(c.io, "wrote {s}: {d} {s} from {d} {s}{s}. Next: kanit graph --by step, then kanit plan\n", .{ out_path, wf.rules.len, if (wf.rules.len == 1) "rule" else "rules", steps.count(), if (steps.count() == 1) "step" else "steps", left_out.items });
     return .ok;
 }
 

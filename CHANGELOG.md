@@ -28,6 +28,7 @@ Two changes need action:
   - `kanit logs` without a rule prints the newest launch's failed attempts, each stream headed by the rule, attempt, outcome and size, and `-n N` prints the last N lines.
   - `run -v` keeps a line for every rule that starts on a terminal.
 - `plan --json`, `verify --json` and `status --history --json` print JSON.
+- A template step's `enabled`, `true`, `false` or a param, lets one template hold two routes of a step: `prepare` writes no rules for a step whose `enabled` is false, nor the shared inputs only it names.
 
 ### Changed
 

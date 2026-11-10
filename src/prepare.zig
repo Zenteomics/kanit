@@ -6,7 +6,8 @@
 //! awk programs stay as written, and `${name}` is always the shell's
 //! variable. The result is a plain workflow file with `step` and `sample`
 //! labels on every rule, checked by the same parser as any other; the engine
-//! itself expands nothing.
+//! itself expands nothing. A step whose `enabled` is false writes no rules,
+//! so one template can hold two routes of a step, chosen by a param.
 const std = @import("std");
 const toml = @import("toml");
 const sys = @import("sys.zig");
@@ -31,6 +32,8 @@ pub const Sheet = struct {
 pub const Problem = struct {
     message: []const u8 = "",
     notes: std.ArrayList([]const u8) = .empty,
+    /// The steps whose `enabled` was false, in template order.
+    left_out: std.ArrayList([]const u8) = .empty,
 };
 
 pub const Error = error{ Invalid, OutOfMemory, WriteFailed };
@@ -366,14 +369,43 @@ fn paths(a: Allocator, problem: *Problem, step: []const u8, key: []const u8, v: 
     return out;
 }
 
-fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const toml.Table, name: []const u8, scope: Scope) !void {
+/// A step's `enabled`: a boolean, or a string that is `true` or `false` once
+/// its params are filled. A step without it is enabled. It takes params, not
+/// sample-sheet columns, since a step writes rules for every sample or none.
+fn enabled(a: Allocator, problem: *Problem, step: *const toml.Table, name: []const u8, sheet: ?Sheet, params: *const std.StringArrayHashMapUnmanaged([]const u8)) Error!bool {
+    const v = step.get("enabled") orelse return true;
+    const text = switch (v) {
+        .boolean => |b| return b,
+        .string => |s| s,
+        else => return fail(a, problem, "step {s}: enabled takes true or false", .{name}),
+    };
+    if (sheet) |sh| for (sh.columns) |col| if (std.mem.indexOf(u8, text, try std.fmt.allocPrint(a, "{{{s}}}", .{col})) != null)
+        return fail(a, problem, "step {s}: enabled names {{{s}}}, a column of the sample sheet; it takes params, since a step writes rules for every sample or none", .{ name, col });
+    const scope: Scope = .{ .sheet = null, .row = null, .params = params, .place = try std.fmt.allocPrint(a, "step {s}", .{name}), .step = name };
+    const filled = try subst(a, problem, scope, "enabled", text);
+    if (eql(u8, filled, "true")) return true;
+    if (eql(u8, filled, "false")) return false;
+    return fail(a, problem, "step {s}: enabled is '{s}'; it takes true or false", .{ name, filled });
+}
+
+/// Adds the shared inputs a step's `resources` names to `names`.
+fn sharedNames(a: Allocator, resources: ?toml.Value, names: *std.StringHashMapUnmanaged(void)) !void {
+    const r = resources orelse return;
+    if (r != .table) return;
+    const list = r.table.get("shared") orelse return;
+    if (list != .array) return;
+    for (list.array.items) |item| if (item == .string) try names.put(a, item.string, {});
+}
+
+fn writeRule(a: Allocator, w: *std.Io.Writer, problem: *Problem, step: *const toml.Table, name: []const u8, scope: Scope, used: *std.StringHashMapUnmanaged(void)) !void {
     var values: std.StringArrayHashMapUnmanaged(toml.Value) = .empty;
     var it = step.iterator();
     while (it.next()) |e| {
         const key = e.key_ptr.*;
-        if (eql(u8, key, "name") or eql(u8, key, "for_each") or eql(u8, key, "shell")) continue;
+        if (eql(u8, key, "name") or eql(u8, key, "for_each") or eql(u8, key, "enabled") or eql(u8, key, "shell")) continue;
         try values.put(a, key, try ruleValue(a, problem, scope, key, e.value_ptr.*));
     }
+    try sharedNames(a, values.get("resources"), used);
     if (step.get("shell")) |sh| {
         var s = scope;
         s.input = try paths(a, problem, name, "input", values.get("input"));
@@ -505,11 +537,59 @@ pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []cons
     try addParams(a, problem, doc.get("params"), shown, sheet, &params);
     if (run_doc) |d| try addParams(a, problem, d.get("params"), run.?.shown, sheet, &params);
 
+    // The steps come first: the shared inputs written depend on which steps
+    // are enabled.
+    const steps_v = doc.get("steps") orelse return fail(a, problem, "{s} declares no [[steps]]", .{shown});
+    if (steps_v != .array) return fail(a, problem, "{s}: steps must be an array of tables, [[steps]]", .{shown});
+    var names: std.StringHashMapUnmanaged(void) = .empty;
+    var only_left_out: std.StringHashMapUnmanaged(void) = .empty;
+    var rules: std.Io.Writer.Allocating = .init(a);
+    var used: std.StringHashMapUnmanaged(void) = .empty;
+    for (steps_v.array.items, 0..) |sv, k| {
+        if (sv != .table) return fail(a, problem, "{s}: step {d} must be a table", .{ shown, k + 1 });
+        const step = sv.table;
+        const name_v = step.get("name") orelse return fail(a, problem, "{s}: step {d} has no name", .{ shown, k + 1 });
+        if (name_v != .string or !workflow.validName(name_v.string)) return fail(a, problem, "{s}: step {d} needs a name of letters, digits, '_', '.', '-'", .{ shown, k + 1 });
+        const name = name_v.string;
+        var kit = step.iterator();
+        while (kit.next()) |e| {
+            const key = e.key_ptr.*;
+            if (eql(u8, key, "for_each") or eql(u8, key, "enabled")) continue;
+            if (eql(u8, key, "step") or eql(u8, key, "sample")) return fail(a, problem, "step {s}: {s} is set by kanit prepare; leave it out", .{ name, key });
+            if (contains(&workflow.rule_keys, key)) continue;
+            if (workflow.closest(&(workflow.rule_keys ++ [_][]const u8{"enabled"}), key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
+            return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });
+        }
+        if (!try enabled(a, problem, step, name, sheet, &params)) {
+            try problem.left_out.append(a, try a.dupe(u8, name));
+            try sharedNames(a, step.get("resources"), &only_left_out);
+            continue;
+        }
+        // Two routes of a step may share its name, one enabled at a time.
+        if ((try names.fetchPut(a, name, {})) != null) return fail(a, problem, "{s}: two enabled steps are named {s}", .{ shown, name });
+        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .place = try std.fmt.allocPrint(a, "step {s}", .{name}), .step = name };
+        if (step.get("for_each")) |fe| {
+            if (fe != .string or !eql(u8, fe.string, "sample")) return fail(a, problem, "step {s}: for_each takes \"sample\"", .{name});
+            const sh = sheet orelse return fail(a, problem, "step {s}: for_each = \"sample\" needs a [samples] table", .{name});
+            for (sh.rows) |row| {
+                var s = scope;
+                s.row = row;
+                try writeRule(a, &rules.writer, problem, step, name, s, &used);
+            }
+        } else try writeRule(a, &rules.writer, problem, step, name, scope, &used);
+    }
+
     var out: std.Io.Writer.Allocating = .init(a);
     const w = &out.writer;
     if (run) |r| {
-        try w.print("# Written by `kanit prepare` from {s} with {s}: edit those files and run it\n# again, since changes made here are lost.\n\n", .{ std.fs.path.basename(shown), std.fs.path.basename(r.shown) });
-    } else try w.print("# Written by `kanit prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n\n", .{std.fs.path.basename(shown)});
+        try w.print("# Written by `kanit prepare` from {s} with {s}: edit those files and run it\n# again, since changes made here are lost.\n", .{ std.fs.path.basename(shown), std.fs.path.basename(r.shown) });
+    } else try w.print("# Written by `kanit prepare` from {s}: edit that file and run it again,\n# since changes made here are lost.\n", .{std.fs.path.basename(shown)});
+    if (problem.left_out.items.len > 0) {
+        try w.writeAll("# Left out, since their enabled is false:");
+        for (problem.left_out.items, 0..) |name, k| try w.print("{s} {s}{s}", .{ if (k > 0) "," else "", if (names.contains(name)) "another route of " else "", name });
+        try w.writeAll("\n");
+    }
+    try w.writeAll("\n");
     for ([_][]const u8{ "workflow", "defaults" }) |name| {
         const over: ?toml.Value = if (eql(u8, name, "workflow")) (if (run_doc) |d| d.get("workflow") else null) else null;
         const base = doc.get(name);
@@ -528,6 +608,7 @@ pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []cons
         if (v != .table) return fail(a, problem, "{s}: {s} must be a table", .{ shown, name });
         var git = v.table.iterator();
         while (git.next()) |e| {
+            if (eql(u8, name, "shared") and only_left_out.contains(e.key_ptr.*) and !used.contains(e.key_ptr.*)) continue;
             if (e.value_ptr.* != .table) return fail(a, problem, "{s}: {s}.{s} must be a table", .{ shown, name, e.key_ptr.* });
             const scope: Scope = .{ .sheet = null, .row = null, .params = &params, .place = try std.fmt.allocPrint(a, "{s}.{s}", .{ name, e.key_ptr.* }) };
             const filled = try ruleValue(a, problem, scope, name, e.value_ptr.*);
@@ -535,36 +616,7 @@ pub fn compileWith(gpa: Allocator, a: Allocator, path: []const u8, shown: []cons
         }
     };
 
-    const steps_v = doc.get("steps") orelse return fail(a, problem, "{s} declares no [[steps]]", .{shown});
-    if (steps_v != .array) return fail(a, problem, "{s}: steps must be an array of tables, [[steps]]", .{shown});
-    var names: std.StringHashMapUnmanaged(void) = .empty;
-    for (steps_v.array.items, 0..) |sv, k| {
-        if (sv != .table) return fail(a, problem, "{s}: step {d} must be a table", .{ shown, k + 1 });
-        const step = sv.table;
-        const name_v = step.get("name") orelse return fail(a, problem, "{s}: step {d} has no name", .{ shown, k + 1 });
-        if (name_v != .string or !workflow.validName(name_v.string)) return fail(a, problem, "{s}: step {d} needs a name of letters, digits, '_', '.', '-'", .{ shown, k + 1 });
-        const name = name_v.string;
-        if ((try names.fetchPut(a, name, {})) != null) return fail(a, problem, "{s}: two steps are named {s}", .{ shown, name });
-        var kit = step.iterator();
-        while (kit.next()) |e| {
-            const key = e.key_ptr.*;
-            if (eql(u8, key, "for_each")) continue;
-            if (eql(u8, key, "step") or eql(u8, key, "sample")) return fail(a, problem, "step {s}: {s} is set by kanit prepare; leave it out", .{ name, key });
-            if (contains(&workflow.rule_keys, key)) continue;
-            if (workflow.closest(&workflow.rule_keys, key)) |hint| return fail(a, problem, "step {s}: unknown key '{s}'; did you mean '{s}'?", .{ name, key, hint });
-            return fail(a, problem, "step {s}: unknown key '{s}'", .{ name, key });
-        }
-        const scope: Scope = .{ .sheet = sheet, .row = null, .params = &params, .place = try std.fmt.allocPrint(a, "step {s}", .{name}), .step = name };
-        if (step.get("for_each")) |fe| {
-            if (fe != .string or !eql(u8, fe.string, "sample")) return fail(a, problem, "step {s}: for_each takes \"sample\"", .{name});
-            const sh = sheet orelse return fail(a, problem, "step {s}: for_each = \"sample\" needs a [samples] table", .{name});
-            for (sh.rows) |row| {
-                var s = scope;
-                s.row = row;
-                try writeRule(a, w, problem, step, name, s);
-            }
-        } else try writeRule(a, w, problem, step, name, scope);
-    }
+    try w.writeAll(rules.written());
     return out.written();
 }
 
