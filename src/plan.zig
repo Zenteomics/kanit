@@ -72,7 +72,7 @@ pub const Context = struct {
             const devnull = try sys.openRead(self.gpa, "/dev/null");
             defer sys.close(devnull);
             var unresolved: ?container.Unresolved = null;
-            images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &unresolved);
+            images = try container.resolveImages(self.gpa, self.a, podman, refs, &envp, devnull, &unresolved, null);
             if (unresolved) |u| std.debug.print("kanit: a run would refuse: {s}\n", .{try u.text(self.a)});
         }
         return container.ruleExtras(self.a, self.wf, &images);

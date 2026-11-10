@@ -117,6 +117,24 @@ test "a service runs in a shareable IPC namespace in its own /tmp and waits on i
     try testing.expect(std.mem.indexOf(u8, script, "{\nload\n} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n") != null);
 }
 
+test "[unit] - [containers]: an image's inspect line gives its ID and the registry digests Podman lists" {
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const pulled = workz.container.parseInspect(a, "a2fb83af [\"quay.io/biocontainers/arriba@sha256:702a3e8d\",\"localhost/arriba@sha256:702a3e8d\"]\n").?;
+    try testing.expectEqualStrings("a2fb83af", pulled.id);
+    try testing.expectEqual(@as(usize, 2), pulled.digests.len);
+    try testing.expectEqualStrings("quay.io/biocontainers/arriba@sha256:702a3e8d", pulled.digests[0]);
+    try testing.expectEqualStrings("localhost/arriba@sha256:702a3e8d", pulled.digests[1]);
+    for ([_][]const u8{ "06f472f4 []\n", "06f472f4 null\n", "06f472f4\n", "06f472f4 [unreadable" }) |line| {
+        const local = workz.container.parseInspect(a, line).?;
+        try testing.expectEqualStrings("06f472f4", local.id);
+        try testing.expectEqual(@as(usize, 0), local.digests.len);
+    }
+    try testing.expect(workz.container.parseInspect(a, " \n") == null);
+    try testing.expect(workz.container.parseInspect(a, "") == null);
+}
+
 test "an image mount becomes a read-only volume at its target" {
     var arena = std.heap.ArenaAllocator.init(testing.allocator);
     defer arena.deinit();

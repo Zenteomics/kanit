@@ -149,9 +149,12 @@ Written when the launch ends, and printed by `kanit run` as one line. From the d
 | `outputs`              | each output's `path`, `id` and `sha256`                    |
 | `diagnostics`          | the diagnostics files it kept, as the workflow names them  |
 | `image`                | the image ID a container rule ran, else `null`             |
+| `image_digests`        | that image's registry digests, else `null`                 |
 | `version`              | the rule's version command, else `null`                    |
 | `queue`                | `waited_s`, and `reasons`: each `reason` with its `seconds` |
 | `key`                  | the rule key the attempt ran under                         |
+
+`image_digests` lists the image's digests as `podman image inspect` gives them in `RepoDigests`, such as `quay.io/biocontainers/arriba@sha256:...`: a digest a registry serves, so the same image can be pulled by it. A locally built image lists its own `localhost/NAME@sha256:...`, which no registry serves, and an image may list none, or one for each registry it came from.
 
 `rusage.engine_maxrss_kib` is the engine's own peak resident memory when the attempt started. A process started from the engine counts that much as its own peak, so a `maxrss_kib` no larger only says the command used at most that much; reports mark such a figure `<=`.
 

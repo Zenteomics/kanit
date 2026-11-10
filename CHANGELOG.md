@@ -4,6 +4,12 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line, and each version says first what such a change needs from you.
 
+## [Unreleased]
+
+### Added
+
+- Each container attempt's `record.json` lists its image's registry digests in `image_digests`, beside the image ID in `image`, so a methods text can name an image a reader can pull.
+
 ## [0.8.0] - 2026-11-10
 
 The run log becomes one aligned table by tool, step and sample, and `run`, `status` and `watch` share its columns and summary. Large workflows run in about a quarter less time and a third less memory, and one pipeline template can hold two routes of a step, chosen by a param.

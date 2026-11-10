@@ -338,6 +338,7 @@ const Engine = struct {
     podman: ?[]const u8 = null,
     containers_cg: ?cgroup.Group = null,
     images: std.StringHashMapUnmanaged([]const u8) = .empty,
+    image_digests: std.StringHashMapUnmanaged([]const []const u8) = .empty,
     extras: []const []const u8 = &.{},
     sigfd: sys.Fd,
 
@@ -1529,6 +1530,7 @@ const Engine = struct {
             .cgroup = counters,
             .request = .{ .threads = r.threads, .memory_mib = r.memory_mib, .reserved_mib = reservedMib(r), .groups = r.groups, .shared = r.shared, .container = r.container },
             .image = if (r.container) |img| self.images.get(img) else null,
+            .image_digests = if (r.container) |img| self.image_digests.get(img) else null,
             .version = r.version,
             .labels = r.labels,
             .outputs = outputs.items,
@@ -2799,13 +2801,14 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
 
     var podman: ?[]const u8 = null;
     var images: std.StringHashMapUnmanaged([]const u8) = .empty;
+    var image_digests: std.StringHashMapUnmanaged([]const []const u8) = .empty;
     const refs = try container.imageRefs(a, wf, mask);
     if (refs.len > 0) {
         const tc = sys.monoNs();
         podman = (try container.findPodman(gpa, a, environ.get("PATH") orelse "/usr/bin:/bin")) orelse
             return refusal.refuse(.invalid, "the workflow has container rules but podman is not on PATH");
         var unresolved: ?container.Unresolved = null;
-        images = try container.resolveImages(gpa, a, podman.?, refs, &host_envp, devnull, &unresolved);
+        images = try container.resolveImages(gpa, a, podman.?, refs, &host_envp, devnull, &unresolved, &image_digests);
         if (unresolved) |u| return refusal.refuse(.invalid, try u.text(a));
         const removed = try container.removeLeftovers(gpa, a, podman.?, wf.root, &host_envp, devnull);
         events.emit("containers_checked", .{ .images = images.count(), .leftovers_removed = removed, .seconds = @as(f64, @floatFromInt(sys.monoNs() - tc)) / 1e9 });
@@ -2941,6 +2944,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .podman = podman,
         .containers_cg = containers_cg,
         .images = images,
+        .image_digests = image_digests,
         .extras = extras,
         .bash = findBash(gpa) orelse {
             std.debug.print("kanit: bash not found\n", .{});

@@ -27,12 +27,32 @@ pub const Unresolved = struct {
     }
 };
 
-pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []const []const u8, envp: *const process.Vec, devnull: sys.Fd, unresolved: *?Unresolved) !std.StringHashMapUnmanaged([]const u8) {
+/// One line of `podman image inspect --format '{{.Id}} {{json .RepoDigests}}'`:
+/// the image ID, and the image's digests in the registries it came from, as
+/// `REPOSITORY@sha256:...`. A locally built image lists its own `localhost/`
+/// name, which no registry serves; the reader of a record tells them apart.
+pub const Inspected = struct { id: []const u8, digests: []const []const u8 };
+
+/// Null for a line without an ID. A digest list Podman prints as `null`, or
+/// that does not parse, reads as empty: the ID alone still names the image.
+pub fn parseInspect(a: Allocator, line: []const u8) ?Inspected {
+    const text = std.mem.trim(u8, line, " \n");
+    const space = std.mem.indexOfScalar(u8, text, ' ') orelse text.len;
+    const id = text[0..space];
+    if (id.len == 0) return null;
+    const list = std.mem.trim(u8, text[space..], " ");
+    const digests = std.json.parseFromSliceLeaky([]const []const u8, a, list, .{ .allocate = .alloc_always }) catch &.{};
+    return .{ .id = id, .digests = digests };
+}
+
+/// The image ID of each reference, from one `podman image inspect` each;
+/// `digests`, when given, also receives each reference's registry digests.
+pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []const []const u8, envp: *const process.Vec, devnull: sys.Fd, unresolved: *?Unresolved, digests: ?*std.StringHashMapUnmanaged([]const []const u8)) !std.StringHashMapUnmanaged([]const u8) {
     var ids: std.StringHashMapUnmanaged([]const u8) = .empty;
     for (refs) |ref| {
         if (ids.contains(ref)) continue;
         var status: u32 = 0;
-        const out = process.capture(gpa, a, &.{ podman, "image", "inspect", "--format", "{{.Id}}", ref }, envp, devnull, &status) catch |err| switch (err) {
+        const out = process.capture(gpa, a, &.{ podman, "image", "inspect", "--format", "{{.Id}} {{json .RepoDigests}}", ref }, envp, devnull, &status) catch |err| switch (err) {
             error.CommandFailed => {
                 var exists_status: u32 = 0;
                 _ = process.capture(gpa, a, &.{ podman, "image", "exists", ref }, envp, devnull, &exists_status) catch {};
@@ -42,12 +62,12 @@ pub fn resolveImages(gpa: Allocator, a: Allocator, podman: []const u8, refs: []c
             },
             else => return err,
         };
-        const id = std.mem.trim(u8, out, " \n");
-        if (id.len == 0) {
+        const image = parseInspect(a, out) orelse {
             unresolved.* = .{ .ref = ref, .missing = true };
             return ids;
-        }
-        try ids.put(a, ref, try a.dupe(u8, id));
+        };
+        try ids.put(a, ref, try a.dupe(u8, image.id));
+        if (digests) |d| try d.put(a, ref, image.digests);
     }
     return ids;
 }

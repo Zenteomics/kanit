@@ -291,6 +291,7 @@ new container-version
 "$kanit" run wf.toml "${iso[@]}" -q --json > s.json
 l=".workz/launches/$(jq -r .launch s.json)"
 check "a version command runs once per image in the image, and the record names the image ID" 'jq -e ".v == 1 and (.commands | length) == 1 and (.commands[0].output | startswith(\"sort (GNU coreutils)\")) and .commands[0].image == \"$(jq -r .image "$l/attempts/c1/001/record.json")\"" "$l/versions.json" > /dev/null'
+check "the record lists the image's registry digests beside its ID, as podman lists them" '[ "$(jq -c .image_digests "$l/attempts/c1/001/record.json")" = "$(podman image inspect --format "{{json .RepoDigests}}" "$img")" ] && jq -e ".image_digests | length > 0" "$l/attempts/c1/001/record.json" > /dev/null'
 
 new container-version-reuse
 { header container-version-reuse; crule c1 '[]' '["c1.txt"]' '"touch c1.txt"' "$img" 'version = "date +%s%N"'; } > wf.toml
