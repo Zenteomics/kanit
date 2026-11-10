@@ -559,7 +559,7 @@ fn writeSteps(w: *std.Io.Writer, l: *const model.Launch) !void {
         if (s.reused > 0) try w.print("; {d} reused", .{s.reused});
         try w.writeAll("\n");
     }
-    try w.writeAll("  USED: the largest resident memory of one process, or the cgroup peak for rules with shared inputs or containers\n");
+    try w.writeAll("  USED: the largest resident memory of one process, or the anonymous memory sampled in the cgroup for rules with shared inputs or containers\n");
     try w.writeAll("  PEAK: the memory charged to the rule's cgroup, page cache included; libraries already in memory count in USED only\n");
     for (l.steps) |s| if (s.used_bound) {
         try w.writeAll(bound_note);

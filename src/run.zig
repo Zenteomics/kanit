@@ -2526,10 +2526,17 @@ fn protectScope(gpa: Allocator, a: Allocator, tree: cgroup.Tree, mib: u64, path_
     return true;
 }
 
+/// The memory an attempt used, measured as the reports measure it
+/// (`model.Attempt.usedMib`).
 fn usedMib(r: *const workflow.Rule, t: *const Task, counters: ?cgroup.Counters, reaped: process.Reaped) ?f64 {
-    if (counters) |c| if (c.memory_peak) |p| if (r.shared.len > 0 or r.container != null or c.oom_kill > 0) return @as(f64, @floatFromInt(p)) / 1048576.0;
+    const mib = 1048576.0;
+    if (counters) |c| if (c.memory_peak) |p| {
+        const peak = @as(f64, @floatFromInt(p)) / mib;
+        if (c.oom_kill > 0) return peak;
+        if (r.shared.len > 0 or r.container != null) return if (t.anon_peak) |b| @as(f64, @floatFromInt(b)) / mib else peak;
+    };
     const rss = @as(f64, @floatFromInt(reaped.usage.maxrss)) / 1024.0;
-    const anon = if (t.anon_peak) |b| @as(f64, @floatFromInt(b)) / 1048576.0 else 0;
+    const anon = if (t.anon_peak) |b| @as(f64, @floatFromInt(b)) / mib else 0;
     if (anon > rss) return anon;
     if (reaped.usage.maxrss > t.engine_rss_kib) return rss;
     return null;

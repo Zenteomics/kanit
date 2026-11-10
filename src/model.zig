@@ -82,8 +82,16 @@ pub const Attempt = struct {
         return self.cpuEfficiency() < 0.1 and memory < @max(self.request_mib * 0.05, 64);
     }
 
+    /// A rule with shared inputs or a container is measured in its cgroup,
+    /// since its processes' resident memory misses a container's processes
+    /// and counts shared pages. Its cgroup peak counts page cache, which any
+    /// large read fills up to the limit and which is reclaimed there, so the
+    /// anonymous memory sampled in the cgroup is the measure. The peak stands
+    /// in for an attempt shorter than one sample, and for one whose processes
+    /// were killed for memory, whose peak shows that it reached the limit.
     pub fn usedMib(self: Attempt) f64 {
-        if (self.uses_shared or self.in_container) if (self.peak_mib) |p| return p;
+        if (self.uses_shared or self.in_container) if (self.peak_mib) |p|
+            return if (self.oom_kill > 0) p else self.anon_mib orelse p;
         return @max(self.rss_mib, self.anon_mib orelse 0);
     }
 

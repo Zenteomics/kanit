@@ -48,6 +48,7 @@ Two changes need action:
 
 ### Fixed
 
+- `report --suggest`, the bottleneck report and the run log measure a rule with a container or shared inputs by the anonymous memory sampled in its cgroup, so page cache that filled its limit no longer raises its suggested request.
 - `kanit watch` counts blocked rules as blocked, not as failed, and a view started before its launch wrote its records shows the launch's names once they are written.
 - `report --format html` and the launch page draw a launch whose `launch_started` event selects none of the rules that ran, instead of stopping on an index out of bounds.
 

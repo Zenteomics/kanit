@@ -95,7 +95,7 @@ steps (the latest completed run of every rule)
   align      6     17.0 s      92%        3    1.5 GiB    403 MiB    403 MiB    512 MiB  CPU-bound; ...
   count      6      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.6 MiB     64 MiB  CPU-bound; ...
   report     1      2.0 s     100%        1    256 MiB  <=3.9 MiB    1.9 MiB     64 MiB  CPU-bound; ...
-  USED: the largest resident memory of one process, or the cgroup peak for rules with shared inputs or containers
+  USED: the largest resident memory of one process, or the anonymous memory sampled in the cgroup for rules with shared inputs or containers
   PEAK: the memory charged to the rule's cgroup, page cache included; libraries already in memory count in USED only
   <=: at most this; a process started from the engine counts the engine's memory, which was larger
 
@@ -181,7 +181,7 @@ report  1     1        1.00          1                256         4         engi
 
 - `runs` counts the step's rules with a completed run, the latest of each. A suggestion from one or two runs covers only the inputs those runs had; the HTML page says how many runs it rests on.
 - `threads_used` is the largest CPU time over wall time of any run. `suggest_threads` rounds it up, ignoring a surplus under 0.05, and never exceeds the current request.
-- `used_mib` is the largest memory any run used, as `used_basis` says: `process` is the largest resident memory of one process; `engine_bound` is that figure when it is no larger than the engine's own memory, which a process started from the engine counts, so the command used at most that much; `cgroup` is the cgroup peak, for rules that use shared inputs or containers, whose work the processes' resident memory misses, or the anonymous memory sampled in the cgroup when several processes at once held more than the largest of them.
+- `used_mib` is the largest memory any run used, as `used_basis` says: `process` is the largest resident memory of one process; `engine_bound` is that figure when it is no larger than the engine's own memory, which a process started from the engine counts, so the command used at most that much; `cgroup` is the anonymous memory sampled in the cgroup every 5 s, for rules that use shared inputs or containers, whose work the processes' resident memory misses, and for rules whose processes at once held more than the largest of them. It leaves out page cache, which a large read fills up to the limit and which the kernel reclaims there, so a request that held a step is not suggested larger for its cache. An attempt shorter than one sample counts its cgroup peak instead, as does one killed for memory.
 - `peak_mib` is the largest cgroup peak, page cache included.
 - `suggest_mib` is `used_mib` plus 20%, rounded up to a multiple of 64 MiB, and at least 64 MiB.
 - `note` is `measured`; `out_of_memory` when an attempt was killed for exceeding its memory, and the suggestion is then at least half again the request it exceeded; or `idle` when most runs were idle, and the suggestion keeps the current request.

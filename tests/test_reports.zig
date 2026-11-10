@@ -292,6 +292,47 @@ test "[regression] - [report]: memory sizes and bounds follow what was held and 
     try testing.expectApproxEqAbs(@as(f64, (2.0 * 96.0 * 3.0 + 512.0) / 96.0), memory.seconds, 1e-6);
 }
 
+test "[regression] - [report]: a container step whose page cache filled its limit is sized from its anonymous memory, not raised past its request" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    for ([_][]const u8{ "launch", "launch/attempts", "launch/attempts/fusion", "launch/attempts/fusion/001", "launch/attempts/strand", "launch/attempts/strand/001", "launch/attempts/split", "launch/attempts/split/001" }) |d| _ = try s.dir(d);
+    _ = try s.file("launch/events.jsonl",
+        \\{"time":"2026-01-01T00:00:00.000Z","event":"launch_started","max_threads":4,"max_memory_mib":16384}
+        \\
+    );
+    // At its 6144 MiB limit, 1067 times, with 4928 MiB of anonymous memory.
+    _ = try s.file("launch/attempts/fusion/001/record.json",
+        \\{"rule":"fusion","attempt":1,"status":"completed","reason":"","wall_s":47.0,"cpu_s":46.0,"request":{"threads":1,"memory_mib":6144,"container":"img"},
+        \\"rusage":{"maxrss_kib":51028},"cgroup":{"memory_peak":6442450944,"anon_peak":5167382528,"memory_max_events":1067,"oom_kill":0,"file":688914432}}
+    );
+    // Shorter than one sample: no anonymous figure, so the cgroup peak.
+    _ = try s.file("launch/attempts/strand/001/record.json",
+        \\{"rule":"strand","attempt":1,"status":"completed","reason":"","wall_s":2.0,"cpu_s":1.5,"request":{"threads":1,"memory_mib":2048,"container":"img"},
+        \\"rusage":{"maxrss_kib":51028},"cgroup":{"memory_peak":96468992,"anon_peak":null,"oom_kill":0}}
+    );
+    // A process killed for memory: the peak shows that the limit was reached.
+    _ = try s.file("launch/attempts/split/001/record.json",
+        \\{"rule":"split","attempt":1,"status":"completed","reason":"","wall_s":30.0,"cpu_s":29.0,"request":{"threads":1,"memory_mib":2048,"container":"img"},
+        \\"rusage":{"maxrss_kib":51028},"cgroup":{"memory_peak":2147483648,"anon_peak":1048576000,"oom_kill":1}}
+    );
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+
+    var l = try workz.model.load(testing.allocator, a, try std.fs.path.join(a, &.{ s.path, "launch" }));
+    defer l.deinit();
+
+    var seen: usize = 0;
+    for (l.steps) |st| {
+        const want: [2]f64 = if (std.mem.eql(u8, st.name, "fusion")) .{ 4928, 5952 } else if (std.mem.eql(u8, st.name, "strand")) .{ 92, 128 } else if (std.mem.eql(u8, st.name, "split")) .{ 2048, 2496 } else continue;
+        seen += 1;
+        try testing.expect(st.used_is_peak);
+        try testing.expectEqual(want[0], st.used_mib);
+        try testing.expectEqual(want[1], st.sizing.memory_mib);
+    }
+    try testing.expectEqual(@as(usize, 3), seen);
+}
+
 const Chain = struct { threads: u32 = 1, memory_mib: u32 = 1024, elapsed_s: f64 = 5.0, reused_p1: bool = false };
 
 fn chainLaunch(s: *Scratch, a: std.mem.Allocator, name: []const u8, threads: u32) !void {
