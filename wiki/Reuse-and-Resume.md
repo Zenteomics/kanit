@@ -92,7 +92,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.8.0   cutoff   launch 20261108T121726.579-c84630ba
+kanit 0.9.0   cutoff   launch 20261108T121726.579-c84630ba
           plan         2 rules
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html

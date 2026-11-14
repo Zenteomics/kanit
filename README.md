@@ -5,7 +5,7 @@
   <p><em><strong>K</strong>ahn's <strong>A</strong>lgorithm for <strong>N</strong>etworks of <strong>I</strong>nterdependent <strong>T</strong>asks</em></p>
   <p><strong>A workflow engine for one Linux workstation: every task within budget, every attempt on record.</strong></p>
   <p>
-    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.8.0-2C8EBB?style=flat-square" alt="Version 0.8.0"></a>
+    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.9.0-2C8EBB?style=flat-square" alt="Version 0.9.0"></a>
     <a href="https://ziglang.org/download/"><img src="https://img.shields.io/badge/Zig-0.16.0-F7A41D?style=flat-square&amp;logo=zig&amp;logoColor=white" alt="Zig 0.16.0"></a>
     <a href="https://github.com/zenteomics/kanit/wiki/Installation"><img src="https://img.shields.io/badge/Linux-x86--64%20%7C%20cgroup%20v2-1793D1?style=flat-square&amp;logo=linux&amp;logoColor=white" alt="Linux x86-64 with cgroup v2"></a>
     <a href="#status"><img src="https://img.shields.io/badge/status-development-C17D10?style=flat-square" alt="Status: development"></a>
@@ -83,7 +83,7 @@ kanit report --bottlenecks                                # what limited the run
 `run` opens with the launch's shape and a table of its steps, tools and versions, then logs a row for each rule, by its step and sample, as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
 
 ```text
-kanit 0.8.0   example   launch 20261108T121723.759-3460c6e8
+kanit 0.9.0   example   launch 20261108T121723.759-3460c6e8
           plan         2 rules: 2 steps for 1 sample
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html
@@ -124,7 +124,7 @@ The [user guide](https://github.com/zenteomics/kanit/wiki/Home) follows a workfl
 
 ## Status
 
-kanit is in development, and its current version is 0.8.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the [changelog](CHANGELOG.md) says first what each change needs from you. Versions up to 0.6.0 were released as workz, whose names remain in `.workz/`, the `WORKZ_` variables and the Zig module `workz`.
+kanit is in development, and its current version is 0.9.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the [changelog](CHANGELOG.md) says first what each change needs from you. Versions up to 0.6.0 were released as workz, whose names remain in `.workz/`, the `WORKZ_` variables and the Zig module `workz`.
 
 Issues are welcome on [GitHub](https://github.com/zenteomics/kanit/issues); open one before a pull request, so the change can be agreed first.
 

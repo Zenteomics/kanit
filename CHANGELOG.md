@@ -4,7 +4,9 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line, and each version says first what such a change needs from you.
 
-## [Unreleased]
+## [0.9.0] - 2026-11-14
+
+One addition to the records, which nothing that reads them needs to act on: container attempts list their images' registry digests.
 
 ### Added
 

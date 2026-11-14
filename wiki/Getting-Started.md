@@ -126,7 +126,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.8.0   gc-content   launch 20261108T121724.311-8efeb4eb
+kanit 0.9.0   gc-content   launch 20261108T121724.311-8efeb4eb
           plan         4 rules: 2 steps
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html
@@ -227,7 +227,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 ```
 
 ```text
-kanit 0.8.0   gc-content   launch 20261108T121725.412-bce6cb75
+kanit 0.9.0   gc-content   launch 20261108T121725.412-bce6cb75
           plan         4 rules: 2 steps
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
           records      .workz/latest/   log launch.log   page report.html

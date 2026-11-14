@@ -17,7 +17,7 @@ Without a systemd user manager or cgroup v2, `kanit run --no-isolation` still ru
 Each [release](https://github.com/zenteomics/kanit/releases) has a static binary for Linux x86-64, packed with its licence notices, and a `SHA256SUMS` file:
 
 ```sh
-version=0.8.0
+version=0.9.0
 curl -fLO https://github.com/zenteomics/kanit/releases/download/v$version/kanit-$version-x86_64-linux.tar.gz
 curl -fLO https://github.com/zenteomics/kanit/releases/download/v$version/SHA256SUMS
 sha256sum --check SHA256SUMS
@@ -37,7 +37,7 @@ zig build -Doptimize=ReleaseSafe
 ```
 
 ```text
-kanit 0.8.0
+kanit 0.9.0
 ```
 
 `ReleaseSafe` keeps Zig's safety checks in the shipped executable. A plain `zig build` gives a Debug build for development, and `zig build test --summary all` runs the unit tests.
