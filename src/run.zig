@@ -339,6 +339,8 @@ const Engine = struct {
     containers_cg: ?cgroup.Group = null,
     images: std.StringHashMapUnmanaged([]const u8) = .empty,
     image_digests: std.StringHashMapUnmanaged([]const []const u8) = .empty,
+    /// Rules that run again to rebuild a removed output a running rule reads.
+    rebuild: []const bool = &.{},
     extras: []const []const u8 = &.{},
     sigfd: sys.Fd,
 
@@ -637,7 +639,8 @@ const Engine = struct {
             return;
         }
         t.key = key.?;
-        if (!self.opts.forced(r.name)) if (self.st.data.rules.map.get(r.name)) |e| {
+        const rebuilds = self.rebuild.len > 0 and self.rebuild[i];
+        if (!self.opts.forced(r.name) and !rebuilds) if (self.st.data.rules.map.get(r.name)) |e| {
             if (try state.reuseCheck(self.gpa, self.ids, &e, &key.?) == .reuse) {
                 if (!self.st.data.envs.map.contains(e.env)) {
                     const sa = self.st.allocator();
@@ -1569,6 +1572,7 @@ const Engine = struct {
                 try self.st.data.envs.map.put(sa, try sa.dupe(u8, k.env), try sa.dupe(u8, self.env_text));
                 try self.pending_envs.append(self.gpa, k.env);
             }
+            for (outputs.items) |o| _ = self.st.data.removed.map.swapRemove(o.path);
             try self.recordFiles(r);
             self.dirty = true;
             try self.pending_done.append(self.gpa, r.name);
@@ -2717,6 +2721,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         else => return err,
     };
     defer st.deinit();
+    ids.removed = &st.data.removed;
     recoverPrevious(gpa, a, wf, rec, launch.id, &events) catch |err| switch (err) {
         error.OutOfMemory => return err,
         else => std.debug.print("kanit: cannot put back the earlier outputs a killed launch moved aside: {s}\n", .{sys.errorText(err)}),
@@ -2825,6 +2830,10 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     };
     const runs = try a.alloc(bool, wf.rules.len);
     for (runs, decisions, mask) |*r, d, m| r.* = m and d.run;
+    const rebuild = try a.alloc(bool, wf.rules.len);
+    @memset(rebuild, false);
+    var rebuilt = decide.rebuild.keyIterator();
+    while (rebuilt.next()) |i| rebuild[i.*] = true;
     var failure: []const u8 = "";
     const strict = sharedSizes(gpa, a, wf, runs, &failure) catch |err| switch (err) {
         error.Unmeasurable => return refusal.refuse(.invalid, failure),
@@ -2945,6 +2954,7 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
         .containers_cg = containers_cg,
         .images = images,
         .image_digests = image_digests,
+        .rebuild = rebuild,
         .extras = extras,
         .bash = findBash(gpa) orelse {
             std.debug.print("kanit: bash not found\n", .{});

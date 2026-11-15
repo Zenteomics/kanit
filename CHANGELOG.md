@@ -4,6 +4,19 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line, and each version says first what such a change needs from you.
 
+## [Unreleased]
+
+### Added
+
+- **Removing intermediates**
+  - A rule's `intermediate` key, `true` or a list of its outputs, marks the outputs `kanit clean --intermediates` may remove once their rule and every rule reading them completed.
+  - `clean --step STEP` also removes every recorded output of a step, and works from the records alone when the workflow file is gone.
+  - Later launches reuse the rules whose outputs were removed, and write such a file again only when a rule that reads it runs.
+
+### Changed
+
+- `state.json` is format 5, which records removed outputs; kanit 0.9.0 and earlier refuse it.
+
 ## [0.9.0] - 2026-11-14
 
 One addition to the records, which nothing that reads them needs to act on: container attempts list their images' registry digests.

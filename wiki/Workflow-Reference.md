@@ -140,31 +140,32 @@ An entry with `container` is a service:
 
 ## [[rules]]
 
-| Key           | Type     | Default                | Meaning                              |
-| ------------- | -------- | ---------------------- | ------------------------------------ |
-| `name`        | string   | required               | unique rule name                     |
-| `input`       | paths    | `[]`                   | files and directories it reads       |
-| `output`      | paths    | required               | files it writes, at least one        |
-| `shell`       | string   | required               | the command line                     |
-| `threads`     | integer  | `[defaults]`, else 1   | 1 to 4096                            |
-| `memory`      | size     | `[defaults]`           | the memory request                   |
-| `priority`    | integer  | 0                      | higher starts first                  |
-| `retries`     | integer  | `--retry`, else 0      | extra attempts, 0 to 3               |
-| `timeout`     | duration | `--timeout`, else none | limit per attempt                    |
-| `log`         | path     | none                   | copy of stdout and stderr            |
-| `benchmark`   | path     | none                   | JSON summary of a completed attempt  |
-| `diagnostics` | paths    | `[]`                   | files kept when an attempt fails     |
-| `version`     | string   | none                   | command that prints the tool version |
-| `cutoff`      | boolean  | `false`                | key consumers on output bytes        |
-| `workdir`     | path     | none                   | directory the command starts in      |
-| `links`       | table    | none                   | link name = input, in `workdir`      |
-| `container`   | image    | none                   | run in this local image              |
-| `mounts`      | table    | none                   | host path = path in the image        |
-| `step`        | string   | from `name`            | pipeline step it is an instance of   |
-| `sample`      | string   | from `name`            | data it works on                     |
-| `category`    | string   | none                   | group of steps it belongs to         |
-| `tool`        | string   | from `container`       | program it runs                      |
-| `resources`   | table    | none                   | the request, below                   |
+| Key            | Type        | Default                | Meaning                              |
+| -------------- | ----------- | ---------------------- | ------------------------------------ |
+| `name`         | string      | required               | unique rule name                     |
+| `input`        | paths       | `[]`                   | files and directories it reads       |
+| `output`       | paths       | required               | files it writes, at least one        |
+| `shell`        | string      | required               | the command line                     |
+| `threads`      | integer     | `[defaults]`, else 1   | 1 to 4096                            |
+| `memory`       | size        | `[defaults]`           | the memory request                   |
+| `priority`     | integer     | 0                      | higher starts first                  |
+| `retries`      | integer     | `--retry`, else 0      | extra attempts, 0 to 3               |
+| `timeout`      | duration    | `--timeout`, else none | limit per attempt                    |
+| `log`          | path        | none                   | copy of stdout and stderr            |
+| `benchmark`    | path        | none                   | JSON summary of a completed attempt  |
+| `diagnostics`  | paths       | `[]`                   | files kept when an attempt fails     |
+| `intermediate` | bool, paths | `false`                | outputs clean may remove             |
+| `version`      | string      | none                   | command that prints the tool version |
+| `cutoff`       | boolean     | `false`                | key consumers on output bytes        |
+| `workdir`      | path        | none                   | directory the command starts in      |
+| `links`        | table       | none                   | link name = input, in `workdir`      |
+| `container`    | image       | none                   | run in this local image              |
+| `mounts`       | table       | none                   | host path = path in the image        |
+| `step`         | string      | from `name`            | pipeline step it is an instance of   |
+| `sample`       | string      | from `name`            | data it works on                     |
+| `category`     | string      | none                   | group of steps it belongs to         |
+| `tool`         | string      | from `container`       | program it runs                      |
+| `resources`    | table       | none                   | the request, below                   |
 
 - Every rule needs a memory request: `memory`, in `resources`, or in `[defaults]`.
 - `priority` is between -1,000,000 and 1,000,000.

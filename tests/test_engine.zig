@@ -357,7 +357,7 @@ fn cleanScratch(s: *Scratch, a: std.mem.Allocator, opts: workz.clean.Options, ou
     var env = std.process.Environ.Map.init(testing.allocator);
     defer env.deinit();
     try env.put("PATH", try s.dir("no-podman"));
-    return workz.clean.run(testing.allocator, a, s.path, opts, &env, out);
+    return workz.clean.run(testing.allocator, a, s.path, opts, null, &env, out);
 }
 
 test "[failure] - [clean]: --keep goes on past a launch it cannot remove" {

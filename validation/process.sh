@@ -147,6 +147,19 @@ check "a rule runs in its workdir with links to its inputs, which a rerun keeps"
 rm work/a/in.txt && echo real > work/a/in.txt
 "$kanit" run wf.toml "${iso[@]}" --rerun -q --json > s3.json 2> /dev/null
 check "a link never replaces a file that is not a link" '[ "$(status_of s3.json failed)" = 1 ] && [ "$(cat work/a/in.txt)" = real ] && jq -r "select(.event == \"task_failed\") | .reason" "$(last_launch)/events.jsonl" | grep -q "would replace a file"'
+
+new intermediates
+{ header intermediates
+  rule align '[]' '["a.bam"]' '"seq 1000 > a.bam"' 'intermediate = true'
+  rule count '["a.bam"]' '["n.txt"]' '"wc -l < a.bam > n.txt"'
+} > wf.toml
+"$kanit" run wf.toml "${iso[@]}" -q --json > s1.json
+"$kanit" clean wf.toml --intermediates > clean.txt
+"$kanit" run wf.toml "${iso[@]}" -q --json > s2.json
+check "clean --intermediates removes a marked output its reader used, and the next launch reuses both rules without it" 'grep -q "^removed a.bam, " clean.txt && [ ! -e a.bam ] && [ "$(status_of s2.json reused)" = 2 ]'
+sed -i 's/wc -l < a.bam/wc -c < a.bam/' wf.toml
+"$kanit" run wf.toml "${iso[@]}" -q --json > s3.json
+check "a reader that runs again rebuilds the removed output first" '[ "$(status_of s3.json completed)" = 2 ] && [ "$(cat n.txt)" = "$(seq 1000 | wc -c)" ] && "$kanit" verify wf.toml > /dev/null'
 fi
 
 # --- Early cutoff ---

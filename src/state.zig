@@ -11,7 +11,7 @@ const records = @import("records.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
 
-pub const format_version: i64 = 4;
+pub const format_version: i64 = 5;
 
 pub const engine_key: u32 = 4;
 pub const engine_key_text = std.fmt.comptimePrint("workz-key {d}", .{engine_key});
@@ -61,6 +61,9 @@ pub const Data = struct {
     files: std.json.ArrayHashMap([]const u8) = .{},
     manifest: std.json.ArrayHashMap(ManifestEntry) = .{},
     envs: std.json.ArrayHashMap([]const u8) = .{},
+    /// Outputs `clean --intermediates` removed, with the identity recorded
+    /// when they were removed; an entry goes when its rule runs again.
+    removed: std.json.ArrayHashMap([]const u8) = .{},
 };
 
 pub const State = struct {
@@ -245,6 +248,8 @@ fn relativeData(a: Allocator, root: []const u8, d: *const Data) !Data {
     for (d.files.map.keys(), d.files.map.values()) |p, id| try out.files.map.put(a, relative(root, p), id);
     out.manifest = .{};
     for (d.manifest.map.keys(), d.manifest.map.values()) |p, m| try out.manifest.map.put(a, relative(root, p), m);
+    out.removed = .{};
+    for (d.removed.map.keys(), d.removed.map.values()) |p, id| try out.removed.map.put(a, relative(root, p), id);
     return out;
 }
 
@@ -256,6 +261,9 @@ fn absoluteData(a: Allocator, root: []const u8, d: *Data) !void {
     var manifest: std.json.ArrayHashMap(ManifestEntry) = .{};
     for (d.manifest.map.keys(), d.manifest.map.values()) |p, m| try manifest.map.put(a, try absolute(a, root, p), m);
     d.manifest = manifest;
+    var removed: std.json.ArrayHashMap([]const u8) = .{};
+    for (d.removed.map.keys(), d.removed.map.values()) |p, id| try removed.map.put(a, try absolute(a, root, p), id);
+    d.removed = removed;
 }
 
 fn dropDevice(a: Allocator, d: *Data) !void {
@@ -288,6 +296,10 @@ pub const Identities = struct {
     problem: []const u8 = "",
     env_text: []const u8 = "",
     env_key: []const u8 = "",
+    /// The state's removed outputs: an absent file listed here reads as its
+    /// recorded identity, so its producer stays done and its readers' keys
+    /// stay the same. A file that exists reads as itself.
+    removed: ?*const std.json.ArrayHashMap([]const u8) = null,
 
     pub fn init(gpa: Allocator) Identities {
         return .{ .gpa = gpa, .arena = std.heap.ArenaAllocator.init(gpa) };
@@ -315,8 +327,9 @@ pub const Identities = struct {
                 return error.Unreadable;
             },
         };
-        try self.memo.put(self.gpa, key, id);
-        return id;
+        const known = id orelse if (self.removed) |r| r.map.get(path) else null;
+        try self.memo.put(self.gpa, key, known);
+        return known;
     }
 };
 

@@ -1299,3 +1299,20 @@ test "[failure] - [lint]: --inputs names each input that is missing and each dan
     try testing.expectEqual(@as(usize, 2), missing);
     try testing.expectEqualStrings("missing input of rule align_s1: reads/s1.fq\nmissing input of rule d: dangling (a symlink to gone, which does not exist)\n2 missing inputs: create them, or fix the paths\n", out.written());
 }
+
+test "[unit] - [workflow]: intermediate marks every output, the listed ones, or none, and names only the rule's own outputs" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++
+        "[[rules]]\nname = \"a\"\noutput = [\"x.bam\", \"x.bai\"]\nshell = \"true\"\nmemory = \"1M\"\nintermediate = true\n" ++
+        "[[rules]]\nname = \"b\"\noutput = [\"y.bam\", \"y.txt\"]\nshell = \"true\"\nmemory = \"1M\"\nintermediate = [\"y.bam\"]\n" ++
+        "[[rules]]\nname = \"c\"\noutput = [\"z\"]\nshell = \"true\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    try testing.expectEqual(@as(usize, 2), wf.rules[0].intermediate_abs.len);
+    try testing.expectEqual(@as(usize, 1), wf.rules[1].intermediate_abs.len);
+    try testing.expect(std.mem.endsWith(u8, wf.rules[1].intermediate_abs[0], "/y.bam"));
+    try testing.expectEqual(@as(usize, 0), wf.rules[2].intermediate_abs.len);
+    try expectInvalid(head ++ "[[rules]]\nname = \"a\"\noutput = [\"x.bam\"]\nshell = \"true\"\nmemory = \"1M\"\nintermediate = [\"w.bam\"]\n", "rule a: intermediate 'w.bam' is not one of its outputs");
+    try expectInvalid(head ++ "[[rules]]\nname = \"a\"\noutput = [\"x.bam\"]\nshell = \"true\"\nmemory = \"1M\"\nintermediate = 3\n", "rule a: intermediate must be true, false or a list of its outputs");
+}

@@ -45,10 +45,11 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 - `files`: the last recorded identity of every input and output path, which `explain` compares against.
 - `manifest`: the digests of input-manifest files, with the identity each was hashed at.
 - `envs`: the keyed environment of each recorded rule, for `explain` to name what changed.
+- `removed`: the outputs `clean --intermediates` removed, with the identity each had. Reuse counts such an output as present, with that identity, until its rule runs again.
 
 Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
 
-kanit reads the state files of earlier versions, formats 1 to 4, and saves them as format 4, which workz 0.4.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
+kanit reads the state files of earlier versions, formats 1 to 5, and saves them as format 5, which kanit 0.9.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
 ## state.log
 
@@ -232,6 +233,9 @@ would remove 0 containers and 1 launch, 0.2 MiB
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to, and a launch whose engine was killed during an attempt: its `previous/` holds the only copy of that rule's earlier outputs until the next launch puts them back.
 - `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
+- `--intermediates` removes the outputs the workflow marks `intermediate` once their rule and every rule that reads them completed. `--step STEP`, repeatable, adds every recorded output of a step; with it, `clean` works from the records alone when no workflow file is given.
+- It names each file it removes with its size. It keeps, naming the reason, a file that changed after its rule wrote it, one that a rule still to complete reads, one inside a directory a rule reads or a shared input maps, and anything but a regular file.
+- `state.json` records each removal, so later launches reuse the rule and the rules that read its file; the rule runs again, to write the file anew, only when a rule that reads it runs ([Reuse and resume](Reuse-and-Resume.md#removed-intermediates)).
 - `--dry-run` lists what would go.
 - It takes the working directory's lock, so it never removes anything while a launch runs.
 

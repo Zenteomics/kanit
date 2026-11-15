@@ -27,6 +27,8 @@ pub const Rule = struct {
     benchmark_abs: ?[]const u8,
     diagnostics: []const []const u8 = &.{},
     diagnostics_abs: []const []const u8 = &.{},
+    /// The outputs `clean --intermediates` may remove; not part of the key.
+    intermediate_abs: []const []const u8 = &.{},
     version: ?[]const u8 = null,
     retries: ?u32,
     timeout_s: ?u64,
@@ -210,7 +212,7 @@ pub const workflow_keys = [_][]const u8{ "name", "version", "description", "auth
 pub const default_keys = [_][]const u8{ "threads", "memory" };
 pub const group_keys = [_][]const u8{"max"};
 pub const shared_keys = [_][]const u8{ "path", "container", "command", "memory", "timeout", "retries", "mounts" };
-pub const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version" };
+pub const rule_keys = [_][]const u8{ "name", "input", "output", "shell", "threads", "memory", "resources", "priority", "log", "benchmark", "retries", "timeout", "cutoff", "container", "mounts", "workdir", "links", "step", "category", "tool", "sample", "diagnostics", "version", "intermediate" };
 pub const resource_keys = [_][]const u8{ "threads", "memory", "groups", "shared" };
 
 const Parser = struct {
@@ -297,6 +299,25 @@ const Parser = struct {
             .boolean => |b| b,
             else => self.failKey(at, key, "{s}.{s} must be true or false", .{ where, key }),
         };
+    }
+
+    /// `intermediate`: true for every output, false for none, or a list of
+    /// the rule's own outputs.
+    fn intermediate(self: *Parser, table: *const toml.Table, at: []const toml.PathSegment, name: []const u8, root: []const u8, output: []const []const u8) ![]const []const u8 {
+        const v = table.get("intermediate") orelse return &.{};
+        const outs = try absAll(self.arena, root, output);
+        switch (v) {
+            .boolean => |b| return if (b) outs else &.{},
+            .array => {},
+            else => return self.failKey(at, "intermediate", "rule {s}: intermediate must be true, false or a list of its outputs", .{name}),
+        }
+        const listed = try absAll(self.arena, root, try self.strings(table, "intermediate", at, name));
+        for (listed) |l| {
+            for (outs) |o| {
+                if (std.mem.eql(u8, o, l)) break;
+            } else return self.failKey(at, "intermediate", "rule {s}: intermediate '{s}' is not one of its outputs", .{ name, keyPath(root, l) });
+        }
+        return listed;
     }
 
     fn strings(self: *Parser, table: *const toml.Table, key: []const u8, at: []const toml.PathSegment, where: []const u8) ![]const []const u8 {
@@ -835,6 +856,7 @@ fn parseRule(p: *Parser, wf: *const Workflow, root: []const u8, default_threads:
         .benchmark_abs = if (bench) |b| try sys.absolute(arena, root, b) else null,
         .diagnostics = diagnostics,
         .diagnostics_abs = try absAll(arena, root, diagnostics),
+        .intermediate_abs = try p.intermediate(r, &at, name, root, output),
         .version = version,
         .retries = retries,
         .timeout_s = timeout_s,

@@ -232,10 +232,10 @@ Checks that every recorded output of the selected rules still has its recorded i
 ## clean
 
 ```text
-kanit clean [WORKFLOW] [--keep N] [--previous] [--dry-run]
+kanit clean [WORKFLOW] [--keep N] [--previous] [--intermediates] [--step STEP]... [--dry-run]
 ```
 
-Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. Both keep what a launch killed during an attempt moved aside, which the next launch puts back, and say so. `--dry-run` removes nothing: it names each launch directory `--keep` would remove, and each launch whose `previous/` directories `--previous` would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
+Removes containers that earlier launches left behind. `--keep N` also removes all but the newest N launch directories, keeping every launch that holds a rule's recorded attempt. `--previous` removes the earlier outputs that attempts moved into `previous/`, in every launch, and keeps the rest of each launch. Both keep what a launch killed during an attempt moved aside, which the next launch puts back, and say so. `--intermediates` removes the outputs the workflow marks `intermediate`, and `--step STEP` (repeatable, implying `--intermediates`) every recorded output of a step, from the records alone when no workflow file is given; a file goes only once its rule and every rule reading it completed, as it was recorded, and later launches reuse those rules ([Cleaning up](Records.md#cleaning-up)). `--dry-run` removes nothing: it names each launch directory `--keep` would remove, and each launch whose `previous/` directories `--previous` would remove, with how many and their size, and counts the containers. A `previous/` that cannot be removed is named, the others are removed, and `clean` exits 1. While a launch runs, `clean` refuses with `a launch is running in DIR; clean after it ends`.
 
 ## completion
 

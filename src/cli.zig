@@ -380,7 +380,7 @@ pub const commands = [_]Command{
     .{
         .name = "clean",
         .args = "[WORKFLOW] [options]",
-        .summary = "remove leftover containers, old launches and replaced outputs",
+        .summary = "remove leftover containers, old launches and spent outputs",
         .group = .maintain,
         .common = .workdir,
         .about =
@@ -388,16 +388,25 @@ pub const commands = [_]Command{
         \\behind. With --keep N it also removes all but the newest N launch
         \\directories, keeping every launch that holds a rule's recorded attempt.
         \\With --previous it removes the earlier outputs that reruns moved into
-        \\previous/, the only copy of those bytes.
+        \\previous/, the only copy of those bytes. With --intermediates it removes
+        \\the outputs the workflow marks intermediate, once their rule and every
+        \\rule reading them completed; later launches count those rules as done
+        \\and rebuild a file only when a rule that reads it runs again. --step
+        \\names steps every recorded output of which is an intermediate too; the
+        \\records alone serve when no workflow file is at hand.
         ,
         .options = &.{
             .{ .flag = "--keep N", .desc = "keep the newest N launches and the recorded ones" },
             .{ .flag = "--previous", .desc = "remove the replaced outputs kept in previous/" },
+            .{ .flag = "--intermediates", .desc = "remove the outputs marked intermediate" },
+            .{ .flag = "--step STEP", .desc = "also every recorded output of STEP (repeatable)" },
             .{ .flag = "--dry-run", .desc = "show what would be removed" },
         },
         .examples =
         \\kanit clean --keep 5 --dry-run
         \\kanit clean --previous --dry-run
+        \\kanit clean workflow.toml --intermediates --dry-run
+        \\kanit clean -d run1 --step star --step trim --dry-run
         ,
     },
     .{
@@ -1142,6 +1151,7 @@ pub const Logs = struct {
 pub const Clean = struct {
     common: Common = .{},
     opts: clean.Options = .{},
+    steps: std.ArrayList([]const u8) = .empty,
 
     pub fn parse(self: *Clean, p: Parser, args: Args) !?Exit {
         if (try p.words(args, &self.common, self)) |e| return e;
@@ -1156,6 +1166,15 @@ pub const Clean = struct {
         if (std.mem.eql(u8, arg, "--previous")) {
             self.opts.previous = true;
             return 1;
+        }
+        if (std.mem.eql(u8, arg, "--intermediates")) {
+            self.opts.intermediates = true;
+            return 1;
+        }
+        if (std.mem.eql(u8, arg, "--step")) {
+            try self.steps.append(p.a, value orelse return p.missing(arg));
+            self.opts.intermediates = true;
+            return 2;
         }
         if (std.mem.eql(u8, arg, "--keep")) {
             const v = value orelse return p.missing(arg);

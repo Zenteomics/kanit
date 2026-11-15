@@ -56,6 +56,7 @@ const rule_types = [_]Key{
     .{ .name = "tool", .type = .string, .help = "program it runs" },
     .{ .name = "sample", .type = .string, .help = "data it works on" },
     .{ .name = "diagnostics", .type = .strings, .help = "files kept when an attempt fails" },
+    .{ .name = "intermediate", .type = .any, .help = "true, or the outputs clean may remove" },
     .{ .name = "version", .type = .string, .help = "command that prints the tool version" },
 };
 const resource_types = [_]Key{

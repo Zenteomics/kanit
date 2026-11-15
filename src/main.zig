@@ -602,12 +602,18 @@ fn cmdLogs(c: Ctx, args: []const [:0]const u8) !Exit {
 fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     var ca: cli.Clean = .{};
     if (try ca.parse(c.parser(), args)) |e| return e;
-    const opts = ca.opts;
-    const root = (try rootOf(c, &ca.common)) orelse return .usage;
+    var opts = ca.opts;
+    opts.steps = ca.steps.items;
+    const with_workflow = opts.intermediates and (ca.common.workflow != null or (ca.common.workdir == null and sys.exists(c.gpa, default_workflow)));
+    if (opts.intermediates and !with_workflow and opts.steps.len == 0) return fail("clean --intermediates needs the workflow that marks them, or --step STEP", .{});
+    var loaded: ?Loaded = if (with_workflow) (try load(c, &ca.common)) orelse return .usage else null;
+    defer if (loaded) |*l| l.deinit();
+    const root = if (loaded) |*l| l.wf.root else (try rootOf(c, &ca.common)) orelse return .usage;
     var buf: [4096]u8 = undefined;
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
-    const r = workz.clean.run(c.gpa, c.a, root, opts, c.env, &w.interface) catch |err| switch (err) {
+    const r = workz.clean.run(c.gpa, c.a, root, opts, if (loaded) |*l| &l.wf else null, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
+        error.PendingRecovery => return failed("a killed launch left attempts in {s} for the next launch to recover; run kanit run first, then clean --intermediates", .{root}),
         error.OutOfMemory => return err,
         error.CorruptState, error.UnsupportedState => {
             std.debug.print("kanit: clean --keep cannot tell which launches hold recorded results\n", .{});
@@ -634,6 +640,13 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
         try units.count(&w.interface, r.previous, "attempt", "attempts");
         try w.interface.writeAll(", ");
         try units.size(&w.interface, @as(f64, @floatFromInt(r.previous_bytes)) / 1048576.0);
+    }
+    if (opts.intermediates) {
+        try w.interface.writeAll("; ");
+        try units.count(&w.interface, r.intermediates, "intermediate", "intermediates");
+        try w.interface.writeAll(", ");
+        try units.size(&w.interface, @as(f64, @floatFromInt(r.intermediate_bytes)) / 1048576.0);
+        if (r.intermediates_kept > 0) try w.interface.print(", {d} kept", .{r.intermediates_kept});
     }
     if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");

@@ -110,7 +110,7 @@ test "[regression] - [state]: a format 1 file is saved as the current format" {
     try old.save(testing.allocator);
     const text = try sys.readFile(testing.allocator, try std.fs.path.join(old.allocator(), &.{ s.path, "state.json" }), 1 << 20);
     defer testing.allocator.free(text);
-    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":4,"));
+    try testing.expect(std.mem.startsWith(u8, text, "{\"format_version\":5,"));
 }
 
 test "[regression] - [state]: identities recorded with the device number match without it" {
@@ -480,7 +480,7 @@ test "[failure] - [state]: every truncation of a state file and every unknown ve
     _ = try s.file(".workz/state.json", full);
     var st = try state.load(testing.allocator, rec);
     st.deinit();
-    for ([_][]const u8{ "0", "5", "-1" }) |v| {
+    for ([_][]const u8{ "0", "6", "-1" }) |v| {
         const text = try std.fmt.allocPrint(testing.allocator, "{{\"format_version\": {s}, \"files\": {{}}, \"envs\": {{}}, \"manifest\": {{}}, \"rules\": {{}}}}", .{v});
         defer testing.allocator.free(text);
         _ = try s.file(".workz/state.json", text);
@@ -537,7 +537,7 @@ test "[unit] - [state]: the state file keeps its bytes for a fixed record" {
     const saved = try sys.readFile(testing.allocator, try std.fs.path.join(st.allocator(), &.{ rec, "state.json" }), 1 << 20);
     defer testing.allocator.free(saved);
     const golden =
-        \\{"format_version":4,"rules":{"a":{"key":"k","command":"c","env":"e","request":"threads=1 memory=1M","writes":"w","inputs":"i","parents":"p","engine":"workz-key 4","outputs":[{"path":"o.txt","id":"5:6:7:8","sha256":null}],"attempt":".workz/launches/L/attempts/a/001","finished":"2026-01-01T00:00:00.000Z","wall_s":1.5,"input_ids":[{"path":"in.txt","id":"1:2:3:4"}]}},"files":{"in.txt":"1:2:3:4"},"manifest":{},"envs":{"e":"PATH=/bin\n"}}
+        \\{"format_version":5,"rules":{"a":{"key":"k","command":"c","env":"e","request":"threads=1 memory=1M","writes":"w","inputs":"i","parents":"p","engine":"workz-key 4","outputs":[{"path":"o.txt","id":"5:6:7:8","sha256":null}],"attempt":".workz/launches/L/attempts/a/001","finished":"2026-01-01T00:00:00.000Z","wall_s":1.5,"input_ids":[{"path":"in.txt","id":"1:2:3:4"}]}},"files":{"in.txt":"1:2:3:4"},"manifest":{},"envs":{"e":"PATH=/bin\n"},"removed":{}}
         \\
     ;
     if (!std.mem.eql(u8, golden, saved)) {
@@ -890,7 +890,7 @@ test "[unit] - [plan]: verify matches recorded outputs and names a selected rule
     try testing.expectEqualStrings("unrecorded  c\n2 outputs checked: all match; 1 selected rule has no record to check\n", out.written());
     out.clearRetainingCapacity();
     try testing.expect(!try plan.verify(&out.writer, testing.allocator, &st, &ids, &wf, mask, false, true));
-    try testing.expectEqualStrings("{\"v\":1,\"checked\":2,\"by_content\":false,\"digests_stored\":0,\"unrecorded\":1,\"ok\":false,\"findings\":[{\"rule\":\"c\",\"step\":\"c\",\"sample\":null,\"finding\":\"unrecorded\",\"path\":null}]}\n", out.written());
+    try testing.expectEqualStrings("{\"v\":1,\"checked\":2,\"by_content\":false,\"digests_stored\":0,\"removed\":0,\"unrecorded\":1,\"ok\":false,\"findings\":[{\"rule\":\"c\",\"step\":\"c\",\"sample\":null,\"finding\":\"unrecorded\",\"path\":null}]}\n", out.written());
 }
 
 test "[unit] - [plan]: a budget names each rule that does not fit and counts them" {
@@ -1466,4 +1466,76 @@ test "[unit] - [plan]: plan shows a row per step, --rules a row per rule by step
     var json: std.Io.Writer.Allocating = .init(a);
     try plan.printJson(&json.writer, &ctx, ds, mask);
     try testing.expect(std.mem.startsWith(u8, json.written(), "{\"v\":1,\"run\":4,\"reuse\":0,\"rules\":[{\"rule\":\"S1__trim\",\"step\":\"trim\",\"sample\":\"S1\",\"run\":true,\"reason\":\"no completed record\"}"));
+}
+
+const marked = "[[rules]]\nname = \"a\"\ninput = [\"in.txt\"]\noutput = [\"a.txt\"]\nshell = \"cat in.txt > a.txt\"\nmemory = \"1M\"\nintermediate = true\n" ++
+    "[[rules]]\nname = \"b\"\ninput = [\"a.txt\"]\noutput = [\"b.txt\"]\nshell = \"cat a.txt > b.txt\"\nmemory = \"1M\"\nintermediate = true\n";
+
+test "[unit] - [plan]: removed intermediates keep their rules and readers reused, and a reader that runs rebuilds them back up the chain" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try writeFiles(&s, &.{ "in.txt", "a.txt", "b.txt", "c.txt" });
+    const c_rule = "[[rules]]\nname = \"c\"\ninput = [\"b.txt\"]\noutput = [\"c.txt\"]\nshell = \"cat b.txt > c.txt\"\nmemory = \"1M\"\n";
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ marked ++ c_rule, &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    var st = try state.load(testing.allocator, s.path);
+    defer st.deinit();
+    _ = try record(a, &wf, &g, &st, env_plain);
+    for ([_][]const u8{ "a", "b" }) |name| {
+        const o = st.data.rules.map.get(name).?.outputs[0];
+        try st.data.removed.map.put(st.allocator(), o.path, o.id);
+        try sys.unlink(testing.allocator, o.path);
+    }
+
+    try testing.expectEqualStrings("reuse a  (unchanged)\nreuse b  (unchanged)\nreuse c  (unchanged)\n0 to run, 3 to reuse\n", try planText(a, &wf, &g, &st, env_plain, &.{}, false));
+
+    var changed = try loadText(&s, head ++ marked ++ "[[rules]]\nname = \"c\"\ninput = [\"b.txt\"]\noutput = [\"c.txt\"]\nshell = \"cat b.txt b.txt > c.txt\"\nmemory = \"1M\"\n", &problem);
+    defer changed.deinit();
+    var gc = try workz.graph.build(testing.allocator, &changed, &problem);
+    defer gc.deinit();
+    try testing.expectEqualStrings("run   a  (removed output needed: a.txt)\nrun   b  (producer a runs)\nrun   c  (producer b runs)\n3 to run, 0 to reuse\n", try planText(a, &changed, &gc, &st, env_plain, &.{}, false));
+}
+
+test "[unit] - [clean]: --intermediates removes a marked output its readers completed, keeps one a reader still needs, and records the removal" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    try writeFiles(&s, &.{ "in.txt", "a.txt", "b.txt", "c.txt" });
+    var problem: workflow.Problem = .{};
+    var wf = try loadText(&s, head ++ marked ++ "[[rules]]\nname = \"c\"\ninput = [\"b.txt\"]\noutput = [\"c.txt\"]\nshell = \"cat b.txt > c.txt\"\nmemory = \"1M\"\n", &problem);
+    defer wf.deinit();
+    var g = try workz.graph.build(testing.allocator, &wf, &problem);
+    defer g.deinit();
+    const rec = try s.dir(".workz");
+    {
+        var st = try state.load(testing.allocator, rec);
+        defer st.deinit();
+        _ = try record(a, &wf, &g, &st, env_plain);
+        _ = st.data.rules.map.swapRemove("c");
+        try st.save(testing.allocator);
+    }
+    _ = try s.file(".workz/lock", "");
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", try s.dir("no-podman"));
+    var out: std.Io.Writer.Allocating = .init(a);
+    const r = try workz.clean.run(testing.allocator, a, s.path, .{ .intermediates = true }, &wf, &env, &out.writer);
+
+    try testing.expectEqual(@as(usize, 1), r.intermediates);
+    try testing.expectEqual(@as(usize, 1), r.intermediates_kept);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "kept b.txt: rule c reads it and has not completed\n") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "removed a.txt, ") != null);
+    try testing.expect(!sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "a.txt" })));
+    try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, "b.txt" })));
+    var after = try state.load(testing.allocator, rec);
+    defer after.deinit();
+    try testing.expect(after.data.removed.map.contains(try std.fs.path.join(a, &.{ s.path, "a.txt" })));
 }

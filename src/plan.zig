@@ -32,8 +32,12 @@ pub const Context = struct {
     pass_env: []const []const u8 = &.{},
     extras: []const []const u8 = &.{},
     names: naming.Names,
+    /// Producers that run again to rebuild a removed output a running rule
+    /// reads, with that output.
+    rebuild: std.AutoHashMapUnmanaged(usize, []const u8) = .empty,
 
     pub fn init(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *const graph.Graph, st: *state.State, ids: *state.Identities, env_text: []const u8, environ: *const std.process.Environ.Map) !Context {
+        ids.removed = &st.data.removed;
         return .{
             .environ = environ,
             .gpa = gpa,
@@ -52,12 +56,31 @@ pub const Context = struct {
         self.cut = try state.Cutoff.init(self.a, self.gpa, self.wf, self.st, self.ids, false);
         if (self.extras.len == 0) self.extras = try self.resolveExtras(mask);
         const out = try self.a.alloc(Decision, self.wf.rules.len);
-        for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
-        for (self.g.order) |i| {
-            if (!mask[i]) continue;
-            out[i] = try self.decide(i, out);
+        while (true) {
+            for (out) |*d| d.* = .{ .run = false, .reason = "not selected" };
+            for (self.g.order) |i| {
+                if (!mask[i]) continue;
+                out[i] = try self.decide(i, out);
+            }
+            if (!try self.needsRebuild(mask, out)) return out;
         }
-        return out;
+    }
+
+    /// Marks the producers of removed outputs that a running rule reads, so
+    /// they run first and rebuild them; true when it marked one.
+    fn needsRebuild(self: *Context, mask: []const bool, ds: []const Decision) !bool {
+        var more = false;
+        for (self.wf.rules, 0..) |r, i| {
+            if (!mask[i] or !ds[i].run) continue;
+            for (r.input_abs) |in| {
+                if (!self.st.data.removed.map.contains(in) or sys.exists(self.gpa, in)) continue;
+                const p = self.g.producer.get(in) orelse continue;
+                if (!mask[p] or ds[p].run or self.rebuild.contains(p)) continue;
+                try self.rebuild.put(self.a, p, in);
+                more = true;
+            }
+        }
+        return more;
     }
 
     fn resolveExtras(self: *Context, mask: []const bool) ![]const []const u8 {
@@ -100,6 +123,7 @@ pub const Context = struct {
             if (std.mem.eql(u8, n, r.name)) break true;
         } else false;
         if (asked) return .{ .run = true, .reason = "rerun requested", .key = k };
+        if (self.rebuild.get(i)) |path| return .{ .run = true, .reason = try std.fmt.allocPrint(self.a, "removed output needed: {s}", .{workflow.keyPath(self.wf.root, path)}), .key = k };
         const reason = switch (try state.reuseCheck(self.gpa, self.ids, &e, &k)) {
             .reuse => return .{ .run = false, .reason = "unchanged", .key = k },
             .key => |what| if (std.mem.eql(u8, what, "environment")) env: {
@@ -124,7 +148,7 @@ const Prior = struct {
 
 pub fn reasonClass(reason: []const u8) []const u8 {
     if (std.mem.startsWith(u8, reason, "producer ")) return if (std.mem.endsWith(u8, reason, "; reused if its outputs repeat")) "a cutoff producer runs; reused if its outputs repeat" else "a producer runs";
-    for ([_][]const u8{ "input missing", "output missing", "output changed" }) |p| if (std.mem.startsWith(u8, reason, p)) return p;
+    for ([_][]const u8{ "input missing", "output missing", "output changed", "removed output needed" }) |p| if (std.mem.startsWith(u8, reason, p)) return p;
     return reason;
 }
 
@@ -331,6 +355,7 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
     var checked: usize = 0;
     var stored: usize = 0;
     var unrecorded: usize = 0;
+    var removed: usize = 0;
     const sa = st.allocator();
     for (wf.rules, 0..) |r, i| {
         if (!mask[i]) continue;
@@ -341,6 +366,11 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
         };
         const outs = try sa.dupe(state.Output, e.outputs);
         for (outs) |*o| {
+            if (st.data.removed.map.contains(o.path) and !sys.exists(gpa, o.path)) {
+                try found.append(a, .{ .rule = i, .kind = "removed", .path = o.path });
+                removed += 1;
+                continue;
+            }
             checked += 1;
             switch (try state.checkOutput(gpa, ids, o.*)) {
                 .intact => {},
@@ -381,7 +411,7 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
         const Entry = struct { rule: []const u8, step: []const u8, sample: ?[]const u8, finding: []const u8, path: ?[]const u8 };
         var list: std.ArrayList(Entry) = .empty;
         for (found.items) |f| try list.append(a, .{ .rule = wf.rules[f.rule].name, .step = wf.rules[f.rule].labels.step, .sample = wf.rules[f.rule].labels.sample, .finding = f.kind, .path = if (f.path) |p| shown(wf.root, p) else null });
-        try w.print("{f}\n", .{std.json.fmt(.{ .v = records.record_version, .checked = checked, .by_content = content, .digests_stored = stored, .unrecorded = unrecorded, .ok = ok and unrecorded == 0, .findings = list.items }, .{})});
+        try w.print("{f}\n", .{std.json.fmt(.{ .v = records.record_version, .checked = checked, .by_content = content, .digests_stored = stored, .removed = removed, .unrecorded = unrecorded, .ok = ok and unrecorded == 0, .findings = list.items }, .{})});
         return ok and unrecorded == 0;
     }
     const widths = n.widths(mask);
@@ -397,6 +427,7 @@ pub fn verify(w: *std.Io.Writer, gpa: Allocator, st: *state.State, ids: *state.I
     try w.print("{d} {s} checked{s}", .{ checked, if (checked == 1) "output" else "outputs", if (content) " by content" else "" });
     if (stored > 0) try w.print(", {d} digests stored", .{stored});
     try w.print(": {s}", .{if (ok) "all match" else "differences found"});
+    if (removed > 0) try w.print("; {d} {s} by clean --intermediates", .{ removed, if (removed == 1) "intermediate removed" else "intermediates removed" });
     if (unrecorded > 0) try w.print("; {d} selected {s} no record to check", .{ unrecorded, if (unrecorded == 1) "rule has" else "rules have" });
     try w.writeAll("\n");
     return ok and unrecorded == 0;

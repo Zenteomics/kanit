@@ -151,6 +151,10 @@ Before an attempt starts, kanit moves existing outputs into its `previous/` dire
 
 Restoration depends on successful filesystem operations; it is not an atomic rollback across rules. After a crash, the journal invalidates an unfinished rule's success record even when its old files can be recovered, so it runs again. A separate end-of-launch check rejects completed results whose inputs changed during execution; that check invalidates reuse but does not automatically restore their previous outputs.
 
+## Removed intermediates
+
+`kanit clean --intermediates` removes the outputs a rule marks `intermediate`, such as alignments that later steps have read ([Records](Records.md#cleaning-up)). The state keeps the identity each had, so `plan` counts its rule and the rules that read it as done while the file is gone, and `verify` lists it as `removed`. When a rule that reads a removed file has to run, the rule that writes the file runs first, with the reason `removed output needed: PATH`, and the rules after it follow as for any producer that runs.
+
 ## Verify outputs
 
 `kanit verify WORKFLOW` checks that every recorded output still has its recorded identity, and `--content` also compares the bytes with stored digests, storing a digest for every output that has none:
