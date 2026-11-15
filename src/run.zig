@@ -822,6 +822,7 @@ const Engine = struct {
         t.stop_why = "cancelled";
         t.dir = try std.fmt.allocPrint(self.a, "{s}/attempts/{s}/{d:0>3}", .{ self.launch_dir, r.name, t.attempts });
         try sys.mkdirAll(self.gpa, t.dir);
+        try sys.mkdirAll(self.gpa, try scratchOf(self.a, t.dir));
         t.timed_out = false;
         t.cancelled = false;
         t.lost_service = null;
@@ -889,7 +890,7 @@ const Engine = struct {
         var spec: process.Spec = undefined;
         t.container_name = null;
         if (r.container) |img| {
-            const name = try std.fmt.allocPrint(self.a, "workz-{s}-{d}-{d}", .{ self.launch_id, i, t.attempts });
+            const name = try std.fmt.allocPrint(self.a, "kanit-{s}-{d}-{d}", .{ self.launch_id, i, t.attempts });
             var extra_ro: std.ArrayList([]const u8) = .empty;
             for (r.shared_index) |hi| if (self.wf.shared[hi].path_abs) |p| try extra_ro.append(sa, p);
             const argv = try container.runArgv(sa, .{
@@ -899,7 +900,7 @@ const Engine = struct {
                 .root = self.wf.root,
                 .launch = self.launch_id,
                 .cgroup_parent = if (t.cg) |cg| cg.path["/sys/fs/cgroup".len..] else null,
-                .mounts = try container.mounts(sa, self.wf.root, r, extra_ro.items),
+                .mounts = try container.mounts(sa, self.wf.root, r, extra_ro.items, try scratchOf(sa, t.dir)),
                 .env = try self.containerEnv(sa, &try ruleVars(sa, r, t.dir)),
                 .ipc_service = self.serviceOf(r),
                 .image_mounts = r.mounts,
@@ -1107,12 +1108,24 @@ const Engine = struct {
         return process.Vec.init(a, list.items);
     }
 
-    fn ruleVars(a: Allocator, r: *const workflow.Rule, dir: []const u8) ![4][]const u8 {
+    /// A rule's variables, each under its `KANIT_` name and, until those
+    /// names are removed, its earlier `WORKZ_` name; `KANIT_SCRATCH` has only
+    /// its own.
+    fn ruleVars(a: Allocator, r: *const workflow.Rule, dir: []const u8) ![9][]const u8 {
+        const named = try std.fmt.allocPrint(a, "RULE={s}", .{r.name});
+        const attempt = try std.fmt.allocPrint(a, "ATTEMPT_DIR={s}", .{dir});
+        const threads = try std.fmt.allocPrint(a, "THREADS={d}", .{r.threads});
+        const memory = try std.fmt.allocPrint(a, "MEMORY_MIB={d}", .{r.memory_mib});
         return .{
-            try std.fmt.allocPrint(a, "WORKZ_RULE={s}", .{r.name}),
-            try std.fmt.allocPrint(a, "WORKZ_ATTEMPT_DIR={s}", .{dir}),
-            try std.fmt.allocPrint(a, "WORKZ_THREADS={d}", .{r.threads}),
-            try std.fmt.allocPrint(a, "WORKZ_MEMORY_MIB={d}", .{r.memory_mib}),
+            try std.mem.concat(a, u8, &.{ "KANIT_", named }),
+            try std.mem.concat(a, u8, &.{ "KANIT_", attempt }),
+            try std.mem.concat(a, u8, &.{ "KANIT_", threads }),
+            try std.mem.concat(a, u8, &.{ "KANIT_", memory }),
+            try std.fmt.allocPrint(a, "KANIT_SCRATCH={s}", .{try scratchOf(a, dir)}),
+            try std.mem.concat(a, u8, &.{ "WORKZ_", named }),
+            try std.mem.concat(a, u8, &.{ "WORKZ_", attempt }),
+            try std.mem.concat(a, u8, &.{ "WORKZ_", threads }),
+            try std.mem.concat(a, u8, &.{ "WORKZ_", memory }),
         };
     }
 
@@ -1183,7 +1196,7 @@ const Engine = struct {
             procs = try self.containers_cg.?.openProcs();
         }
         defer if (procs >= 0) sys.close(procs);
-        const name = try std.fmt.allocPrint(self.a, "workz-{s}-shared-{s}-{d}", .{ self.launch_id, s.name, h.starts });
+        const name = try std.fmt.allocPrint(self.a, "kanit-{s}-shared-{s}-{d}", .{ self.launch_id, s.name, h.starts });
         var ro: std.ArrayList(container.Mount) = .empty;
         try ro.append(self.a, .{ .dir = self.wf.root, .write = false });
         if (s.path_abs) |pth| if (!workflow.within(self.wf.root, pth)) try ro.append(self.a, .{ .dir = pth, .write = false });
@@ -1196,6 +1209,9 @@ const Engine = struct {
             .cgroup_parent = if (h.cg) |cg| cg.path["/sys/fs/cgroup".len..] else null,
             .mounts = ro.items,
             .env = try self.containerEnv(self.a, &.{
+                try std.fmt.allocPrint(self.a, "KANIT_SHARED={s}", .{s.name}),
+                try std.fmt.allocPrint(self.a, "KANIT_MEMORY_MIB={d}", .{h.mib}),
+                try std.fmt.allocPrint(self.a, "KANIT_SERVICE_STOP={s}", .{fifo}),
                 try std.fmt.allocPrint(self.a, "WORKZ_SHARED={s}", .{s.name}),
                 try std.fmt.allocPrint(self.a, "WORKZ_MEMORY_MIB={d}", .{h.mib}),
                 try std.fmt.allocPrint(self.a, "WORKZ_SERVICE_STOP={s}", .{fifo}),
@@ -2206,8 +2222,8 @@ const Engine = struct {
             const argv = try process.Vec.init(self.a, &.{
                 self.podman.?,                      "run",
                 "--rm",                             "--pull=never",
-                "--label",                          try std.fmt.allocPrint(self.a, "workz.workdir={s}", .{self.wf.root}),
-                "--label",                          try std.fmt.allocPrint(self.a, "workz.launch={s}", .{self.launch_id}),
+                "--label",                          try std.fmt.allocPrint(self.a, "kanit.workdir={s}", .{self.wf.root}),
+                "--label",                          try std.fmt.allocPrint(self.a, "kanit.launch={s}", .{self.launch_id}),
                 "--network=none",                   "--cap-drop=ALL",
                 "--security-opt=no-new-privileges", "--security-opt=label=disable",
                 "--read-only",                      "--log-driver=none",
@@ -2532,6 +2548,13 @@ fn protectScope(gpa: Allocator, a: Allocator, tree: cgroup.Tree, mib: u64, path_
     return true;
 }
 
+/// An attempt's working space, `$KANIT_SCRATCH`: an empty directory in its
+/// attempt directory, which `clean --intermediates` removes once the attempt
+/// completed.
+pub fn scratchOf(a: Allocator, attempt_dir: []const u8) ![]const u8 {
+    return std.fs.path.join(a, &.{ attempt_dir, "scratch" });
+}
+
 /// The memory an attempt used, measured as the reports measure it
 /// (`model.Attempt.usedMib`).
 fn usedMib(r: *const workflow.Rule, t: *const Task, counters: ?cgroup.Counters, reaped: process.Reaped) ?f64 {
@@ -2654,6 +2677,17 @@ pub fn execute(gpa: Allocator, a: Allocator, wf: *const workflow.Workflow, g: *c
     const max_memory = opts.max_memory_mib orelse defaultMemoryMib(gpa);
     const max_jobs = opts.jobs orelse max_threads;
 
+    records.migrate(gpa, a, wf.root) catch |err| switch (err) {
+        error.Busy => {
+            std.debug.print("kanit: another launch is running in {s}; watch it with kanit watch, or run again after it ends\n", .{wf.root});
+            return .failed;
+        },
+        error.TwoRecordDirs => {
+            std.debug.print("kanit: {s} holds both .kanit and .workz record directories; keep the one with the launches you want and move the other away\n", .{wf.root});
+            return .failed;
+        },
+        else => return err,
+    };
     const rec = try records.recordsDir(a, wf.root);
     try records.makeRecordsDir(gpa, rec);
     const lock_fd = records.lock(gpa, rec) catch |err| switch (err) {

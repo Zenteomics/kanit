@@ -7,7 +7,7 @@ A kanit workflow is a flat list of concrete rules. This page covers how to struc
 name = "align_s1"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
-shell = """bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome \
+shell = """bowtie2 --mm -p $KANIT_THREADS -x ref/bowtie2/genome \
   -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz \
   | samtools view -b -o aligned/s1.bam -"""
 priority = 10
@@ -32,7 +32,7 @@ kanit runs a rule's command only after every rule that produces one of its input
 
 - **Declare every file the command reads**, including scripts, reference files and configuration. An undeclared input is invisible: editing it never reruns the rule, and nothing orders the rule after its producer.
 - **Declare every file the command must leave behind.** After the command exits 0, kanit checks that each output exists as a regular file; a missing one fails the attempt with `exited 0 without output <path>`. Temporary files need not be declared.
-- **Outputs live inside the working directory**, as relative paths without `..`, and outside `.workz/`. Inputs may be anywhere.
+- **Outputs live inside the working directory**, as relative paths without `..`, and outside `.kanit/`. Inputs may be anywhere.
 - **Directories can be inputs.** A directory's identity covers every file and directory below it, so adding, removing or changing any of them reruns the rule. A rule cannot write inside its own directory input. An index such as `ref/bowtie2` is a natural directory input.
 - **There are no wildcards.** Paths name files exactly; `*`, `?`, `[ ]` and `{ }` are errors. Inside `shell`, use whatever the shell allows.
 
@@ -126,7 +126,7 @@ bams=()
   printf '[shared.index]\npath = "ref/bowtie2"\n\n'
   while IFS=$'\t' read -r s r1 r2; do
     t1="trimmed/${s}_1.fq.gz" t2="trimmed/${s}_2.fq.gz"
-    align="bowtie2 --mm -p \$WORKZ_THREADS -x ref/bowtie2/genome -1 $t1 -2 $t2"
+    align="bowtie2 --mm -p \$KANIT_THREADS -x ref/bowtie2/genome -1 $t1 -2 $t2"
     cat <<EOF
 [[rules]]
 name = "trim_$s"
@@ -136,7 +136,7 @@ category = "trimming"
 tool = "fastp"
 input = ["$r1", "$r2"]
 output = ["$t1", "$t2"]
-shell = "fastp -w \$WORKZ_THREADS -i $r1 -I $r2 -o $t1 -O $t2"
+shell = "fastp -w \$KANIT_THREADS -i $r1 -I $r2 -o $t1 -O $t2"
 log = "logs/trim_$s.log"
 
 [rules.resources]
@@ -166,7 +166,7 @@ EOF
     bams+=("aligned/$s.bam")
   done < samples.tsv
   quoted=$(printf '"%s", ' "${bams[@]}")
-  count="featureCounts -T \$WORKZ_THREADS -p --countReadPairs -s 2 -a ref/genes.gtf"
+  count="featureCounts -T \$KANIT_THREADS -p --countReadPairs -s 2 -a ref/genes.gtf"
   cat <<EOF
 [[rules]]
 name = "count_genes"
@@ -201,7 +201,7 @@ valid: rnaseq (7 rules, 7 selected, 1 groups, 1 shared)
 
 Some choices in this script are worth copying:
 
-- `\$WORKZ_THREADS` stays a variable in the file and expands when the rule runs, to the threads the rule requested. Passing it to every multithreaded tool keeps the tool's threads equal to its CPU quota.
+- `\$KANIT_THREADS` stays a variable in the file and expands when the rule runs, to the threads the rule requested. Passing it to every multithreaded tool keeps the tool's threads equal to its CPU quota.
 - The bowtie2 index is a [shared input](Resources-and-Scheduling.md#shared-inputs): kanit loads it once for all alignments, and counts it as an input of each, so rebuilding the index reruns them.
 - `bowtie2 --mm` maps the index instead of reading it, so the alignments share one copy of it in memory, which is what makes a shared input pay off.
 - The `disk` group lets at most two trims read from disk at once, while alignments with `priority = 10` start before trims that become ready at the same time.
@@ -281,13 +281,13 @@ A request is both a reservation and a limit, so it pays to size it from measurem
 3. Ask kanit what each step used: `kanit report --suggest` prints the largest peak and a suggested request for each step, and `kanit report --bottlenecks` says which requests are far above their peaks ([Reports](Reports.md#request-sizing)).
 4. Apply the suggestions in the template or generator, and run again.
 
-The memory request is a hard limit that counts page cache, and the thread request a CPU quota ([Limits on each attempt](Resources-and-Scheduling.md#limits-on-each-attempt)): size memory for the largest input you expect, and pass `$WORKZ_THREADS` to every multithreaded tool.
+The memory request is a hard limit that counts page cache, and the thread request a CPU quota ([Limits on each attempt](Resources-and-Scheduling.md#limits-on-each-attempt)): size memory for the largest input you expect, and pass `$KANIT_THREADS` to every multithreaded tool.
 
 `resources.threads` and `resources.memory` may also be written directly on the rule, and `[defaults]` gives both for rules that set neither. Every rule needs a memory request, from one of these places.
 
 ## Logs and benchmarks
 
-Every attempt's standard output and error are always kept in its attempt directory under `.workz/`. Two optional keys copy them where your pipeline expects them:
+Every attempt's standard output and error are always kept in its attempt directory under `.kanit/`. Two optional keys copy them where your pipeline expects them:
 
 - `log = "logs/align_s1.log"` writes the attempt's standard output and then its standard error into one file after the attempt ends, under the headings `=== stdout ===` and `=== stderr ===`.
 - `benchmark = "benchmarks/align_s1.json"` writes a JSON summary of a completed attempt: `rule`, `wall_time_secs`, `cpu_seconds`, `max_rss_mb`, `memory_peak_mb`, `memory_limit_mb` and `retries`. The three memory fields are in MiB.
@@ -309,7 +309,7 @@ shell = "STAR --outFileNamePrefix aligned/s1/ ..."
 - When an attempt fails, the last 64 KiB of each listed file that exists is copied into the attempt's `diagnostics/` directory, so the next attempt cannot overwrite it.
 - The failure line on a terminal shows the last lines of each, `kanit logs` prints them after the two streams, and the HTML page shows them under the failure.
 - When standard error is empty, the failure reason quotes the last line of the first diagnostics file that has one.
-- Only regular files that resolve inside the working directory and outside `.workz/` are read; a missing file is skipped, and listing one file twice is an error. Diagnostics are not outputs and not part of the rule key: adding one reruns nothing.
+- Only regular files that resolve inside the working directory and outside `.kanit/` are read; a missing file is skipped, and listing one file twice is an error. Diagnostics are not outputs and not part of the rule key: adding one reruns nothing.
 
 ## Tool versions
 
@@ -378,7 +378,7 @@ and write the schema next to it with `kanit schema > kanit.schema.json`.
 
 - Every file the command reads is in `input`; every file it must leave is in `output`.
 - Rule names follow `step_sample` or `sample__STEP`.
-- Multithreaded tools take `$WORKZ_THREADS`.
+- Multithreaded tools take `$KANIT_THREADS`.
 - Requests come from a measured run, via `kanit report --suggest`.
 - Large read-only indexes are shared inputs, which count as inputs of the rules using them.
 - `kanit validate --inputs` and `kanit plan --budget` pass, and `kanit graph` shows the links you meant, before the first `kanit run`.

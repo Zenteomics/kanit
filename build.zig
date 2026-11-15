@@ -8,12 +8,12 @@ pub fn build(b: *std.Build) void {
 
     const toml = b.dependency("z_toml", .{ .target = target, .optimize = optimize }).module("toml");
 
-    const workz = b.addModule("workz", .{
+    const kanit = b.addModule("kanit", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
-    workz.addImport("toml", toml);
+    kanit.addImport("toml", toml);
 
     const exe = b.addExecutable(.{
         .name = "kanit",
@@ -24,7 +24,7 @@ pub fn build(b: *std.Build) void {
             .strip = strip,
         }),
     });
-    exe.root_module.addImport("workz", workz);
+    exe.root_module.addImport("kanit", kanit);
     b.installArtifact(exe);
     b.installFile("LICENSE", "share/doc/kanit/LICENSE");
     b.installFile("THIRD_PARTY.md", "share/doc/kanit/THIRD_PARTY.md");
@@ -40,6 +40,6 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    tests.root_module.addImport("workz", workz);
+    tests.root_module.addImport("kanit", kanit);
     b.step("test", "Run unit tests").dependOn(&b.addRunArtifact(tests).step);
 }

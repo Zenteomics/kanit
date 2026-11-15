@@ -21,7 +21,7 @@ Before a long launch, `kanit plan --budget` checks that every rule fits the budg
 kanit 0.10.0   rnaseq-mini   launch 20261108T121740.229-ab51811a
           plan         7 rules: 4 steps for 2 samples
           budget       4 threads, 4.0 GiB, 4 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
           TOOL   VERSION  STEP    RULES
           fastp  1.4.0    trim        2
@@ -91,7 +91,7 @@ TIME      RULES  STATUS  TOOL   STEP    SAMPLE     TOOK               MEMORY    
 - An `INFO` row names a shared input in `STEP` when it loads, is ready, restarts or fails, the rule a `kanit control` command was for, or an interrupt. A `WARN` row names the rule it concerns, if any.
 - On a terminal, color marks the status tags, the `START` rows are left out, and a footer below the rows shows where the launch is: one row per step with its tool, a bar and how many of its rules are done, ✓ when all of them are, and how many failed, are running, blocked or stopped; then the counts of all the rules, the elapsed time and the running rules, the longest first. On a short terminal the steps that are done fold into one row. `-v` keeps the `START` rows. `--no-color` or `NO_COLOR=1` turns colors off; outside a UTF-8 locale the marks are ASCII.
 - Off a terminal, the `START` rows are kept, and every five minutes an `INFO` row with the counts is followed by the footer's step table and the running rules.
-- `launch.log` in the launch directory keeps every line, `START` rows included, whole and without color, so `tail -f .workz/latest/launch.log` follows a launch from anywhere. `.workz/latest` always points to the newest launch.
+- `launch.log` in the launch directory keeps every line, `START` rows included, whole and without color, so `tail -f .kanit/latest/launch.log` follows a launch from anywhere. `.kanit/latest` always points to the newest launch.
 
 When the launch ends, a summary follows on standard output: the outcome and counts, a matrix of samples by steps or a list of steps, the failed rules with their reasons, the rules they blocked, the slowest rules, where the records are and what to type next. `kanit status` prints the same summary later ([status](Watching-a-Launch.md#status)), and `launch.log` keeps it at its end. The summary is text wherever standard output goes, with colors only on a terminal; `--json` prints one line of JSON instead, the same content as the launch's `summary.json` ([Records](Records.md#summaryjson)), for a script to read.
 
@@ -105,10 +105,10 @@ A host rule's command is written to `command.sh` in its attempt directory and ru
 
 - **Directory.** It starts in the rule's `workdir`, or in the working directory.
 - **Streams.** Standard input is `/dev/null`. Standard output and error go to `stdout.log` and `stderr.log` in the attempt directory.
-- **Environment.** Only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM` pass from your shell, with the names given with `--pass-env NAME`. Everything else, credentials included, stays out. kanit adds `WORKZ_RULE` (the rule name), `WORKZ_ATTEMPT_DIR` (the attempt directory), `WORKZ_THREADS` and `WORKZ_MEMORY_MIB` (the request).
+- **Environment.** Only `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`, `TZ`, `TMPDIR`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS` and `TERM` pass from your shell, with the names given with `--pass-env NAME`. Everything else, credentials included, stays out. kanit adds `KANIT_RULE` (the rule name), `KANIT_ATTEMPT_DIR` (the attempt directory), `KANIT_SCRATCH` (an empty directory in it for the command's working files), `KANIT_THREADS` and `KANIT_MEMORY_MIB` (the request). The same values also come under their earlier names, `WORKZ_RULE`, `WORKZ_ATTEMPT_DIR`, `WORKZ_THREADS` and `WORKZ_MEMORY_MIB`, until a later version, which the changelog names a version ahead, removes them. `kanit clean --intermediates` removes the scratch directory of a completed attempt; a failed attempt keeps it.
 - **Network.** Only loopback. Rules of one launch share a network namespace, so they can reach each other on `127.0.0.1`, but nothing outside the machine.
 
-`PATH`, `LANG`, `LC_ALL`, `TZ` and the `--pass-env` names are part of every rule key, so changing them reruns rules ([Reuse and resume](Reuse-and-Resume.md#the-rule-key)). Their values are recorded in `.workz/state.json`, and `kanit explain` shows how they changed, so pass variables that change a result, not secrets such as tokens. Container rules see a different set ([Containers and services](Containers-and-Services.md#what-the-container-sees)).
+`PATH`, `LANG`, `LC_ALL`, `TZ` and the `--pass-env` names are part of every rule key, so changing them reruns rules ([Reuse and resume](Reuse-and-Resume.md#the-rule-key)). Their values are recorded in `.kanit/state.json`, and `kanit explain` shows how they changed, so pass variables that change a result, not secrets such as tokens. Container rules see a different set ([Containers and services](Containers-and-Services.md#what-the-container-sees)).
 
 ## Isolation
 
@@ -146,12 +146,12 @@ An attempt fails when its command exits with a non-zero status, is killed, runs 
 kanit 0.10.0   failures   launch 20261108T121728.669-4d10cd11
           plan         5 rules
           budget       4 threads, 1.0 GiB, 4 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
 TIME      RULES  STATUS  STEP          TOOK             MEMORY      CPU  NOTE
 05:17:29    0/5  FAIL    exits         3 ms        - /  64 MiB    - / 1  exit 2
                          │ sort: cannot read: samples.tsv: No such file or directory
-                         kanit logs exits   .workz/latest/attempts/exits/001/
+                         kanit logs exits   .kanit/latest/attempts/exits/001/
 05:17:29    0/5  FAIL    no_output     3 ms        - /  64 MiB    - / 1  exited 0 without output d.txt
 05:17:29    0/5  BLOCK   after                                           after exits failed
 05:17:29    0/5  FAIL    too_big      51 ms   64 MiB /  64 MiB    - / 1  out of memory
@@ -164,12 +164,12 @@ TIME      RULES  STATUS  STEP          TOOK             MEMORY      CPU  NOTE
                        too_big    out of memory: could not stay within its 64 MiB request
                        slow       timed out after 2 s
           blocked      after      after exits failed
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
           next         kanit logs exits   the output of the failed attempt
                        kanit run          run again
 ```
 
-The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. A failure whose standard error or kept [diagnostics](Writing-Workflows.md#diagnostics) has lines quotes the last three and names the `kanit logs` command that shows them whole, with the attempt's directory: under `.workz/latest/` on a terminal, and under the launch's own directory off a terminal and in `launch.log`, where the path must stay true after later launches.
+The rule `after` depends on `exits`, so it is blocked: it never starts, and the launch ends as `failed` with exit status 1. A failure whose standard error or kept [diagnostics](Writing-Workflows.md#diagnostics) has lines quotes the last three and names the `kanit logs` command that shows them whole, with the attempt's directory: under `.kanit/latest/` on a terminal, and under the launch's own directory off a terminal and in `launch.log`, where the path must stay true after later launches.
 
 - **Retries.** A failed attempt runs again while the rule has retries left (`retries` on the rule, or `--retry`), as a new attempt with its own directory. A rule that fails its last attempt has failed.
 - **Without `--keep-going`**, the first failed rule stops the launch: running attempts are stopped, and rules that had not started are left `not_started`.

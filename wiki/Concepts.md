@@ -13,7 +13,7 @@ flowchart LR
 
 ## Workflow and working directory
 
-A **workflow** is a TOML file that lists rules. Its directory is the **working directory**, unless a command is given `-d DIR`. Relative paths in the workflow resolve against the working directory, a rule's command starts there unless the rule sets a `workdir`, and kanit keeps its records in `.workz/` inside it.
+A **workflow** is a TOML file that lists rules. Its directory is the **working directory**, unless a command is given `-d DIR`. Relative paths in the workflow resolve against the working directory, a rule's command starts there unless the rule sets a `workdir`, and kanit keeps its records in `.kanit/` inside it.
 
 kanit reads the graph as written. Samples, parameters and file names are expanded before kanit reads the file: by `kanit prepare` from a pipeline template, or by a program of your own ([Writing workflows](Writing-Workflows.md#prepare-from-a-template)).
 
@@ -61,9 +61,9 @@ Labels are not part of the [rule key](#rule-keys-and-reuse): adding or changing 
 
 ## Launches and attempts
 
-A **launch** is one execution of `kanit run`. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.workz/launches/`.
+A **launch** is one execution of `kanit run`. Each launch gets an ID made of its UTC start time and a random suffix, such as `20261026T033653.780-bb9b10ee`, and a directory in `.kanit/launches/`.
 
-Within a launch, each rule that runs has one or more **attempts**, numbered from 1. A failed attempt is retried while the rule has retries left. Each attempt keeps its command, request, standard output and error, and a record of what it used, in `.workz/launches/<ID>/attempts/<rule>/<NNN>/`.
+Within a launch, each rule that runs has one or more **attempts**, numbered from 1. A failed attempt is retried while the rule has retries left. Each attempt keeps its command, request, standard output and error, and a record of what it used, in `.kanit/launches/<ID>/attempts/<rule>/<NNN>/`.
 
 A rule moves through these states in a launch:
 
@@ -107,7 +107,7 @@ A file's **identity** is its inode, size, and modification and change times, so 
 
 ## Records
 
-Everything kanit knows about earlier launches is in `.workz/`: `state.json`, with the rules completed since it was written in `state.log`, holds the key and outputs of every completed rule, and each launch directory holds its event stream, summary and attempts. The commands that show a launch only read these files, so they work from any terminal while the launch runs and after it ends. [Records](Records.md) describes every file.
+Everything kanit knows about earlier launches is in `.kanit/`: `state.json`, with the rules completed since it was written in `state.log`, holds the key and outputs of every completed rule, and each launch directory holds its event stream, summary and attempts. The commands that show a launch only read these files, so they work from any terminal while the launch runs and after it ends. [Records](Records.md) describes every file.
 
 ## Other terms
 

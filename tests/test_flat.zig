@@ -3,7 +3,7 @@
 //! are accepted.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const flat = workz.flat;
 const Value = std.json.Value;
 

@@ -38,7 +38,7 @@ A bioinformatics pipeline is hundreds or thousands of steps, one per sample, com
 - **Writes the methods section.** `report --methods` lists the workflow, each tool with its version and image, and each step's command.
 - **Fits the machine.** Ready rules start by priority and critical path within the thread, memory and job budget, and a large rule that cannot start never holds back smaller ones.
 
-It is one executable, with no daemon and no database: everything it knows is in `.workz/` beside the workflow.
+It is one executable, with no daemon and no database: everything it knows is in `.kanit/` beside the workflow.
 
 <details>
 <summary>The live terminal view</summary>
@@ -80,13 +80,13 @@ cat out/report.txt                                        # lines: 1000
 kanit report --bottlenecks                                # what limited the run
 ```
 
-`run` opens with the launch's shape and a table of its steps, tools and versions, then logs a row for each rule, by its step and sample, as it starts and ends. The launch keeps the same text in `.workz/latest/launch.log`:
+`run` opens with the launch's shape and a table of its steps, tools and versions, then logs a row for each rule, by its step and sample, as it starts and ends. The launch keeps the same text in `.kanit/latest/launch.log`:
 
 ```text
 kanit 0.10.0   example   launch 20261108T121723.759-3460c6e8
           plan         2 rules: 2 steps for 1 sample
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
           TOOL  VERSION  STEP    RULES
           wc    9.10     count       1
@@ -124,7 +124,7 @@ The [user guide](https://github.com/zenteomics/kanit/wiki/Home) follows a workfl
 
 ## Status
 
-kanit is in development, and its current version is 0.10.0. Before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line; the [changelog](CHANGELOG.md) says first what each change needs from you. Versions up to 0.6.0 were released as workz, whose names remain in `.workz/`, the `WORKZ_` variables and the Zig module `workz`.
+kanit is in development, and its current version is 0.10.0. Before 1.0, a minor version may change the workflow format, the records under `.kanit/` and the command line; the [changelog](CHANGELOG.md) says first what each change needs from you. Versions up to 0.6.0 were released as workz. A launch moves the records an earlier version kept in `.workz/` to `.kanit/` and leaves `.workz` as a link to them, and rules still get the `WORKZ_` names of their variables beside the `KANIT_` ones until a later version removes them.
 
 Issues are welcome on [GitHub](https://github.com/zenteomics/kanit/issues); open one before a pull request, so the change can be agreed first.
 

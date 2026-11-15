@@ -215,7 +215,7 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
 
     try w.writeAll("<footer>Drawn by ");
     try escape(w, if (l.engine.len > 0) l.engine else "kanit");
-    try w.writeAll(" from <span class=\"mono\">.workz/launches/");
+    try w.print(" from <span class=\"mono\">{s}/launches/", .{std.fs.path.basename(std.fs.path.dirname(std.fs.path.dirname(l.dir) orelse "") orelse ".kanit")});
     try escape(w, l.id);
     try w.writeAll("</span>");
     if (!l.finished) try w.print(" &middot; this page reloads every {d} s while the launch runs", .{REFRESH_SECONDS});

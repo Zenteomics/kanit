@@ -129,7 +129,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 kanit 0.10.0   gc-content   launch 20261108T121724.311-8efeb4eb
           plan         4 rules: 2 steps
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
           STEP     RULES
           gc           3
@@ -148,11 +148,11 @@ TIME      RULES  STATUS  STEP        TOOK             MEMORY      CPU  NOTE
           steps        gc       ✓ 3 of 3 done                   slowest gc_s2 5 ms
                        summary  ✓ 1 of 1 done
           slowest      summary 5 ms   gc_s2 5 ms   gc_s1 4 ms
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
           next         kanit report --bottlenecks   what limited this launch
 ```
 
-The launch opens with its shape: four rules in two steps, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.workz/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). Under the column header, each row has the time, how many of the four rules are done, what happened, the rule, how long it took, and its memory and CPU against its request; `-` is a figure the rule ended too soon to measure. The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the summary to standard output: what was done, each step's progress, the slowest rules, where the records are and what to look at next. `--json` prints the summary as JSON instead, for a script. On a terminal the `START` rows give way to a footer of the step's progress and the running rules.
+The launch opens with its shape: four rules in two steps, three of them in the step `gc` (kanit reads the step from the part of each name before its last `_`), and the budget the launch may use. Without `--max-threads` and `--max-memory` it takes every CPU and three quarters of the memory, so on a shared machine set both. `records` says where the launch keeps its records: `.kanit/latest/` is the newest launch, with its text log `launch.log` and its page `report.html`, which a browser can keep open to follow the launch ([Reports](Reports.md#the-html-report)). Under the column header, each row has the time, how many of the four rules are done, what happened, the rule, how long it took, and its memory and CPU against its request; `-` is a figure the rule ended too soon to measure. The budget of two threads lets two of the one-thread rules run at once; `gc_s3` starts when one of them finishes, and `summary` when all three have. The log goes to standard error, and the summary to standard output: what was done, each step's progress, the slowest rules, where the records are and what to look at next. `--json` prints the summary as JSON instead, for a script. On a terminal the `START` rows give way to a footer of the step's progress and the running rules.
 
 ```sh
 cat summary.tsv
@@ -230,7 +230,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 kanit 0.10.0   gc-content   launch 20261108T121725.412-bce6cb75
           plan         4 rules: 2 steps
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
           STEP     RULES
           gc           3
@@ -245,7 +245,7 @@ TIME      RULES  STATUS  STEP        TOOK             MEMORY      CPU  NOTE
 
 ## Look at what happened
 
-Every launch leaves a record in `.workz/`, which grows with each one and holds every attempt's output and the values of `--pass-env` variables: add `.workz/` to the project's `.gitignore`. `status --history` lists the launches, newest first:
+Every launch leaves a record in `.kanit/`, which grows with each one and holds every attempt's output and the values of `--pass-env` variables: add `.kanit/` to the project's `.gitignore`. `status --history` lists the launches, newest first:
 
 ```sh
 kanit status --history

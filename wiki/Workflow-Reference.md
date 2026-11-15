@@ -40,7 +40,7 @@ tool = "bowtie2"
 version = "bowtie2 --version | head -1"
 input = ["trimmed/s1_1.fq.gz", "trimmed/s1_2.fq.gz"]
 output = ["aligned/s1.bam"]
-shell = """bowtie2 --mm -p $WORKZ_THREADS -x ref/bowtie2/genome \
+shell = """bowtie2 --mm -p $KANIT_THREADS -x ref/bowtie2/genome \
   -1 trimmed/s1_1.fq.gz -2 trimmed/s1_2.fq.gz \
   | samtools view -b -o aligned/s1.bam -"""
 priority = 10
@@ -65,7 +65,7 @@ container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
 workdir = "star/s1"
 links = { "r1.fq.gz" = "reads/s1_1.fq.gz", "r2.fq.gz" = "reads/s1_2.fq.gz" }
 shell = """STAR --genomeDir /data/project/ref/star --genomeLoad LoadAndKeep \
-  --runThreadN $WORKZ_THREADS --readFilesCommand zcat \
+  --runThreadN $KANIT_THREADS --readFilesCommand zcat \
   --readFilesIn r1.fq.gz r2.fq.gz --outSAMtype BAM Unsorted"""
 
 [rules.resources]
@@ -169,12 +169,12 @@ An entry with `container` is a service:
 
 - Every rule needs a memory request: `memory`, in `resources`, or in `[defaults]`.
 - `priority` is between -1,000,000 and 1,000,000.
-- `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.workz/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
+- `output`, `log` and `benchmark` are relative paths inside the working directory, without `..` and outside `.kanit/`. If an output already exists, it must be a regular file. `input` paths may lie anywhere.
 - A path one rule writes as a file cannot be a directory that another output, log, benchmark or workdir lies in, and two logs or benchmarks cannot be hard links to one file.
 - A workflow declares at least one rule. `workflow.name` and each rule's `shell` must not be empty, and a `shell` cannot hold a NUL byte, which Bash would drop.
 - `output`, `log`, `benchmark` and `workdir` name their real path: one that passes through a symlinked directory, or a symlink that points nowhere, is an error, since the file would have a second name that the graph does not see.
 - An input that is a directory depends on every rule that writes inside it, so it is read once they have completed. A rule's own outputs, log, benchmark and workdir cannot lie inside its directory input, which they would change while it runs; an input of `.` is therefore an error for any rule.
-- `diagnostics` are relative paths inside the working directory, without `..` and outside `.workz/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
+- `diagnostics` are relative paths inside the working directory, without `..` and outside `.kanit/`. They are only read, after a failed attempt; they are not outputs, and not part of the rule key.
 - `version` is a command run once per launch, in the rule's image or on the host, whose output is recorded as the tool's version; it is not part of the rule key ([Writing workflows](Writing-Workflows.md#tool-versions)).
 - An input that reaches another rule's output, or a directory it writes into, through a symlink is an error: declare the output's own path, so the dependency is visible.
 - An input whose `..` follows a symlink, such as `link/../file` where `link` points into another directory, is an error: the program would read another file than the path spells. Write the path without `..`.

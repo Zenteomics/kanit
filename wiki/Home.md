@@ -7,12 +7,12 @@ flowchart LR
     T[pipeline.toml<br/>steps, samples] -. kanit prepare .-> W
     W[workflow.toml<br/>rules, files, requests] --> P[kanit plan<br/>what runs and why]
     P --> R[kanit run<br/>rules within the budget]
-    R --> D[.workz/<br/>state, events, attempts]
+    R --> D[.kanit/<br/>state, events, attempts]
     D --> V[watch, status, logs<br/>while it runs]
     D --> A[report<br/>after it ends]
 ```
 
-`kanit plan` reads the workflow and the records of earlier launches and says which rules would run and why. `kanit run` starts the rules that need to run inside one systemd scope for the launch, each in a cgroup that enforces its request. Everything kanit learns goes into `.workz/` in the working directory, which `watch`, `status`, `logs` and `report` read during the launch and after it.
+`kanit plan` reads the workflow and the records of earlier launches and says which rules would run and why. `kanit run` starts the rules that need to run inside one systemd scope for the launch, each in a cgroup that enforces its request. Everything kanit learns goes into `.kanit/` in the working directory, which `watch`, `status`, `logs` and `report` read during the launch and after it.
 
 ## Read in this order
 
@@ -31,5 +31,5 @@ flowchart LR
 6. **Reference**
    - [Workflow reference](Workflow-Reference.md): every table and key, with types, defaults and limits.
    - [Command reference](Command-Reference.md): every command and option, and the exit statuses.
-   - [Records](Records.md): the files under `.workz/` and the event stream.
+   - [Records](Records.md): the files under `.kanit/` and the event stream.
    - [Troubleshooting](Troubleshooting.md): common errors and what to do about them.

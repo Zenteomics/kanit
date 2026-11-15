@@ -1,7 +1,7 @@
 //! Command-line entry point.
 const std = @import("std");
 const linux = std.os.linux;
-const workz = @import("workz");
+const workz = @import("kanit");
 const sys = workz.sys;
 const workflow = workz.workflow;
 const graph = workz.graph;
@@ -42,7 +42,7 @@ fn failed(comptime fmt: []const u8, args: anytype) Exit {
 }
 
 fn stateFailed(c: Ctx, err: anyerror, root: []const u8) !Exit {
-    const path = try std.fs.path.join(c.a, &.{ root, ".workz", "state.json" });
+    const path = try std.fs.path.join(c.a, &.{ try workz.records.recordsDir(c.a, root), "state.json" });
     const why = (try state.loadErrorText(c.a, err, path)) orelse return err;
     return failed("{s}", .{why});
 }
@@ -451,7 +451,7 @@ fn cmdPrepare(c: Ctx, args: []const [:0]const u8) !Exit {
     const tmp = if (check) name: {
         var rnd: [8]u8 = undefined;
         sys.randomBytes(&rnd);
-        break :name try std.fmt.allocPrint(c.a, "{s}/workz-prepare-{s}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", &std.fmt.bytesToHex(rnd, .lower) });
+        break :name try std.fmt.allocPrint(c.a, "{s}/kanit-prepare-{s}.toml", .{ c.env.get("TMPDIR") orelse "/tmp", &std.fmt.bytesToHex(rnd, .lower) });
     } else try std.fmt.allocPrint(c.a, "{s}.prepare-tmp", .{out_path});
     if (check) {
         const fd = sys.openWrite(c.gpa, tmp, .exclusive) catch |err| return failed("cannot write {s}: {s}", .{ tmp, sys.errorText(err) });
@@ -613,6 +613,7 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
     var w = std.Io.File.stdout().writerStreaming(c.io, &buf);
     const r = workz.clean.run(c.gpa, c.a, root, opts, if (loaded) |*l| &l.wf else null, c.env, &w.interface) catch |err| switch (err) {
         error.Busy => return failed("a launch is running in {s}; clean after it ends", .{root}),
+        error.TwoRecordDirs => return failed("{s} holds both .kanit and .workz record directories; keep the one with the launches you want and move the other away", .{root}),
         error.PendingRecovery => return failed("a killed launch left attempts in {s} for the next launch to recover; run kanit run first, then clean --intermediates", .{root}),
         error.OutOfMemory => return err,
         error.CorruptState, error.UnsupportedState => {
@@ -647,6 +648,12 @@ fn cmdClean(c: Ctx, args: []const [:0]const u8) !Exit {
         try w.interface.writeAll(", ");
         try units.size(&w.interface, @as(f64, @floatFromInt(r.intermediate_bytes)) / 1048576.0);
         if (r.intermediates_kept > 0) try w.interface.print(", {d} kept", .{r.intermediates_kept});
+        if (r.scratch > 0) {
+            try w.interface.writeAll("; scratch of ");
+            try units.count(&w.interface, r.scratch, "attempt", "attempts");
+            try w.interface.writeAll(", ");
+            try units.size(&w.interface, @as(f64, @floatFromInt(r.scratch_bytes)) / 1048576.0);
+        }
     }
     if (r.failed > 0) try w.interface.print("; {d} could not be removed", .{r.failed});
     try w.interface.writeAll("\n");
@@ -783,7 +790,7 @@ fn cmdRun(c: Ctx, args: []const [:0]const u8) !Exit {
 }
 
 fn insideOwnScope(c: Ctx) !bool {
-    const stage = c.env.get("WORKZ_STAGE") orelse return false;
+    const stage = c.env.get("KANIT_STAGE") orelse return false;
     if (!std.mem.startsWith(u8, stage, "inner:")) return false;
     const unit = stage["inner:".len..];
     const text = sys.readFile(c.gpa, "/proc/self/cgroup", 1 << 16) catch return false;
@@ -805,7 +812,7 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
         if (std.mem.indexOfScalar(u8, arg, '$') != null) break true;
     } else false;
     if (dollar) try argv.append(c.a, "--expand-environment=no");
-    const unit = try std.fmt.allocPrint(c.a, "workz-{d}-{x}", .{ linux.getpid(), sys.realNs() });
+    const unit = try std.fmt.allocPrint(c.a, "kanit-{d}-{x}", .{ linux.getpid(), sys.realNs() });
     try argv.append(c.a, try std.fmt.allocPrint(c.a, "--unit={s}", .{unit}));
     if (opts.slice) |slice| try argv.append(c.a, try std.fmt.allocPrint(c.a, "--slice={s}", .{slice}));
     try argv.appendSlice(c.a, &.{
@@ -818,8 +825,8 @@ fn isolate(c: Ctx, opts: run.Options) !Exit {
     for (c.argv[1..]) |arg| try argv.append(c.a, arg);
     var env: std.ArrayList([]const u8) = .empty;
     var it = c.env.iterator();
-    while (it.next()) |e| if (!std.mem.eql(u8, e.key_ptr.*, "WORKZ_STAGE")) try env.append(c.a, try std.fmt.allocPrint(c.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
-    try env.append(c.a, try std.fmt.allocPrint(c.a, "WORKZ_STAGE=inner:{s}", .{unit}));
+    while (it.next()) |e| if (!std.mem.eql(u8, e.key_ptr.*, "KANIT_STAGE")) try env.append(c.a, try std.fmt.allocPrint(c.a, "{s}={s}", .{ e.key_ptr.*, e.value_ptr.* }));
+    try env.append(c.a, try std.fmt.allocPrint(c.a, "KANIT_STAGE=inner:{s}", .{unit}));
     const argv_z = try workz.process.Vec.init(c.a, argv.items);
     const env_z = try workz.process.Vec.init(c.a, env.items);
     const rc = linux.execve(try c.a.dupeZ(u8, systemd_run), argv_z.items.ptr, env_z.items.ptr);

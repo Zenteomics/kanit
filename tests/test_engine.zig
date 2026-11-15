@@ -2,7 +2,7 @@
 //! pressure, and removing launch records.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const workflow = workz.workflow;
 const sys = workz.sys;
 const helpers = @import("helpers.zig");
@@ -25,7 +25,7 @@ test "container mounts list each directory once with the access it needs" {
     rule.workdir_abs = null;
     rule.input_abs = &.{ "/w/in.txt", "/data/ref/genome.fa", "/data/ref/sub/index", "/data/reads/r1.fq" };
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/b.txt", "/w/top.txt" };
-    const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"});
+    const ms = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"}, null);
     try testing.expectEqual(@as(usize, 4), ms.len);
     try testing.expectEqualStrings("/data/reads", ms[0].dir);
     try testing.expect(!ms[0].write);
@@ -33,11 +33,16 @@ test "container mounts list each directory once with the access it needs" {
     try testing.expect(!ms[1].write);
     try testing.expectEqualStrings("/w", ms[2].dir);
     try testing.expect(ms[2].write);
-    try testing.expectEqualStrings("/w/.workz", ms[3].dir);
+    try testing.expectEqualStrings("/w/.kanit", ms[3].dir);
     try testing.expect(!ms[3].write);
+    const scratch = "/w/.kanit/launches/L/attempts/r/001/scratch";
+    const with_scratch = try workz.container.mounts(a, "/w", &rule, &.{"/data/ref"}, scratch);
+    try testing.expectEqual(@as(usize, 5), with_scratch.len);
+    try testing.expectEqualStrings(scratch, with_scratch[4].dir);
+    try testing.expect(with_scratch[4].write);
 
     rule.output_abs = &.{ "/w/out/a.txt", "/w/out/sub/b.txt" };
-    const nested = try workz.container.mounts(a, "/w", &rule, &.{});
+    const nested = try workz.container.mounts(a, "/w", &rule, &.{}, null);
     try testing.expectEqualStrings("/w", nested[2].dir);
     try testing.expect(!nested[2].write);
     try testing.expectEqualStrings("/w/out", nested[3].dir);
@@ -114,7 +119,7 @@ test "a service runs in a shareable IPC namespace in its own /tmp and waits on i
     }
     try testing.expect(ipc);
     const script = try workz.container.serviceScript(a, "load");
-    try testing.expect(std.mem.indexOf(u8, script, "{\nload\n} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n") != null);
+    try testing.expect(std.mem.indexOf(u8, script, "{\nload\n} </dev/null >&2\necho ready\nread -r _ < \"$KANIT_SERVICE_STOP\" || true\n") != null);
 }
 
 test "[unit] - [containers]: an image's inspect line gives its ID and the registry digests Podman lists" {

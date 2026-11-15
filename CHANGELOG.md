@@ -4,6 +4,25 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.workz/` and the command line, and each version says first what such a change needs from you.
 
+## [Unreleased]
+
+The rename to kanit reaches the records, the variables and the Zig module, without losing a record or rerunning a rule, and each attempt gets a scratch directory that `clean` removes.
+
+Two changes need action:
+
+- **Ignore `.kanit/` and `.workz` in `.gitignore`.** Records move to `.kanit/`, and `.workz` stays as a link, which a `.workz/` entry does not match.
+- **Import the Zig module as `kanit`.** The package and module `workz` are renamed.
+
+### Added
+
+- `$KANIT_SCRATCH` names an empty directory in each attempt's records for the command's working files, in containers too; `clean --intermediates` removes it once the attempt completed, and a failed attempt keeps it.
+
+### Changed
+
+- Records live in `.kanit/`: the first `run` or `clean` of a working directory moves `.workz/` there under its lock and leaves `.workz` as a link, so earlier versions and recorded paths still find them.
+- Rules get `KANIT_RULE`, `KANIT_ATTEMPT_DIR`, `KANIT_THREADS` and `KANIT_MEMORY_MIB`, and services `KANIT_SHARED`, `KANIT_MEMORY_MIB` and `KANIT_SERVICE_STOP`; the `WORKZ_` names keep coming beside them until a later version removes them, announced here one version ahead.
+- Containers carry `kanit.workdir` and `kanit.launch` labels, and `clean` also removes the leftovers of earlier versions, labelled `workz.`.
+
 ## [0.10.0] - 2026-11-15
 
 kanit removes a run's intermediate files on request and goes on resuming without them, rebuilding one only when a rule that reads it runs again.

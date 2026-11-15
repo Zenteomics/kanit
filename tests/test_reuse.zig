@@ -2,7 +2,7 @@
 //! and the state file.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const workflow = workz.workflow;
 const state = workz.state;
 const sys = workz.sys;
@@ -1538,4 +1538,58 @@ test "[unit] - [clean]: --intermediates removes a marked output its readers comp
     var after = try state.load(testing.allocator, rec);
     defer after.deinit();
     try testing.expect(after.data.removed.map.contains(try std.fs.path.join(a, &.{ s.path, "a.txt" })));
+}
+
+test "[unit] - [records]: records of an earlier kanit move from .workz to .kanit once, leave a symlink, and keep their attempt paths" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    const old = try s.dir(".workz");
+    _ = try s.file(".workz/state.json", "{\"format_version\": 5, \"files\": {}, \"envs\": {}, \"manifest\": {}, \"removed\": {}, \"rules\": {\"a\": {\"key\": \"k\", \"command\": \"c\", \"env\": \"e\", \"request\": \"r\", \"writes\": \"w\", \"inputs\": \"i\", \"parents\": \"p\", \"engine\": \"g\", \"outputs\": [], \"attempt\": \".workz/launches/L/attempts/a/001\", \"finished\": \"f\"}}}");
+    try testing.expectEqualStrings(old, try workz.records.recordsDir(a, s.path));
+
+    try workz.records.migrate(testing.allocator, a, s.path);
+    const now = try std.fs.path.join(a, &.{ s.path, ".kanit" });
+    try testing.expectEqualStrings(now, try workz.records.recordsDir(a, s.path));
+    const link = (try sys.lstat(testing.allocator, old)).?;
+    try testing.expect(!link.isDir());
+    try workz.records.migrate(testing.allocator, a, s.path);
+
+    var st = try state.load(testing.allocator, now);
+    defer st.deinit();
+    try testing.expectEqualStrings(try std.fs.path.join(a, &.{ now, "launches/L/attempts/a/001" }), st.data.rules.map.get("a").?.attempt);
+
+    try sys.unlink(testing.allocator, old);
+    try sys.mkdir(testing.allocator, old);
+    try testing.expectError(error.TwoRecordDirs, workz.records.migrate(testing.allocator, a, s.path));
+    try sys.rmdir(testing.allocator, old);
+    try sys.unlink(testing.allocator, try std.fs.path.join(a, &.{ now, "state.json" }));
+    try sys.unlink(testing.allocator, try std.fs.path.join(a, &.{ now, "lock" }));
+    try sys.rmdir(testing.allocator, now);
+}
+
+test "[unit] - [clean]: --intermediates removes the scratch of a completed attempt and keeps a failed attempt's" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    var arena = std.heap.ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const a = arena.allocator();
+    for ([_][]const u8{ ".kanit", ".kanit/launches", ".kanit/launches/L", ".kanit/launches/L/attempts", ".kanit/launches/L/attempts/ok", ".kanit/launches/L/attempts/ok/001", ".kanit/launches/L/attempts/ok/001/scratch", ".kanit/launches/L/attempts/bad", ".kanit/launches/L/attempts/bad/001", ".kanit/launches/L/attempts/bad/001/scratch" }) |d| _ = try s.dir(d);
+    _ = try s.file(".kanit/launches/L/attempts/ok/001/record.json", "{\"status\":\"completed\"}");
+    _ = try s.file(".kanit/launches/L/attempts/ok/001/scratch/tmp.bin", "x" ** 4096);
+    _ = try s.file(".kanit/launches/L/attempts/bad/001/record.json", "{\"status\":\"failed\"}");
+    _ = try s.file(".kanit/launches/L/attempts/bad/001/scratch/tmp.bin", "x" ** 4096);
+    _ = try s.file(".kanit/lock", "");
+    var env = std.process.Environ.Map.init(testing.allocator);
+    defer env.deinit();
+    try env.put("PATH", try s.dir("no-podman"));
+    var out: std.Io.Writer.Allocating = .init(a);
+    const r = try workz.clean.run(testing.allocator, a, s.path, .{ .intermediates = true, .steps = &.{"none"} }, null, &env, &out.writer);
+
+    try testing.expectEqual(@as(usize, 1), r.scratch);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "removed scratch of ok attempt 001, ") != null);
+    try testing.expect(!sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".kanit/launches/L/attempts/ok/001/scratch" })));
+    try testing.expect(sys.exists(testing.allocator, try std.fs.path.join(a, &.{ s.path, ".kanit/launches/L/attempts/bad/001/scratch/tmp.bin" })));
 }

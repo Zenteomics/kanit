@@ -2,7 +2,7 @@
 //! loading.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const workflow = workz.workflow;
 const sys = workz.sys;
 

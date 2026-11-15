@@ -51,7 +51,7 @@ The second step favors long estimated chains. It can help when those estimates d
 Each attempt runs in its own cgroup inside the run's scope:
 
 - **Memory.** The request is the cgroup's hard limit (`memory.max`). When the attempt's processes need more, the kernel kills all of them together, and the attempt fails with `out of memory: could not stay within its <N> MiB request`. The limit counts page cache too; the kernel reclaims cache at the limit, which can slow an attempt that writes large files under a small request, but does not kill it.
-- **CPU.** The thread request becomes a CPU quota of that many CPUs (`cpu.max`). A tool that starts more threads than requested still gets only that much CPU time; pass `$WORKZ_THREADS` to it.
+- **CPU.** The thread request becomes a CPU quota of that many CPUs (`cpu.max`). A tool that starts more threads than requested still gets only that much CPU time; pass `$KANIT_THREADS` to it.
 - **Counters.** With isolation, kanit records the cgroup's peak memory, CPU time, out-of-memory and limit events, and the time its processes stalled on CPU, memory and I/O (pressure), for every attempt.
 
 With `--no-isolation` there are no cgroups: requests still reserve the budget, but nothing enforces them ([Running workflows](Running-Workflows.md#without-isolation)).

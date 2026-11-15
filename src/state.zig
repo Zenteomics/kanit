@@ -157,6 +157,7 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
     const bytes = sys.readFile(gpa, s.path, 1 << 30) catch |err| switch (err) {
         error.FileNotFound => {
             try applyLog(&s, gpa);
+            try renameAttempts(&s, rec);
             return s;
         },
         else => return err,
@@ -173,7 +174,20 @@ pub fn load(gpa: Allocator, rec: []const u8) !State {
     s.json_bytes = bytes.len;
     s.base = try baseOf(a, gpa, s.path);
     try applyLog(&s, gpa);
+    try renameAttempts(&s, rec);
     return s;
+}
+
+/// Attempt paths recorded under `.workz/` name the same launches once the
+/// records moved to `.kanit/`; they are read, and saved, under the new name,
+/// so commands that match them against the records directory find them.
+fn renameAttempts(s: *State, rec: []const u8) !void {
+    if (!std.mem.eql(u8, std.fs.path.basename(rec), ".kanit")) return;
+    const a = s.arena.allocator();
+    const earlier = try std.fs.path.join(a, &.{ s.root, ".workz/" });
+    for (s.data.rules.map.values()) |*e| if (std.mem.startsWith(u8, e.attempt, earlier)) {
+        e.attempt = try std.fs.path.join(a, &.{ rec, e.attempt[earlier.len..] });
+    };
 }
 
 fn applyLog(s: *State, gpa: Allocator) !void {
@@ -374,9 +388,10 @@ fn walk(gpa: Allocator, dir: []const u8, base_len: usize, lines: *std.ArrayList(
     while (try entries.next()) |e| {
         const child = try std.fs.path.join(gpa, &.{ dir, e.name });
         defer gpa.free(child);
+        // The records, under either name, are never part of an input.
+        if (std.mem.eql(u8, e.name, ".kanit") or std.mem.eql(u8, e.name, ".workz")) continue;
         const is_dir = e.kind == 4 or (e.kind == 0 and ((try sys.lstat(gpa, child)) orelse continue).isDir());
         if (is_dir) {
-            if (std.mem.eql(u8, e.name, ".workz")) continue;
             if (dirs) try lines.append(gpa, try std.fmt.allocPrint(gpa, "{s}/\tdir\n", .{child[base_len..]}));
             try walk(gpa, child, base_len, lines, depth + 1, dirs, failed);
             continue;

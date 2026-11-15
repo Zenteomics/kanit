@@ -7,6 +7,7 @@
 const std = @import("std");
 const linux = std.os.linux;
 const sys = @import("sys.zig");
+const records = @import("records.zig");
 const process = @import("process.zig");
 const workflow = @import("workflow.zig");
 const Allocator = std.mem.Allocator;
@@ -93,12 +94,19 @@ pub fn removeLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: [
 }
 
 pub fn listLeftovers(gpa: Allocator, a: Allocator, podman: []const u8, root: []const u8, envp: *const process.Vec, devnull: sys.Fd) ![]const []const u8 {
-    var status: u32 = 0;
-    const label = try std.fmt.allocPrint(a, "label=workz.workdir={s}", .{root});
-    const out = try process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status);
+    // Containers of earlier kanit carry the `workz.` labels.
     var ids: std.ArrayList([]const u8) = .empty;
-    var it = std.mem.tokenizeAny(u8, out, " \n");
-    while (it.next()) |id| try ids.append(a, id);
+    for ([_][]const u8{ "kanit", "workz" }) |prefix| {
+        var status: u32 = 0;
+        const label = try std.fmt.allocPrint(a, "label={s}.workdir={s}", .{ prefix, root });
+        const out = try process.capture(gpa, a, &.{ podman, "ps", "--all", "--quiet", "--filter", label }, envp, devnull, &status);
+        var it = std.mem.tokenizeAny(u8, out, " \n");
+        while (it.next()) |id| {
+            for (ids.items) |seen| {
+                if (std.mem.eql(u8, seen, id)) break;
+            } else try ids.append(a, id);
+        }
+    }
     return ids.items;
 }
 
@@ -111,7 +119,10 @@ pub fn removeAsync(a: Allocator, podman: []const u8, name: []const u8, envp: *co
 
 pub const Mount = struct { dir: []const u8, write: bool };
 
-pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro: []const []const u8) ![]Mount {
+/// The volumes of a rule's container. `scratch`, the attempt's working
+/// space in its records, comes last and read-write, so a read-only mount of
+/// the records cannot cover it.
+pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro: []const []const u8, scratch: ?[]const u8) ![]Mount {
     var ro: std.ArrayList([]const u8) = .empty;
     try ro.append(a, root);
     for (r.input_abs) |in| {
@@ -132,11 +143,12 @@ pub fn mounts(a: Allocator, root: []const u8, r: *const workflow.Rule, extra_ro:
         if (!also_rw) try out.append(a, .{ .dir = d, .write = false });
     }
     for (rw_min) |d| try out.append(a, .{ .dir = d, .write = true });
-    const rec = try std.fs.path.join(a, &.{ root, ".workz" });
+    const rec = try records.recordsDir(a, root);
     for (rw_min) |d| if (workflow.within(d, rec)) {
         try out.append(a, .{ .dir = rec, .write = false });
         break;
     };
+    if (scratch) |s| try out.append(a, .{ .dir = s, .write = true });
     return out.items;
 }
 
@@ -180,8 +192,8 @@ pub fn runArgv(a: Allocator, s: RunSpec) ![]const []const u8 {
         s.podman,                                           "run",
         "--rm",                                             "--pull=never",
         "--name",                                           s.name,
-        "--label",                                          try std.fmt.allocPrint(a, "workz.workdir={s}", .{s.root}),
-        "--label",                                          try std.fmt.allocPrint(a, "workz.launch={s}", .{s.launch}),
+        "--label",                                          try std.fmt.allocPrint(a, "kanit.workdir={s}", .{s.root}),
+        "--label",                                          try std.fmt.allocPrint(a, "kanit.launch={s}", .{s.launch}),
         "--network=none",                                   "--cap-drop=ALL",
         "--security-opt=no-new-privileges",                 "--security-opt=label=disable",
         "--read-only",                                      "--log-driver=none",
@@ -204,7 +216,7 @@ pub fn script(a: Allocator, shell: []const u8) ![]const u8 {
 }
 
 pub fn serviceScript(a: Allocator, command: []const u8) ![]const u8 {
-    return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{{\n{s}\n}} </dev/null >&2\necho ready\nread -r _ < \"$WORKZ_SERVICE_STOP\" || true\n", .{command});
+    return std.fmt.allocPrint(a, "set -eu\nif (set -o pipefail) 2>/dev/null; then set -o pipefail; fi\n{{\n{s}\n}} </dev/null >&2\necho ready\nread -r _ < \"$KANIT_SERVICE_STOP\" || true\n", .{command});
 }
 
 pub fn imageRefs(a: Allocator, wf: *const workflow.Workflow, mask: []const bool) ![]const []const u8 {

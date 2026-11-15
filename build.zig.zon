@@ -1,7 +1,7 @@
 .{
-    .name = .workz,
+    .name = .kanit,
     .version = "0.10.0",
-    .fingerprint = 0x8f39bae72db81677,
+    .fingerprint = 0xa44a2c6e51175d9,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{
         .z_toml = .{

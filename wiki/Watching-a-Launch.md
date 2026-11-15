@@ -1,4 +1,4 @@
-While a launch runs, and after it ends, three commands show it: `watch` for the live view, `status` for its summary, and `logs` for a rule's output. They read the records in `.workz/` from a separate process. Reading and drawing still use CPU, memory and I/O shared with the launch.
+While a launch runs, and after it ends, three commands show it: `watch` for the live view, `status` for its summary, and `logs` for a rule's output. They read the records in `.kanit/` from a separate process. Reading and drawing still use CPU, memory and I/O shared with the launch.
 
 ## The live view
 
@@ -116,7 +116,7 @@ When its output is not a terminal, `watch` prints the same view as text, without
           blocked      count   S2  after align/S2 failed
                        matrix      after align/S2 failed
           slowest      align/S1 2.0 s   trim/S2 1.5 s   trim/S1 1.0 s
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
           next         kanit logs align/S2   the output of the failed attempt
                        kanit run             run again; 7 rules are reused
 ```
@@ -164,4 +164,4 @@ STAR: genome index is incomplete: missing SA file
 - `--attempt N` picks attempt N in the newest launch that ran the rule, and `--launch ID` looks in that launch instead.
 - `--follow` (`-f`) prints the output as it grows until the attempt ends, or its launch stops running.
 
-Every attempt's files stay in its attempt directory, `.workz/launches/<ID>/attempts/<rule>/<NNN>/`, until you remove the launch ([Records](Records.md)).
+Every attempt's files stay in its attempt directory, `.kanit/launches/<ID>/attempts/<rule>/<NNN>/`, until you remove the launch ([Records](Records.md)).

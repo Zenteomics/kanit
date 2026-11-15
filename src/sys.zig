@@ -258,6 +258,15 @@ pub fn rename(gpa: Allocator, from: []const u8, to: []const u8) !void {
     _ = try check(linux.renameat(linux.AT.FDCWD, a, linux.AT.FDCWD, b));
 }
 
+/// Makes `path` a symlink to `target`.
+pub fn symlink(gpa: Allocator, target: []const u8, path: []const u8) !void {
+    const t = try z(gpa, target);
+    defer gpa.free(t);
+    const p = try z(gpa, path);
+    defer gpa.free(p);
+    _ = try check(linux.symlinkat(t, linux.AT.FDCWD, p));
+}
+
 pub fn unlink(gpa: Allocator, path: []const u8) !void {
     const p = try z(gpa, path);
     defer gpa.free(p);

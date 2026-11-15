@@ -52,11 +52,11 @@ The engine key is 4. Rebuilding kanit reruns nothing: the executable's own diges
 
 A file's identity is its inode, size, and modification and change times, which kanit reads with `statx`. An ordinary rewrite changes the change time even if it restores the modification time. This detects such edits without reading the contents, but cannot detect changed bytes when all recorded fields remain equal, for example a same-size rewrite within one filesystem timestamp tick. `verify --content` reads recorded outputs and compares stored digests; without an earlier digest, it records one rather than proving that the bytes never changed. The device number is left out because btrfs device numbers can change after remounting.
 
-A directory's identity covers every entry below it: each file's identity, and each directory by name, so an empty directory counts. Adding, removing, renaming or editing any of them changes it. A dangling symlink counts as missing, so the identity changes when its target appears. A symlink to a directory below a directory input is refused, with its path: its target's contents would go unseen. Declare the directory it names as an input of its own. `.workz/` directories are left out, since kanit writes into them while rules run.
+A directory's identity covers every entry below it: each file's identity, and each directory by name, so an empty directory counts. Adding, removing, renaming or editing any of them changes it. A dangling symlink counts as missing, so the identity changes when its target appears. A symlink to a directory below a directory input is refused, with its path: its target's contents would go unseen. Declare the directory it names as an input of its own. `.kanit/` directories are left out, since kanit writes into them while rules run.
 
 ## Moving a project
 
-Paths inside the working directory enter rule keys and `state.json` relative to it. Moving the whole directory with `.workz/` on the same filesystem can preserve reuse when file identities and the other key parts stay unchanged. Check the resulting plan:
+Paths inside the working directory enter rule keys and `state.json` relative to it. Moving the whole directory with `.kanit/` on the same filesystem can preserve reuse when file identities and the other key parts stay unchanged. Check the resulting plan:
 
 ```sh
 mv ~/runs/rnaseq ~/projects/rnaseq-2026
@@ -95,7 +95,7 @@ kanit run workflow.toml --max-threads 2 --max-memory 1G
 kanit 0.10.0   cutoff   launch 20261108T121726.579-c84630ba
           plan         2 rules
           budget       2 threads, 1.0 GiB, 2 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
 TIME      RULES  STATUS  STEP           TOOK             MEMORY      CPU  NOTE
 05:17:27    0/2  START   sort_calls                 - /  64 MiB    - / 1
@@ -147,7 +147,7 @@ Both work with `plan` and `explain` too, so you can see the effect first. Combin
 
 ## Previous outputs
 
-Before an attempt starts, kanit moves existing outputs into its `previous/` directory, named `<index>-<file name>`. If the command fails, is stopped or cannot start, it moves those files back and retains the earlier successful record when one exists. Replacement files left by the failed attempt move to `failed/`. The next launch also tries to recover preserved files from interrupted attempts, but those attempts have no reusable completion record. A completed rerun's previous bytes remain under `.workz/launches/<ID>/attempts/<rule>/<NNN>/previous/` until explicit cleanup ([Records](Records.md#cleaning-up)). Replacing large outputs repeatedly therefore grows the retained records.
+Before an attempt starts, kanit moves existing outputs into its `previous/` directory, named `<index>-<file name>`. If the command fails, is stopped or cannot start, it moves those files back and retains the earlier successful record when one exists. Replacement files left by the failed attempt move to `failed/`. The next launch also tries to recover preserved files from interrupted attempts, but those attempts have no reusable completion record. A completed rerun's previous bytes remain under `.kanit/launches/<ID>/attempts/<rule>/<NNN>/previous/` until explicit cleanup ([Records](Records.md#cleaning-up)). Replacing large outputs repeatedly therefore grows the retained records.
 
 Restoration depends on successful filesystem operations; it is not an atomic rollback across rules. After a crash, the journal invalidates an unfinished rule's success record even when its old files can be recovered, so it runs again. A separate end-of-launch check rejects completed results whose inputs changed during execution; that check invalidates reuse but does not automatically restore their previous outputs.
 
@@ -168,4 +168,4 @@ Differences are listed as `missing`, `changed` or `content`, and the exit status
 
 ## Resume after a crash
 
-Run the same command again. kanit writes a dispatch journal entry before moving old outputs and marks the attempt done after its result is on disk: appended to `.workz/state.log`, which is synced at most once a second, and folded into `state.json` when the launch ends ([Records](Records.md#statelog)). An attempt without a durable completion can rerun even if its command finished. Saved results are reused only when their keys and outputs still match. Task cleanup depends on the run's isolation and keeper processes; see [Isolation](Running-Workflows.md#isolation) for the limits.
+Run the same command again. kanit writes a dispatch journal entry before moving old outputs and marks the attempt done after its result is on disk: appended to `.kanit/state.log`, which is synced at most once a second, and folded into `state.json` when the launch ends ([Records](Records.md#statelog)). An attempt without a durable completion can rerun even if its command finished. Saved results are reused only when their keys and outputs still match. Task cleanup depends on the run's isolation and keeper processes; see [Isolation](Running-Workflows.md#isolation) for the limits.

@@ -8,7 +8,7 @@ name = "align_s1"
 input = ["ref/star", "reads/s1.fq"]
 output = ["aligned/s1.Aligned.out.sam"]
 container = "quay.io/biocontainers/star:2.7.11b--h5ca1c30_8"
-shell = """STAR --genomeDir ref/star --runThreadN $WORKZ_THREADS \
+shell = """STAR --genomeDir ref/star --runThreadN $KANIT_THREADS \
   --readFilesIn reads/s1.fq --outFileNamePrefix aligned/s1."""
 
 [rules.resources]
@@ -27,9 +27,9 @@ At the start of a launch, kanit resolves every image reference to its image ID a
 
 ### What the container sees
 
-- **Files.** The working directory and the directory of every input outside it are mounted read-only at their own paths; the directory of every output, and the rule's `workdir`, read-write. An output directly in the working directory makes the whole working directory writable, except `.workz/`, which stays read-only so a command cannot change the records that decide reuse. The command starts in the `workdir`, or in the working directory, so relative paths work as in a host rule.
+- **Files.** The working directory and the directory of every input outside it are mounted read-only at their own paths; the directory of every output, and the rule's `workdir`, read-write. An output directly in the working directory makes the whole working directory writable, except `.kanit/`, which stays read-only so a command cannot change the records that decide reuse. The command starts in the `workdir`, or in the working directory, so relative paths work as in a host rule.
 - **Isolation.** No network, no capabilities, no new privileges, and a read-only root file system; Podman gives the container its own writable `/tmp`, `/var/tmp` and `/run` in memory.
-- **Environment.** The image's own environment, plus `TZ`, `LANG`, `LC_ALL`, the names given with `--pass-env`, and `WORKZ_RULE`, `WORKZ_ATTEMPT_DIR`, `WORKZ_THREADS` and `WORKZ_MEMORY_MIB`. The host's `PATH` and `HOME` do not enter.
+- **Environment.** The image's own environment, plus `TZ`, `LANG`, `LC_ALL`, the names given with `--pass-env`, and `KANIT_RULE`, `KANIT_ATTEMPT_DIR`, `KANIT_SCRATCH`, `KANIT_THREADS` and `KANIT_MEMORY_MIB`, the same as for a host rule ([Running workflows](Running-Workflows.md#what-a-command-sees)). `KANIT_SCRATCH` is mounted read-write. The host's `PATH` and `HOME` do not enter.
 - **Resources.** With isolation, the container's processes run in the attempt's cgroup, so the memory limit, the out-of-memory kill and the attempt's counters cover the tool itself; without isolation nothing limits them. The Podman client and conmon, its monitor, run in a separate group of the run, and take about 20 MiB per container; admission reserves 32 MiB for them beside the rule's request, so the budget covers them too.
 
 ### Mounts over image paths
@@ -74,7 +74,7 @@ A service is a `[shared.NAME]` entry with `container`, `command` and `memory`. B
 set -euo pipefail
 star=quay.io/biocontainers/star:2.7.11b--h5ca1c30_8
 genome=$PWD/ref/star
-keep="STAR --genomeDir $genome --genomeLoad LoadAndKeep --runThreadN \$WORKZ_THREADS"
+keep="STAR --genomeDir $genome --genomeLoad LoadAndKeep --runThreadN \$KANIT_THREADS"
 {
   cat <<EOF
 [workflow]
@@ -116,7 +116,7 @@ kanit run workflow.toml --max-threads 4 --max-memory 4G
 kanit 0.10.0   star-shared   launch 20261108T121727.146-6881d0a6
           plan         2 rules: 1 step
           budget       4 threads, 4.0 GiB, 4 jobs, isolated
-          records      .workz/latest/   log launch.log   page report.html
+          records      .kanit/latest/   log launch.log   page report.html
 
           TOOL  STEP   RULES
           star  align      2
@@ -142,7 +142,7 @@ Both alignments report `Found genome in shared memory` in their STAR logs. The g
 - **Lifetime.** The service stays up while a rule that has yet to run needs it, so later users do not load it again. It gives way when a waiting rule needs its memory and no user is running, and it stops after its last user.
 - **Time limit and retries.** `timeout` limits how long the service may take to become ready, and `retries` (0 to 3) starts it again if it fails before it is ready. After that, every rule that needs it fails with `shared input NAME could not be loaded:` and the reason.
 - **Failure while in use.** A service that ends after it was ready, while rules use it, stops those rules: they fail with `shared service NAME failed while the rule used it:` and the reason, without a retry, and nothing they wrote is recorded as a result. The memory they read may be gone.
-- **Logs.** The service's standard error is kept in `.workz/launches/<ID>/shared/<NAME>-<N>.stderr.log`, one file per start.
+- **Logs.** The service's standard error is kept in `.kanit/launches/<ID>/shared/<NAME>-<N>.stderr.log`, one file per start.
 
 ### Rules for services
 

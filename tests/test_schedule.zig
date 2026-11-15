@@ -3,7 +3,7 @@
 //! seeded run of random graphs on a fake clock.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const schedule = workz.schedule;
 const Status = schedule.Status;
 

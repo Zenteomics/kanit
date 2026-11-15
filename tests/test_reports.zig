@@ -2,7 +2,7 @@
 //! HTML page.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const helpers = @import("helpers.zig");
 const Scratch = helpers.Scratch;
 

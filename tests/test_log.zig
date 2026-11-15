@@ -3,7 +3,7 @@
 //! resource use, and the local time the lines carry.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const log = workz.log;
 const clock = workz.clock;
 

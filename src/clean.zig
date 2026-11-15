@@ -28,7 +28,7 @@ pub const Options = struct {
     dry_run: bool = false,
 };
 
-pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, kept_for_recovery: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, intermediates: usize = 0, intermediate_bytes: u64 = 0, intermediates_kept: usize = 0, failed: usize = 0 };
+pub const Result = struct { containers: usize = 0, launches: usize = 0, bytes: u64 = 0, kept_for_records: usize = 0, kept_for_recovery: usize = 0, previous: usize = 0, previous_bytes: u64 = 0, intermediates: usize = 0, intermediate_bytes: u64 = 0, intermediates_kept: usize = 0, scratch: usize = 0, scratch_bytes: u64 = 0, failed: usize = 0 };
 
 fn openDir(gpa: Allocator, path: []const u8) !sys.Fd {
     const p = try sys.z(gpa, path);
@@ -63,6 +63,7 @@ pub fn removeAt(gpa: Allocator, parent: sys.Fd, name: [:0]const u8, dry: bool, d
 /// `wf` is the workflow whose marks `--intermediates` follows.
 pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, wf: ?*const workflow.Workflow, environ: *const std.process.Environ.Map, w: *std.Io.Writer) !Result {
     var result: Result = .{};
+    try records.migrate(gpa, a, root);
     const rec = try records.recordsDir(a, root);
     if (!sys.exists(gpa, rec)) return result;
     const lock = records.lock(gpa, rec) catch |err| switch (err) {
@@ -85,6 +86,7 @@ pub fn run(gpa: Allocator, a: Allocator, root: []const u8, opts: Options, wf: ?*
     if (opts.intermediates) {
         if (pending.len > 0) return error.PendingRecovery;
         try removeIntermediates(gpa, a, rec, root, wf, opts.steps, opts.dry_run, &result, w);
+        try removeScratch(gpa, a, rec, opts.dry_run, &result, w);
     }
     if (opts.previous) try removePrevious(gpa, a, rec, pending, opts.dry_run, &result, w);
 
@@ -273,6 +275,52 @@ fn namesIn(a: Allocator, fd: sys.Fd) ![]const [:0]const u8 {
     var entries: sys.DirEntries = .{ .fd = fd };
     while (try entries.next()) |e| if (e.name[0] != '.') try names.append(a, try a.dupeZ(u8, e.name));
     return names.items;
+}
+
+/// Removes the `scratch/` directory of every completed attempt, in every
+/// launch; a failed or stopped attempt keeps its scratch for diagnosis.
+fn removeScratch(gpa: Allocator, a: Allocator, rec: []const u8, dry: bool, result: *Result, w: *std.Io.Writer) !void {
+    const launches_fd = openDir(gpa, try std.fs.path.join(a, &.{ rec, "launches" })) catch return;
+    defer sys.close(launches_fd);
+    for (try records.launchNames(gpa, a, rec)) |launch| {
+        const launch_fd = openBelow(launches_fd, try a.dupeZ(u8, launch)) orelse continue;
+        defer sys.close(launch_fd);
+        const attempts_fd = openBelow(launch_fd, "attempts") orelse continue;
+        defer sys.close(attempts_fd);
+        for (try namesIn(a, attempts_fd)) |rule| {
+            const rule_fd = openBelow(attempts_fd, rule) orelse continue;
+            defer sys.close(rule_fd);
+            for (try namesIn(a, rule_fd)) |n| {
+                const attempt = try std.fs.path.join(a, &.{ rec, "launches", launch, "attempts", rule, n });
+                if (!completed(gpa, a, attempt)) continue;
+                const fd = openBelow(rule_fd, n) orelse continue;
+                defer sys.close(fd);
+                const bytes = removeAt(gpa, fd, "scratch", dry, 0) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    error.OutOfMemory => return err,
+                    else => {
+                        try w.print("cannot remove {s}/scratch: {s}\n", .{ attempt, sys.errorText(err) });
+                        result.failed += 1;
+                        continue;
+                    },
+                };
+                // An empty scratch is the engine's own; it goes unnamed.
+                if (bytes == 0) continue;
+                result.scratch += 1;
+                result.scratch_bytes += bytes;
+                try w.print("{s} scratch of {s} attempt {s}, ", .{ if (dry) "would remove" else "removed", rule, n });
+                try units.size(w, @as(f64, @floatFromInt(bytes)) / 1048576.0);
+                try w.writeAll("\n");
+            }
+        }
+    }
+}
+
+fn completed(gpa: Allocator, a: Allocator, attempt: []const u8) bool {
+    const text = sys.readFile(gpa, std.fs.path.join(a, &.{ attempt, "record.json" }) catch return false, 1 << 24) catch return false;
+    defer gpa.free(text);
+    const r = std.json.parseFromSliceLeaky(struct { status: []const u8 = "" }, a, text, .{ .ignore_unknown_fields = true, .allocate = .alloc_always }) catch return false;
+    return std.mem.eql(u8, r.status, "completed");
 }
 
 fn removePrevious(gpa: Allocator, a: Allocator, rec: []const u8, pending: []const records.Pending, dry: bool, result: *Result, w: *std.Io.Writer) !void {

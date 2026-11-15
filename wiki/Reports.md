@@ -1,4 +1,4 @@
-`kanit report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, how two launches differ, and what produced the results, for a methods section. Every report reads `.workz/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 6 threads and 6 GiB, with a 600 MiB shared index. Where a line is wider than the page, the text before it says what was cut. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
+`kanit report` turns a launch's records into answers: what each attempt used, what limited the launch, what each step should request, how two launches differ, and what produced the results, for a methods section. Every report reads `.kanit/` only, so you can run it during a launch, after it, or on a launch from last week. The examples on this page come from one demo launch: six samples through qc, trim, align and count, then a report, 25 rules on a budget of 6 threads and 6 GiB, with a 600 MiB shared index. Where a line is wider than the page, the text before it says what was cut. Every rule declares its step, sample, category and tool ([Concepts](Concepts.md#steps-samples-categories-and-tools)).
 
 Reports look at a launch in two scopes:
 
@@ -195,8 +195,8 @@ Here `trim` reserves 2 threads and 512 MiB but used 1 thread and 4 MiB, and `ali
 `kanit report --compare OTHER` compares the newest launch, or `--launch ID`, with another one, named by launch ID, by launch directory, or by a working directory for its newest launch. Here the demo ran again with `--rerun` on 8 threads instead of 6 (paths shortened):
 
 ```text
-baseline .../.workz/launches/20261107T060905.136-0b96682a
-launch   .../.workz/launches/20261107T061157.192-d1b5ca16
+baseline .../.kanit/launches/20261107T060905.136-0b96682a
+launch   .../.kanit/launches/20261107T061157.192-d1b5ca16
 budget   6 threads, 6.0 GiB, 6 jobs against 8 threads, 6.0 GiB, 8 jobs
 note: the budgets differ, so the elapsed time compares the budgets as well as the work
 

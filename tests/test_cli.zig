@@ -3,7 +3,7 @@
 //! workflow.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const cli = workz.cli;
 const workflow = workz.workflow;
 const helpers = @import("helpers.zig");

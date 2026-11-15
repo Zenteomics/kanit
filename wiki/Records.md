@@ -1,9 +1,9 @@
-Everything kanit writes for itself lives in `.workz/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. kanit refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
+Everything kanit writes for itself lives in `.kanit/` in the working directory, which only its owner can read: it holds every attempt's output and the values of the variables passed with `--pass-env`. This page describes every file there, for scripts that read the records and for anyone who wants to know where an answer comes from. The JSON files carry a format version, `v`: `state.json` its `format_version`, the others `v`, 1 in this version. kanit refuses a state of a newer format, and leaves out, naming it, a record or an event of a newer `v`; a record without `v` comes from before the field and reads as 1.
 
 ## Layout
 
 ```text
-.workz/
+.kanit/
   lock                              held by the running launch
   state.json                        resume state: the record of every completed rule
   state.log                         rules completed since state.json was written
@@ -28,10 +28,13 @@ Everything kanit writes for itself lives in `.workz/` in the working directory, 
             request.json            the request
             stdout.log  stderr.log  the command's output
             record.json             what the attempt used and how it ended
+            scratch/                $KANIT_SCRATCH, the command's working files
             previous/               earlier outputs, moved aside before it ran
             failed/                 what an attempt that did not complete left at its output paths
             diagnostics/            tails of the rule's diagnostics files, kept when it failed
 ```
+
+Versions before 0.11.0 kept these records in `.workz/`. The first `run` or `clean` of a working directory that has them takes their lock, renames `.workz` to `.kanit` and leaves `.workz` as a link to it, so earlier versions and the paths recorded in launches still find the records; other commands read `.workz/` where it is still a directory. A working directory with both as directories is refused: keep the one with the launches you want, and move the other away. A `.gitignore` entry `.workz/` does not match the link; ignore `.kanit/` and `.workz`.
 
 A launch directory is named by its UTC start time to the millisecond and four random bytes in hex, so sorting the names sorts the launches by time. Every launch that takes the lock gets one, including launches refused before any rule runs, and `latest` is replaced to point at it when it is made.
 
@@ -47,7 +50,7 @@ A launch directory is named by its UTC start time to the millisecond and four ra
 - `envs`: the keyed environment of each recorded rule, for `explain` to name what changed.
 - `removed`: the outputs `clean --intermediates` removed, with the identity each had. Reuse counts such an output as present, with that identity, until its rule runs again.
 
-Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".workz/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
+Paths inside the working directory are written relative to it, such as `"out/a.txt"` and `".kanit/launches/..."`, so the records stay valid when the project moves ([Moving a project](Reuse-and-Resume.md#moving-a-project)); paths outside it stay absolute.
 
 kanit reads the state files of earlier versions, formats 1 to 5, and saves them as format 5, which kanit 0.9.0 and earlier refuse. Deleting `state.json` makes the next launch run every rule; nothing else depends on it.
 
@@ -106,7 +109,7 @@ Written when the launch ends, and printed by `kanit run` as one line. From the d
     "cpu_s": 0.08044,
     "max_rss_mib": 6.51953125
   },
-  "launch_dir": ".../.workz/launches/20261107T060905.136-0b96682a",
+  "launch_dir": ".../.kanit/launches/20261107T060905.136-0b96682a",
   "failures": [],
   "changed_outputs": [],
   "previous_bytes": 0
@@ -231,7 +234,7 @@ would remove 0 containers and 1 launch, 0.2 MiB
 
 - Without options, `kanit clean` removes only the containers earlier launches left behind.
 - `--keep N` also removes all but the newest N launch directories, except launches that hold the recorded attempt of a rule, which `state.json` points to, and a launch whose engine was killed during an attempt: its `previous/` holds the only copy of that rule's earlier outputs until the next launch puts them back.
-- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.workz/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
+- `--previous` removes the `previous/` directory of every attempt in every launch: the earlier outputs that reruns replaced, which are often the largest files in `.kanit/`. They are the only copy of those bytes; the rest of each launch stays. The `previous/` of an attempt a killed launch left unfinished stays too, for the next launch to put back.
 - A launch directory is the only record of its launch: the workflow it ran, every attempt's output and measures, the replaced bytes in `previous/` and its `report.html`. Removing it removes them; copy what you want to keep first.
 - `--intermediates` removes the outputs the workflow marks `intermediate` once their rule and every rule that reads them completed. `--step STEP`, repeatable, adds every recorded output of a step; with it, `clean` works from the records alone when no workflow file is given.
 - It names each file it removes with its size. It keeps, naming the reason, a file that changed after its rule wrote it, one that a rule still to complete reads, one inside a directory a rule reads or a shared input maps, and anything but a regular file.
@@ -239,7 +242,7 @@ would remove 0 containers and 1 launch, 0.2 MiB
 - `--dry-run` lists what would go.
 - It takes the working directory's lock, so it never removes anything while a launch runs.
 
-Removing `.workz/` entirely is safe when no launch runs; the next launch then runs every rule.
+Removing `.kanit/` entirely is safe when no launch runs; the next launch then runs every rule.
 
 ## Recording a run
 

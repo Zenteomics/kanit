@@ -490,7 +490,10 @@ fn relativeLocal(p: []const u8) bool {
 
 pub fn inRecords(root: []const u8, abs: []const u8) bool {
     const rel = if (std.mem.eql(u8, root, "/")) abs else abs[root.len..];
-    return std.mem.startsWith(u8, rel, "/.workz/") or std.mem.eql(u8, rel, "/.workz");
+    for ([_][]const u8{ "/.kanit", "/.workz" }) |d| {
+        if (std.mem.eql(u8, rel, d) or (std.mem.startsWith(u8, rel, d) and rel.len > d.len and rel[d.len] == '/')) return true;
+    }
+    return false;
 }
 
 fn localPath(p: []const u8) bool {

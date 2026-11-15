@@ -67,7 +67,7 @@ kanit: workflow.toml: 4 problems
 
 - `step NAME: input must be a list of paths` (or `output`): A template step writes `input` and `output` as lists, such as `input = ["in.txt"]`.
 
-- `PATH is not valid JSON`: A record in `.workz/` is damaged, so the command leaves it out, names it, and exits 1. A `summary.json` that cannot be read leaves the launch's result unknown; its events and attempt records remain.
+- `PATH is not valid JSON`: A record in `.kanit/` is damaged, so the command leaves it out, names it, and exits 1. A `summary.json` that cannot be read leaves the launch's result unknown; its events and attempt records remain.
 
 - `rule NAME lists shared input 'S' twice`: A shared input is held and counted once for a rule. List it once.
 
@@ -91,7 +91,7 @@ A refused launch stops before any rule runs. It still leaves a launch directory 
 
 - `cannot read input manifest PATH: ...` or `input manifest PATH must be a JSON object of absolute paths`, then `the input manifest cannot be used`: The file given with `--input-manifest` is missing or not a manifest. The launch exits with status 2.
 
-- `PATH has a format version this kanit cannot read` or `PATH cannot be read: it is not a valid kanit state`, for `.workz/state.json`: The resume state was written by another version of kanit, usually a newer one, or is damaged. Use the kanit that wrote it, or move the file aside: the next launch runs every rule, and the launch directories keep every earlier attempt. A `.workz/state.log` of a newer version, or with a damaged complete line, gives the same messages, naming `state.json`: moving `state.json` aside also makes kanit ignore the log. `run` refuses with exit status 2; `plan` exits 1.
+- `PATH has a format version this kanit cannot read` or `PATH cannot be read: it is not a valid kanit state`, for `.kanit/state.json`: The resume state was written by another version of kanit, usually a newer one, or is damaged. Use the kanit that wrote it, or move the file aside: the next launch runs every rule, and the launch directories keep every earlier attempt. A `.kanit/state.log` of a newer version, or with a damaged complete line, gives the same messages, naming `state.json`: moving `state.json` aside also makes kanit ignore the log. `run` refuses with exit status 2; `plan` exits 1.
 
 ## Rules that fail
 
@@ -111,7 +111,7 @@ The run log names a failure's reason in a few words, quotes the last lines of it
 
 - `the command could not run in the container (status N): ...`, with N 126 or 127: The command is not in the image, or not executable there. The image's `PATH` applies inside the container, not yours.
 
-- `shared input NAME could not be loaded: ...`: A shared service or file holder failed, so the rules that need it fail too. For a service, its standard error is in `.workz/launches/<ID>/shared/`.
+- `shared input NAME could not be loaded: ...`: A shared service or file holder failed, so the rules that need it fail too. For a service, its standard error is in `.kanit/launches/<ID>/shared/`.
 
 - `it needs a rule that did not complete`: The rule is blocked because a rule it depends on failed. Fix that one; with `--keep-going`, the rest of the launch ran on.
 

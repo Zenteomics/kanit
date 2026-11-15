@@ -3,7 +3,7 @@
 //! samples, column widths and the lookup commands use.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 const workflow = workz.workflow;
 const names = workz.names;
 const helpers = @import("helpers.zig");

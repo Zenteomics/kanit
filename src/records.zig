@@ -26,8 +26,31 @@ pub const record_version = 1;
 
 pub const launch_record_max: usize = 256 << 20;
 
+/// The records directory of a working directory: `.kanit/`, or `.workz/`
+/// where an earlier kanit kept its records and no launch has moved them yet.
 pub fn recordsDir(a: Allocator, root: []const u8) ![]const u8 {
-    return std.fs.path.join(a, &.{ root, ".workz" });
+    const current = try std.fs.path.join(a, &.{ root, ".kanit" });
+    if (sys.exists(a, current)) return current;
+    const earlier = try std.fs.path.join(a, &.{ root, ".workz" });
+    if (sys.exists(a, earlier)) return earlier;
+    return current;
+}
+
+/// Moves the records of an earlier kanit from `.workz/` to `.kanit/`, under
+/// their lock, in one rename, and leaves `.workz` as a symlink to `.kanit`,
+/// so earlier kanit binaries and the absolute paths recorded in launches
+/// still find them. Nothing happens once moved, or when there are none;
+/// two record directories are refused rather than merged.
+pub fn migrate(gpa: Allocator, a: Allocator, root: []const u8) !void {
+    const earlier = try std.fs.path.join(a, &.{ root, ".workz" });
+    const st = (try sys.lstat(gpa, earlier)) orelse return;
+    if (!st.isDir()) return;
+    const current = try std.fs.path.join(a, &.{ root, ".kanit" });
+    if (sys.exists(gpa, current)) return error.TwoRecordDirs;
+    const fd = try lock(gpa, earlier);
+    defer sys.close(fd);
+    try sys.rename(gpa, earlier, current);
+    try sys.symlink(gpa, ".kanit", earlier);
 }
 
 pub fn makeRecordsDir(gpa: Allocator, records: []const u8) !void {

@@ -3,7 +3,7 @@
 //! and signals.
 const std = @import("std");
 const testing = std.testing;
-const workz = @import("workz");
+const workz = @import("kanit");
 
 test {
     testing.refAllDecls(workz);
