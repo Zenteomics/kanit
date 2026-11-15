@@ -1,6 +1,6 @@
 .{
     .name = .kanit,
-    .version = "0.10.0",
+    .version = "0.11.0",
     .fingerprint = 0xa44a2c6e51175d9,
     .minimum_zig_version = "0.16.0",
     .dependencies = .{

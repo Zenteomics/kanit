@@ -86,7 +86,7 @@ Written when the launch ends, and printed by `kanit run` as one line. From the d
 ```json
 {
   "v": 1,
-  "engine": "kanit 0.10.0 sha256:...",
+  "engine": "kanit 0.11.0 sha256:...",
   "engine_key": 4,
   "launch": "20261107T060905.136-0b96682a",
   "status": "completed",
