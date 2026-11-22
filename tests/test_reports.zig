@@ -103,6 +103,7 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     try testing.expect(has(page, ".st-running{fill:var(--sheet);stroke:var(--run);") and has(page, "--sans:\"Inter\","));
     try testing.expect(has(page, "<link rel=\"icon\" href=\"data:image/svg+xml,<svg ") and has(page, "<a class=\"brand\" href=\"https://github.com/zenteomics/kanit\" title=\"kanit on GitHub\"><img src=\"data:image/svg+xml,<svg "));
     try testing.expect(has(page, "<a href=\"https://github.com/zenteomics/kanit/wiki/Reports#the-html-report\">About this page</a>"));
+    try testing.expect(has(page, "@media screen{.scroll{content-visibility:auto;contain-intrinsic-size:auto 70vh}}"));
     try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
 

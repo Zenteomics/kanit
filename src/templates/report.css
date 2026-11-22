@@ -66,6 +66,10 @@ td.name{font-family:var(--mono);font-size:12.5px;white-space:nowrap}
 td.name i,th.step i{display:inline-block;width:10px;height:10px;margin-right:8px;vertical-align:-1px}
 td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;color:var(--ink2);white-space:nowrap}td.name small{margin-left:18px}td.n small.sub{white-space:normal;max-width:22ch;margin-left:auto}
 .wide{overflow-x:auto;scrollbar-color:var(--hair) transparent;background:linear-gradient(90deg,var(--sheet) 30%,transparent) left/40px 100% no-repeat local,linear-gradient(270deg,var(--sheet) 30%,transparent) right/40px 100% no-repeat local,linear-gradient(90deg,color-mix(in srgb,var(--ink) 16%,transparent),transparent) left/14px 100% no-repeat scroll,linear-gradient(270deg,color-mix(in srgb,var(--ink) 16%,transparent),transparent) right/14px 100% no-repeat scroll}.scroll{max-height:70vh;overflow:auto;border:1px solid var(--hair)}
+/* A long table fills its box exactly, so a screen skips the rows out of view
+   and still keeps the page's height and a reload's scroll position. */
+@media screen{.scroll{content-visibility:auto;contain-intrinsic-size:auto 70vh}}
+
 .scroll thead th{position:sticky;top:0;z-index:1}
 .bar{position:relative;height:9px;min-width:110px;border:1px solid var(--ink2)}
 .bar i{position:absolute;left:0;top:0;bottom:0}.b-use{background:var(--q5)}.b-cache{background:var(--q2)}.b-wait{background:var(--q3)}.b-held{background:repeating-linear-gradient(135deg,var(--q3) 0 1.5px,transparent 1.5px 4px)}
