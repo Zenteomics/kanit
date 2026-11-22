@@ -1,7 +1,11 @@
 <!-- markdownlint-disable MD033 MD041 -->
 
 <div align="center">
-  <img src="assets/kanit-logo.svg" alt="kanit logo" width="170">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-readme-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="assets/logo-readme-light.svg">
+    <img src="assets/logo-readme-light.svg" alt="kanit" width="180">
+  </picture>
   <p><em><strong>K</strong>ahn's <strong>A</strong>lgorithm for <strong>N</strong>etworks of <strong>I</strong>nterdependent <strong>T</strong>asks</em></p>
   <p><strong>A workflow engine for one Linux workstation: every task within budget, every attempt on record.</strong></p>
   <p>
@@ -16,7 +20,7 @@
     <a href="https://github.com/zenteomics/kanit/wiki/Home"><img src="https://img.shields.io/badge/wiki-user%20guide-2563EB?style=flat-square" alt="User guide"></a>
     <a href="https://github.com/zenteomics/kanit/wiki/Workflow-Reference"><img src="https://img.shields.io/badge/workflow-reference-7C3AED?style=flat-square" alt="Workflow reference"></a>
     <a href="https://github.com/zenteomics/kanit/wiki/Command-Reference"><img src="https://img.shields.io/badge/command-reference-F59E0B?style=flat-square" alt="Command reference"></a>
-    <a href="https://zenteomics.com"><img src="https://img.shields.io/badge/part%20of-Zenteomics-0B1929?style=flat-square" alt="Part of Zenteomics"></a>
+    <a href="https://zenteomics.com"><img src="https://img.shields.io/badge/part%20of-Zenteomics-151515?style=flat-square" alt="Part of Zenteomics"></a>
   </p>
 </div>
 
