@@ -257,8 +257,9 @@ pub fn render(src: *Source, w: *Writer, style: logging.Style) !void {
     // --- Outcome ---
     try w.splatByteAll(' ', label_column);
     if (style.color) {
-        const badge = if (std.mem.eql(u8, outcome, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, outcome, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, outcome, "interrupted") or std.mem.eql(u8, outcome, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m";
-        try w.print("{s}{s}\x1b[0m", .{ badge, outcome });
+        // The outcome word in its color, as `watch` shows the state.
+        const tone = if (std.mem.eql(u8, outcome, "completed")) "\x1b[32;1m" else if (std.mem.eql(u8, outcome, "running")) "\x1b[33;1m" else if (std.mem.eql(u8, outcome, "interrupted") or std.mem.eql(u8, outcome, "stopped")) "\x1b[35;1m" else "\x1b[31;1m";
+        try w.print("{s}{s}\x1b[0m", .{ tone, outcome });
     } else try w.writeAll(outcome);
     try w.splatByteAll(' ', word_width + 2 -| outcome.len);
     if (std.mem.eql(u8, outcome, "refused")) {
@@ -272,7 +273,7 @@ pub fn render(src: *Source, w: *Writer, style: logging.Style) !void {
         var first = true;
         const parts = [_]struct { n: usize, what: []const u8, code: []const u8 }{
             .{ .n = c(&count, .reused), .what = "reused", .code = "" },
-            .{ .n = running, .what = "running", .code = "\x1b[36m" },
+            .{ .n = running, .what = "running", .code = "\x1b[33m" },
             .{ .n = c(&count, .failed), .what = "failed", .code = "\x1b[31;1m" },
             .{ .n = c(&count, .blocked), .what = "blocked", .code = "" },
             .{ .n = c(&count, .cancelled), .what = "stopped", .code = "" },
@@ -686,7 +687,7 @@ fn mark(w: *Writer, style: logging.Style, cell: Cell) !void {
         .empty => try w.writeAll(" "),
         .done => try w.print("{s}{s}{s}", .{ on(style, "\x1b[32m"), m.ok, off(style) }),
         .reused => try w.print("{s}{s}{s}", .{ on(style, "\x1b[2;32m"), m.ok, off(style) }),
-        .running => try w.print("{s}~{s}", .{ on(style, "\x1b[36m"), off(style) }),
+        .running => try w.print("{s}~{s}", .{ on(style, "\x1b[33m"), off(style) }),
         .waiting => try w.writeAll(" "),
         .not_run => try w.print("{s}{s}{s}", .{ on(style, "\x1b[2m"), m.none, off(style) }),
         .failed => try w.print("{s}{s}{s}", .{ on(style, "\x1b[31;1m"), m.fail, off(style) }),

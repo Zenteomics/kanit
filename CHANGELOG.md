@@ -11,6 +11,8 @@ kanit's report and live view take the Zenteomics look: the kanit mark, its color
 ### Changed
 
 - The HTML report draws in the Zenteomics colors, light and dark, sets its text in Inter and JetBrains Mono where they are installed, and outlines running rules in amber; the kanit icon and the engine's version head the page, link to the project and serve as its favicon, and the footer links to the project, its guide, the page's reference and Zenteomics.
+- `watch` opens with the kanit mark over two rows beside the workflow's name, with the engine and the launch under it; a terminal under 24 rows keeps one title line. Running rules, the gauges' use and running timeline bars are yellow, waiting rules plain, timeline bars are heavy lines, and the keys at the foot are bold rather than reversed.
+- `run`'s footer and `status` draw running rules in yellow, as `watch` does, and the summary of `run` and `status` names the outcome in its color rather than on a colored block.
 
 ## [0.11.0] - 2026-11-15
 

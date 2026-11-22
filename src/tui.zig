@@ -373,15 +373,7 @@ const red = "\x1b[31m";
 const green = "\x1b[32m";
 const yellow = "\x1b[33m";
 const magenta = "\x1b[35m";
-const cyan = "\x1b[36m";
 const blue = "\x1b[34m";
-const on_green = "\x1b[42m";
-const on_yellow = "\x1b[43m";
-const on_red = "\x1b[41m";
-const on_blue = "\x1b[44m";
-const on_magenta = "\x1b[45m";
-const on_cyan = "\x1b[46m";
-const on_track = "\x1b[100m";
 
 const Line = struct {
     buf: [4096]u8 = undefined,
@@ -450,21 +442,6 @@ const Line = struct {
         self.text(s[0..fit(s, head)]);
         self.text("...");
         self.text(s[tailStart(s, keep - head)..]);
-    }
-
-    fn cells(self: *Line, n: usize, bg: []const u8, ch: u8) void {
-        if (n == 0) return;
-        if (self.color) {
-            self.raw(bg);
-            self.spaces(n);
-            self.raw(reset);
-            return;
-        }
-        var i: usize = 0;
-        while (i < n and self.used < self.cols) : (i += 1) {
-            self.raw(&.{ch});
-            self.used += 1;
-        }
     }
 
     /// Writes `mark` `n` times in `fg`.
@@ -576,10 +553,10 @@ const State = struct { tag: []const u8, tint: []const u8 };
 
 fn state(s: Status) State {
     return switch (s) {
-        .running => .{ .tag = "RUN", .tint = cyan },
+        .running => .{ .tag = "RUN", .tint = yellow },
         .cancelling => .{ .tag = "STOP", .tint = magenta },
         .retrying => .{ .tag = "RETRY", .tint = yellow },
-        .waiting => .{ .tag = "WAIT", .tint = yellow },
+        .waiting => .{ .tag = "WAIT", .tint = "" },
         .pending => .{ .tag = "WAIT", .tint = dim },
         .completed => .{ .tag = "DONE", .tint = green },
         .reused => .{ .tag = "REUSE", .tint = "\x1b[32;2m" },
@@ -657,23 +634,79 @@ fn drawHeader(f: *Frame, t: *const Tracker, ui: *const Ui, end_ns: i128) !void {
     const version = engine_words.next() orelse "";
     const name = if (t.workflow_name.len > 0) t.workflow_name else t.workdir_name;
 
+    const tone = if (std.mem.eql(u8, run_state, "running")) yellow ++ bold else if (std.mem.eql(u8, run_state, "completed")) green ++ bold else if (std.mem.eql(u8, run_state, "interrupted") or std.mem.eql(u8, run_state, "stopped")) magenta ++ bold else red ++ bold;
+    const right = run_state.len + elapsed.len + 4;
     var l = f.begin();
-    if (!f.plain) l.sgr(reverse ++ bold);
-    l.print(" {s}{s}{s} ", .{ program, if (version.len > 0) " " else "", version });
-    l.sgr(reset);
-    if (!f.plain) l.sgr(reverse);
-    if (name.len > 0) l.print("  {s}  ", .{name}) else l.text(" ");
-    if (f.cols >= 70) l.print(" launch {s} ", .{t.launch});
-    const right = run_state.len + elapsed.len + 5;
-    if (f.cols > l.used + right) l.spaces(f.cols - l.used - right);
-    l.sgr(reset);
-    l.sgr(if (std.mem.eql(u8, run_state, "running")) "\x1b[46;30;1m" else if (std.mem.eql(u8, run_state, "completed")) "\x1b[42;30;1m" else if (std.mem.eql(u8, run_state, "interrupted") or std.mem.eql(u8, run_state, "stopped")) "\x1b[45;30;1m" else "\x1b[41;97;1m");
-    l.print(" {s} ", .{run_state});
-    l.sgr(reset);
-    if (!f.plain) l.sgr(reverse);
-    l.print(" {s} ", .{elapsed});
-    if (!f.plain) l.to(f.cols);
-    try f.put(&l);
+    if (!f.plain and f.rows >= 24 and f.cols >= 60) {
+        // The kanit mark over two rows: two finished tasks feed two
+        // running ones, which join into the task that waits for them.
+        const uni = std.mem.eql(u8, ui.marks.full, log.unicode.full);
+        l.text(" ");
+        l.sgr(bold);
+        l.text(if (uni) "\u{25CF}" else "o");
+        l.sgr(reset ++ dim);
+        l.text(if (uni) "\u{2500}" else "-");
+        l.sgr(reset ++ yellow ++ bold);
+        l.text(if (uni) "\u{25CF}" else "o");
+        l.sgr(reset ++ dim);
+        l.text(if (uni) "\u{256E}" else ".");
+        l.sgr(reset);
+        l.text("   ");
+        l.sgr(bold);
+        const room = f.cols -| (l.used + right + 2);
+        const shown = if (name.len > 0) name else program;
+        if (fit(shown, room) == shown.len or room < 4) l.text(shown[0..fit(shown, room)]) else {
+            l.text(shown[0..fit(shown, room - 3)]);
+            l.text("...");
+        }
+        l.sgr(reset);
+        l.to(f.cols -| right);
+        l.sgr(tone);
+        l.text(run_state);
+        l.sgr(reset);
+        l.print("  {s} ", .{elapsed});
+        try f.put(&l);
+        l = f.begin();
+        l.text(" ");
+        l.sgr(bold);
+        l.text(if (uni) "\u{25CF}" else "o");
+        l.sgr(reset ++ dim);
+        l.text(if (uni) "\u{2500}" else "-");
+        l.sgr(reset ++ yellow ++ bold);
+        l.text(if (uni) "\u{25CF}" else "o");
+        l.sgr(reset ++ dim);
+        l.text(if (uni) "\u{2534}" else "+");
+        l.sgr(reset);
+        l.text(if (uni) "\u{25CB}" else "o");
+        l.text("  ");
+        l.sgr(dim);
+        l.print("{s}{s}{s}", .{ program, if (version.len > 0) " " else "", version });
+        if (f.cols >= 70) {
+            l.text("   launch ");
+            l.clipped(t.launch);
+        }
+        l.sgr(reset);
+        try f.put(&l);
+        try f.blank();
+    } else {
+        l.text(" ");
+        l.sgr(bold);
+        l.print("{s}{s}{s}", .{ program, if (version.len > 0) " " else "", version });
+        l.sgr(reset);
+        if (name.len > 0) l.print("   {s}", .{name});
+        if (f.cols >= 70) {
+            l.sgr(dim);
+            l.print("   launch {s}", .{t.launch});
+            l.sgr(reset);
+        }
+        if (f.cols > l.used + right) l.to(f.cols - right);
+        l.text(" ");
+        l.sgr(tone);
+        l.text(run_state);
+        l.sgr(reset);
+        l.print("  {s} ", .{elapsed});
+        try f.put(&l);
+    }
 
     const bar_w = std.math.clamp(f.cols -| 80, 12, 40);
     const done = t.count(.completed) + t.count(.reused);
@@ -686,13 +719,13 @@ fn drawHeader(f: *Frame, t: *const Tracker, ui: *const Ui, end_ns: i128) !void {
     gaugeLabel(&l, "rules");
     l.bar(ui.marks, bar_w, @floatFromInt(@max(t.selected, 1)), &.{
         .{ .value = @floatFromInt(done), .fg = green },
-        .{ .value = @floatFromInt(running), .fg = cyan },
+        .{ .value = @floatFromInt(running), .fg = yellow },
         .{ .value = @floatFromInt(failed + blocked + stopped), .fg = red },
     });
     l.print("  {d} of {d} done", .{ done, t.selected });
     const counts = [_]struct { n: usize, what: []const u8, fg: []const u8 }{
-        .{ .n = running, .what = "running", .fg = cyan },
-        .{ .n = waiting, .what = "waiting", .fg = yellow },
+        .{ .n = running, .what = "running", .fg = yellow },
+        .{ .n = waiting, .what = "waiting", .fg = "" },
         .{ .n = failed, .what = "failed", .fg = red ++ bold },
         .{ .n = blocked, .what = "blocked", .fg = red },
         .{ .n = stopped, .what = "stopped", .fg = magenta },
@@ -713,7 +746,7 @@ fn drawHeader(f: *Frame, t: *const Tracker, ui: *const Ui, end_ns: i128) !void {
     l = f.begin();
     gaugeLabel(&l, "threads");
     l.bar(ui.marks, bar_w, @floatFromInt(@max(t.max_threads, 1)), &.{
-        .{ .value = busy, .fg = cyan },
+        .{ .value = busy, .fg = yellow },
         .{ .value = reserved_th - busy, .fg = blue },
     });
     l.print("  {d} of {d} reserved", .{ res.threads, t.max_threads });
@@ -727,7 +760,7 @@ fn drawHeader(f: *Frame, t: *const Tracker, ui: *const Ui, end_ns: i128) !void {
     l = f.begin();
     gaugeLabel(&l, "memory");
     l.bar(ui.marks, bar_w, @as(f64, @floatFromInt(@max(t.max_memory_mib, 1))) * mib, &.{
-        .{ .value = @min(used_b, @max(reserved_b, used_b)), .fg = cyan },
+        .{ .value = @min(used_b, @max(reserved_b, used_b)), .fg = yellow },
         .{ .value = reserved_b - @min(used_b, reserved_b), .fg = blue },
     });
     l.print("  {s} of {s} reserved", .{ if (res.memory_mib == 0) "0" else size(&mb[0], res.memory_mib << 20), size(&mb[1], t.max_memory_mib << 20) });
@@ -834,7 +867,7 @@ fn drawSteps(a: Allocator, f: *Frame, t: *const Tracker, s: log.Style, room: usi
 
 fn drawTable(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *const Ui, s: log.Style, list: []const usize, page: usize, now_ns: i128, live: bool) !void {
     var head: std.Io.Writer.Allocating = .init(a);
-    try head.writer.writeAll(s.on(bold));
+    try head.writer.writeAll(s.on(dim));
     try head.writer.writeAll("  ");
     try log.pad(&head.writer, "STATUS", log.status_width);
     try head.writer.writeAll(log.gap);
@@ -913,7 +946,7 @@ fn note(gpa: Allocator, a: Allocator, w: *std.Io.Writer, t: *const Tracker, link
         .waiting => {
             const why = if (std.mem.startsWith(u8, r.reason, "group:")) r.reason["group:".len..] else r.reason;
             if (r.attempt > 0) try w.print("attempt {d}, ", .{r.attempt + 1});
-            try w.print("{s}for {s}{s}", .{ s.on(yellow), if (why.len > 0) why else "room", s.off() });
+            try w.print("for {s}", .{if (why.len > 0) why else "room"});
             const since = @max(r.ready_ns, r.finished_ns);
             if (since > 0) try w.print(", {s}", .{duration(&buf, seconds(now_ns - since))});
         },
@@ -1054,11 +1087,11 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
         const selected = ui.selected != null and ui.selected.? == ri;
         l = f.begin();
         if (selected) {
-            l.sgr(cyan ++ bold);
+            l.sgr(bold);
             l.text("> ");
             l.sgr(reset);
         } else l.text("  ");
-        l.sgr(if (selected) reverse else if (r.status == .pending) dim else state(r.status).tint);
+        l.sgr(if (selected) reverse else if (r.status == .pending) dim else if (r.status == .completed or r.status == .reused) "" else state(r.status).tint);
         l.name(r.shown, name_w);
         l.sgr(reset);
         l.text(" ");
@@ -1069,26 +1102,28 @@ fn drawTimeline(f: *Frame, t: *const Tracker, ui: *Ui, list: []const usize, page
         if (ready_at > 0) l.spaces(@min(ready_at, axis_w));
         x = @min(ready_at, axis_w);
         if (start_at > x) {
-            l.sgr(dim ++ yellow);
+            l.sgr(dim);
             var i = x;
             while (i < start_at) : (i += 1) l.text(".");
             l.sgr(reset);
             x = start_at;
         }
         if (r.started_ns > 0 and stop_at > x) {
-            const bg: []const u8 = switch (r.status) {
-                .failed, .blocked => on_red,
-                .cancelled, .cancelling => on_magenta,
-                .running, .retrying => on_cyan,
-                else => on_green,
+            const fg: []const u8 = switch (r.status) {
+                .failed, .blocked => red,
+                .cancelled, .cancelling => magenta,
+                .running, .retrying => yellow,
+                else => green,
             };
-            const ch: u8 = switch (r.status) {
-                .failed, .blocked => '!',
-                .cancelled, .cancelling => 'x',
-                .running, .retrying => '>',
-                else => '=',
+            const ch: []const u8 = switch (r.status) {
+                .failed, .blocked => "!",
+                .cancelled, .cancelling => "x",
+                .running, .retrying => ">",
+                else => "=",
             };
-            l.cells(@min(stop_at, axis_w) - x, bg, ch);
+            // A bar is a heavy line in its state's color, as the gauges
+            // above it are; without color its letter says the state.
+            l.marks(@min(stop_at, axis_w) - x, fg, if (l.color) ui.marks.full else ch);
         }
         try f.put(&l);
     }
@@ -1173,7 +1208,7 @@ fn drawDetails(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *
         if (r.live_cores) |cores| {
             l = f.begin();
             Row.label(&l, "cpu");
-            l.bar(ui.marks, gauge_w, @floatFromInt(@max(r.threads, 1)), &.{.{ .value = cores, .fg = cyan }});
+            l.bar(ui.marks, gauge_w, @floatFromInt(@max(r.threads, 1)), &.{.{ .value = cores, .fg = yellow }});
             l.print("  {d:.1} of {d} {s}", .{ cores, r.threads, if (r.threads == 1) "thread" else "threads" });
             if (counters) |cn| if (cn.cpu_usage_usec) |us| l.print(", {s} so far", .{duration(&b[0], @as(f64, @floatFromInt(us)) / 1e6)});
             try f.put(&l);
@@ -1269,10 +1304,10 @@ fn drawLog(gpa: Allocator, a: Allocator, f: *Frame, t: *const Tracker, ui: *Ui, 
     const r = &t.rules.items[ri];
     const stream = if (ui.stderr) "stderr" else "stdout";
     var l = f.begin();
-    l.sgr(reverse ++ bold);
-    l.print(" {s} ", .{r.shown});
-    l.sgr(reset ++ reverse);
-    l.print(" attempt {d}  {s}  {s} ", .{ r.attempt, state(r.status).tag, stream });
+    l.sgr(bold);
+    l.print("  {s}", .{r.shown});
+    l.sgr(reset ++ dim);
+    l.print("   attempt {d}   {s}   {s}", .{ r.attempt, state(r.status).tag, stream });
     l.sgr(reset);
     l.sgr(dim);
     l.print("  o: {s}", .{if (ui.stderr) "stdout" else "stderr"});
@@ -1340,7 +1375,7 @@ fn drawHelp(f: *Frame, space: usize) !void {
             l.print("  {s}", .{h[1]});
         } else {
             l.text("    ");
-            l.sgr(cyan);
+            l.sgr(bold);
             l.field(h[0], 16, false);
             l.sgr(reset);
             l.clipped(h[1]);
@@ -1380,10 +1415,11 @@ fn drawFooter(f: *Frame, ui: *const Ui, now_ns: i128) !void {
     l.text(" ");
     for (hints) |h| {
         if (l.used + h.key.len + h.what.len + 4 > room) break;
-        l.sgr(reverse);
-        if (!l.color) l.print("[{s}]", .{h.key}) else l.print(" {s} ", .{h.key});
+        l.sgr(bold);
+        if (!l.color) l.print("[{s}]", .{h.key}) else l.text(h.key);
+        l.sgr(reset ++ dim);
+        l.print(" {s}   ", .{h.what});
         l.sgr(reset);
-        l.print(" {s} ", .{h.what});
     }
     if (f.cols > l.used + view.len) {
         l.to(f.cols - view.len);

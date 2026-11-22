@@ -47,7 +47,10 @@ It is one executable, with no daemon and no database: everything it knows is in 
 <details>
 <summary>The live terminal view</summary>
 
-![The kanit watch view of a launch 17 seconds in: gauges for rules, threads and memory against the budget, the shared genome index held once, a table of the steps with their progress, then every rule in the run log's columns, the running ones first with their time, memory against the request, cores and last output.](wiki/images/watch.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="wiki/images/watch-dark.webp">
+  <img src="wiki/images/watch-light.webp" alt="kanit watch following a launch from start to end at about ten times its speed: gauges for rules, threads and memory against the budget, the shared genome index held once, a table of the steps with their progress, then every rule in the run log's columns, the running ones first with their time, memory against the request, cores and last output; at the end the timeline of every rule's wait and run." width="640">
+</picture>
 
 </details>
 

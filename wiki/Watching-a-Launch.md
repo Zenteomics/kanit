@@ -6,9 +6,9 @@ Run `kanit watch` in the working directory, or `kanit watch path/to/workflow.tom
 
 ![The kanit watch view of a launch 17 seconds in: gauges at 8 of 25 rules done, 6 of 6 threads reserved and 2.2 of 6.0 GiB of memory, a shared genome index holding 602 MiB, a table of the five steps with a bar and done of total each, then the rules with their tags: three RUN rows first with their time, memory against the request, cores and last output, then WAIT rows for threads, one of them for a second attempt, and the DONE rows.](images/watch.png)
 
-The view uses the run log's columns, status tags, units and marks ([Running workflows](Running-Workflows.md#starting-a-launch)), so a rule reads the same in both. At the top, a title line names the engine, the workflow, the launch, its state and how long it has run, and gauges show its use of the budget:
+The view uses the run log's columns, status tags, units and marks ([Running workflows](Running-Workflows.md#starting-a-launch)), so a rule reads the same in both. At the top, beside the kanit mark, the title names the workflow, with the engine and the launch under it, and the launch's state and how long it has run; a terminal under 24 rows gets all of it on one line. Gauges show the launch's use of the budget:
 
-- **rules**: a bar of the selected rules, done in green, running in cyan and failed, blocked or stopped in red, with how many are done, running, waiting, failed, blocked and stopped.
+- **rules**: a bar of the selected rules, done in green, running in yellow and failed, blocked or stopped in red, with how many are done, running, waiting, failed, blocked and stopped.
 - **threads**: the threads reserved against the budget, and the CPU cores the run keeps busy.
 - **memory**: the memory reserved against the budget, and the memory the run uses.
 - **shared**: one line for each shared input, with its state, the memory it holds, and how many rules have used it.
@@ -45,7 +45,7 @@ A terminal too narrow for `MEMORY` and `CPU` leaves them out, as the run log doe
 
 ### Timeline
 
-<kbd>t</kbd> draws every rule on one time axis, with ticks such as `30s`, `1m` and `1m30s`. A dotted stretch is the time a rule waited to start; then a bar shows its run, green when it completed, cyan while it runs, red where it failed and magenta where it was stopped. Without colors the bar is drawn with `=`, `>`, `!` and `x`.
+<kbd>t</kbd> draws every rule on one time axis, with ticks such as `30s`, `1m` and `1m30s`. A dotted stretch is the time a rule waited to start; then a bar shows its run, green when it completed, yellow while it runs, red where it failed and magenta where it was stopped. Without colors the bar is drawn with `=`, `>`, `!` and `x`.
 
 ![The timeline of the same launch after it ended: the qc and trim rules run first, each align rule waits for three free threads, and each count rule follows its alignment.](images/watch-timeline.png)
 

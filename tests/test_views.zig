@@ -196,9 +196,36 @@ fn visibleColumns(line: []const u8) usize {
             while (i < line.len and (line[i] < 0x40 or line[i] > 0x7e or line[i] == '[')) i += 1;
             continue;
         }
-        cols += 1;
+        if (line[i] & 0xc0 != 0x80) cols += 1;
     }
     return cols;
+}
+
+test "[unit] - [watch]: a tall view opens with the kanit mark over two rows, its version under the workflow and its state at the right" {
+    var s = try Scratch.init();
+    defer s.deinit();
+    _ = try s.file("events.jsonl", ev_start ++ ev_rules);
+    var t = try workz.tracker.Tracker.init(testing.allocator, s.path);
+    defer t.deinit();
+    _ = try t.update();
+    var out: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer out.deinit();
+    const now = workz.tracker.parseTime("2026-01-01T00:00:05.000Z").?;
+    for ([_]struct { marks: *const workz.log.Marks, top: []const u8, low: []const u8 }{
+        .{ .marks = &workz.log.unicode, .top = " \u{25CF}\u{2500}\u{25CF}\u{256E}   ", .low = " \u{25CF}\u{2500}\u{25CF}\u{2534}\u{25CB}  " },
+        .{ .marks = &workz.log.ascii, .top = " o-o.   ", .low = " o-o+o  " },
+    }) |c| {
+        var ui: workz.tui.Ui = .{ .marks = c.marks };
+        out.clearRetainingCapacity();
+        try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 100, 30, now, false);
+        var lines = std.mem.splitSequence(u8, out.written()[3..], "\r\n");
+        const top = lines.next().?;
+        const low = lines.next().?;
+        try testing.expect(std.mem.startsWith(u8, top, c.top) and std.mem.startsWith(u8, low, c.low));
+        try testing.expect(std.mem.indexOf(u8, top, "running  5.0 s \x1b[K") != null);
+        try testing.expect(std.mem.indexOf(u8, low, "   launch ") != null);
+        try testing.expect(visibleColumns(top) <= 100 and visibleColumns(low) <= 100);
+    }
 }
 
 test "[unit] - [watch]: without color a frame has no SGR sequences, draws bars with marks and counts like the run log" {
@@ -642,12 +669,12 @@ test "[unit] - [watch]: enter follows the selected attempt's stderr, and o switc
     var out: std.Io.Writer.Allocating = .init(testing.allocator);
     defer out.deinit();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
-    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  RUN  stderr ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "   attempt 1   RUN   stderr") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") != null);
     ui.key(.{ .char = 'o' }, &rows, 10);
     out.clearRetainingCapacity();
     try workz.tui.draw(testing.allocator, &out.writer, &t, &ui, 80, 10, now, true);
-    try testing.expect(std.mem.indexOf(u8, out.written(), " attempt 1  RUN  stdout ") != null);
+    try testing.expect(std.mem.indexOf(u8, out.written(), "   attempt 1   RUN   stdout") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stdout") != null);
     try testing.expect(std.mem.indexOf(u8, out.written(), "to-stderr") == null);
 }

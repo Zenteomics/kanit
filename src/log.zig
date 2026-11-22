@@ -624,7 +624,7 @@ pub fn counts(w: *Writer, s: Style, p: Progress) !void {
     try w.writeAll(" of ");
     try counted(w, p.selected, "rule", "rules");
     if (p.running > 0) {
-        try w.print("   {s}", .{s.on("\x1b[36m")});
+        try w.print("   {s}", .{s.on("\x1b[33m")});
         try thousands(w, p.running);
         try w.print(" running{s}", .{s.off()});
     }
@@ -647,13 +647,13 @@ pub fn counts(w: *Writer, s: Style, p: Progress) !void {
     try units.duration(w, p.elapsed_s);
 }
 
-/// A bar of `cells`: done in green, running in cyan, failed, blocked and
+/// A bar of `cells`: done in green, running in yellow, failed, blocked and
 /// stopped in red, the rest empty.
 fn meter(w: *Writer, s: Style, total_: usize, done: usize, running: usize, bad: usize, cells: usize) !void {
     const total = @max(total_, 1);
     const parts = [_]struct { n: usize, code: []const u8 }{
         .{ .n = done, .code = "\x1b[32m" },
-        .{ .n = running, .code = "\x1b[36m" },
+        .{ .n = running, .code = "\x1b[33m" },
         .{ .n = bad, .code = "\x1b[31m" },
     };
     var filled: usize = 0;
@@ -696,7 +696,7 @@ fn stepRow(w: *Writer, s: Style, st: StepProgress, count_w: usize) !void {
     var first = true;
     const parts = [_]struct { n: u32, what: []const u8, code: []const u8 }{
         .{ .n = st.failed, .what = "failed", .code = "\x1b[31;1m" },
-        .{ .n = st.running, .what = "running", .code = "\x1b[36m" },
+        .{ .n = st.running, .what = "running", .code = "\x1b[33m" },
         .{ .n = st.blocked, .what = "blocked", .code = "" },
         .{ .n = st.stopped, .what = "stopped", .code = "" },
     };
@@ -782,7 +782,7 @@ fn runningItems(w: *Writer, s: Style, list: []const Running, total: usize, room:
         units.duration(&iw, r.seconds) catch {};
         const need = 3 + names.columns(r.word) + 1 + iw.buffered().len;
         if (used + need + 6 > room) break;
-        try w.print("   {s}{s}{s} {s}", .{ s.on("\x1b[36m"), r.word, s.off(), iw.buffered() });
+        try w.print("   {s}{s}{s} {s}", .{ s.on("\x1b[33m"), r.word, s.off(), iw.buffered() });
         used += need;
         shown += 1;
     }
