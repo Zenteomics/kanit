@@ -4,6 +4,14 @@
 
 All notable changes to kanit are documented in this file. Versions up to 0.6.0 were released under the name workz. Versions follow [Semantic Versioning](https://semver.org/): before 1.0, a minor version may change the workflow format, the records under `.kanit/` and the command line, and each version says first what such a change needs from you.
 
+## [Unreleased]
+
+kanit's report and live view take the Zenteomics look: the kanit mark, its colors and its type.
+
+### Changed
+
+- The HTML report draws in the Zenteomics colors, light and dark, sets its text in Inter and JetBrains Mono where they are installed, and outlines running rules in amber; the kanit icon and the engine's version head the page, link to the project and serve as its favicon, and the footer links to the project, its guide, the page's reference and Zenteomics.
+
 ## [0.11.0] - 2026-11-15
 
 The rename to kanit reaches the records, the variables and the Zig module, without losing a record or rerunning a rule, and each attempt gets a scratch directory that `clean` removes.

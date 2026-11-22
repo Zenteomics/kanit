@@ -91,20 +91,34 @@ fn tickLabel(buf: []u8, s: f64, step: f64) []const u8 {
 }
 
 const light_theme =
-    \\color-scheme:light;--paper:#f7f5ef;--sheet:#fbfaf6;--ink:#1d2b3a;--ink2:#4a5866;--muted:#5f6b78;--hair:#cfd3d8;--pend:#7d8894;
-    \\--rule:#1d2b3a;--tab:#1d2b3a;--tab-ink:#fbfaf6;--g1:rgba(29,43,58,.04);--g2:rgba(29,43,58,.08);--wash:rgba(29,43,58,.05);
-    \\--c1:#2b5fae;--c2:#c46a1a;--c3:#23896b;--c4:#8a5cc2;--c5:#a6841a;--c6:#2c86ad;--c7:#b84f7a;--c8:#6d7f2d;--c0:#9aa3ad;
-    \\--q1:#e4e9f0;--q2:#c6d0dc;--q3:#a2b1c3;--q4:#8a9cb1;--q5:#5a718c;--q6:#3b5370;--q7:#1d2b3a;--t4:#1d2b3a;--t5:#fff;
-    \\--done:#1d2b3a;--fail:#c62828;--fail-ink:#fff;--cancel:#7f8a96
+    \\color-scheme:light;--paper:#f5f2ea;--sheet:#fcfbf9;--ink:#151515;--ink2:#4a453e;--muted:#5a554c;--hair:#ddd9d6;--pend:#9c8876;
+    \\--rule:#151515;--tab:#151515;--tab-ink:#fcfbf9;--g1:rgba(21,21,21,.04);--g2:rgba(21,21,21,.08);--wash:rgba(21,21,21,.05);
+    \\--c1:#b66c11;--c2:#67635b;--c3:#005486;--c4:#9770a5;--c5:#7f3c34;--c6:#4a8b62;--c7:#a45b79;--c8:#788347;--c0:#bdb1a7;
+    \\--q1:#e8e2d9;--q2:#dac6ae;--q3:#d1aa7d;--q4:#bf6d04;--q5:#9b5b23;--q6:#764a2c;--q7:#332a27;--t4:#151515;--t5:#fff;
+    \\--done:#151515;--run:#925300;--fail:#740058;--fail-ink:#fff;--cancel:#8a8372
 ;
 
 const dark_theme =
-    \\color-scheme:dark;--paper:#0c0f13;--sheet:#1a1f26;--ink:#e2e6eb;--ink2:#a9b2be;--muted:#7c8796;--hair:#2a3038;--pend:#6e7a89;
-    \\--rule:#6e7a89;--tab:#3a4452;--tab-ink:#e2e6eb;--g1:rgba(214,222,232,.03);--g2:rgba(214,222,232,.06);--wash:rgba(214,222,232,.045);
-    \\--c1:#5a87d6;--c2:#cf7838;--c3:#2fa07c;--c4:#9677d6;--c5:#a98a28;--c6:#3a9cc2;--c7:#cc6b93;--c8:#839744;--c0:#69737f;
-    \\--q1:#262d37;--q2:#323c4a;--q3:#435163;--q4:#5a6b81;--q5:#7b8da5;--q6:#a3b2c5;--q7:#cfd8e3;--t4:#f6f7f9;--t5:#0c0f13;
-    \\--done:#c9d2dd;--fail:#e5605c;--fail-ink:#0c0f13;--cancel:#707c8c
+    \\color-scheme:dark;--paper:#151515;--sheet:#1c1b19;--ink:#f4eed7;--ink2:#b8b09b;--muted:#a39b88;--hair:#363432;--pend:#8a8372;
+    \\--rule:#8a8372;--tab:#60584e;--tab-ink:#f4eed7;--g1:rgba(244,238,215,.03);--g2:rgba(244,238,215,.06);--wash:rgba(244,238,215,.045);
+    \\--c1:#f7a41d;--c2:#aeaba2;--c3:#738ac5;--c4:#73cbfa;--c5:#aeca8d;--c6:#c3776d;--c7:#199b97;--c8:#db9bc9;--c0:#938470;
+    \\--q1:#372f2a;--q2:#544235;--q3:#74553c;--q4:#b5803b;--q5:#d49733;--q6:#f2b121;--q7:#ffefd1;--t4:#151515;--t5:#151515;
+    \\--done:#f4eed7;--run:#f7a41d;--fail:#ee3e76;--fail-ink:#151515;--cancel:#60584e
 ;
+
+/// The kanit icon as a data URI: the page's favicon and the mark beside its
+/// name, so the page still loads nothing from elsewhere.
+const icon_uri = "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 160 160'><rect x='3' y='3' width='154' height='154' rx='27' fill='%23151515' stroke='%23f7a41d' stroke-width='3'/><path d='M40 50H80M40 90H80M40 50L80 90M80 50H100L120 70M80 90H100L120 70' fill='none' stroke='%238a8372' stroke-width='3' stroke-linejoin='round'/><g fill='%23f4eed7'><circle cx='40' cy='50' r='9'/><circle cx='40' cy='90' r='9'/><path d='M46.75 127.3H74.65L66.7 136.8H46.75A4.75 4.75 0 0 1 46.75 127.3Z'/><path d='M93.6 127.3H113.25A4.75 4.75 0 0 1 113.25 136.8H85.65Z'/></g><g fill='%23f7a41d'><circle cx='80' cy='50' r='9'/><circle cx='80' cy='90' r='9'/></g><circle cx='120' cy='70' r='8' fill='%23151515' stroke='%23f4eed7' stroke-width='3'/><g fill='%23f7a41d' transform='translate(72.5 125.1) scale(0.1)'><polygon points='56,22 62,36 37,44'/><polygon points='56,22 111,22 111,44 37,44 56,32'/><polygon points='116,95 97,117 90,104'/><polygon points='116,95 100,104 97,117 42,117 42,95'/><polygon points='150,0 52,117 3,140 101,22'/></g></svg>";
+
+/// Where the mark and the footer lead: the project, its guide, the page's
+/// own reference and the practice behind it.
+const repo_url = "https://github.com/zenteomics/kanit";
+const links = [_][2][]const u8{
+    .{ repo_url, "kanit on GitHub" },
+    .{ repo_url ++ "/wiki/Home", "User guide" },
+    .{ repo_url ++ "/wiki/Reports#the-html-report", "About this page" },
+    .{ "https://zenteomics.com", "Zenteomics" },
+};
 
 const themes = [_][]const u8{ "auto", "light", "dark" };
 
@@ -196,11 +210,11 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     try escape(w, l.name);
     try w.writeAll(" - kanit launch ");
     try escape(w, l.id);
-    try w.print("</title>\n<style>\n{s}</style></head><body>\n", .{style});
+    try w.print("</title>\n<link rel=\"icon\" href=\"{s}\">\n<style>\n{s}</style></head><body>\n", .{ icon_uri, style });
     for (themes) |t| try w.print("<input class=\"pick\" type=\"radio\" name=\"theme\" id=\"theme-{s}\" aria-label=\"{s} theme\"{s}>", .{ t, t, if (std.mem.eql(u8, t, "auto")) " checked" else "" });
     try w.writeAll("\n<div class=\"page\"><main>\n");
 
-    try p.themeSwitch();
+    try p.corner();
     try p.titleBlock();
     try p.nav();
     try p.pipeline();
@@ -219,7 +233,9 @@ pub fn writeLaunch(a: Allocator, w: *std.Io.Writer, l: *const model.Launch) !voi
     try escape(w, l.id);
     try w.writeAll("</span>");
     if (!l.finished) try w.print(" &middot; this page reloads every {d} s while the launch runs", .{REFRESH_SECONDS});
-    try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere</footer>\n</main></div></body></html>\n");
+    try w.writeAll(" &middot; no scripts, nothing loaded from elsewhere<br>");
+    for (links, 0..) |k, i| try w.print("{s}<a href=\"{s}\">{s}</a>", .{ if (i == 0) "" else " &middot; ", k[0], k[1] });
+    try w.writeAll("</footer>\n</main></div></body></html>\n");
 }
 
 const Groups = struct {
@@ -313,7 +329,7 @@ const Page = struct {
     fn titleBlock(self: Page) !void {
         const w = self.w;
         const l = self.l;
-        try w.writeAll("<header class=\"title\"><div class=\"row r1\"><div class=\"cell\"><span class=\"k\">kanit &middot; launch report</span><h1>");
+        try w.writeAll("<header class=\"title\"><div class=\"row r1\"><div class=\"cell\"><span class=\"k\">launch report</span><h1>");
         try escape(w, l.name);
         try w.writeAll("</h1></div>\n<div class=\"cell\"><span class=\"k\">status</span>");
         const tone: []const u8 = if (!l.finished) "s-run live" else if (eql(u8, l.status, "completed")) "s-ok" else if (eql(u8, l.status, "interrupted") or eql(u8, l.status, "stopped")) "s-cancel" else "s-fail";
@@ -412,9 +428,15 @@ const Page = struct {
         try w.print("<a href=\"#failures\"><b>T2</b>Failures ({d})</a><a href=\"#attempts\"><b>T3</b>Attempts ({d})</a></nav>\n", .{ failedCount(self.l), self.l.rows.len });
     }
 
-    fn themeSwitch(self: Page) !void {
+    fn corner(self: Page) !void {
         const w = self.w;
-        try w.writeAll("<div class=\"corner\"><span class=\"theme\"><span class=\"k\">theme</span>");
+        const engine = if (self.l.engine.len > 0) self.l.engine else "kanit";
+        const cut = std.mem.indexOfScalar(u8, engine, ' ') orelse engine.len;
+        try w.print("<div class=\"corner\"><a class=\"brand\" href=\"{s}\" title=\"kanit on GitHub\"><img src=\"{s}\" alt=\"\" width=\"26\" height=\"26\"><b>", .{ repo_url, icon_uri });
+        try escape(w, engine[0..cut]);
+        try w.writeAll("</b><span class=\"mono\">");
+        try escape(w, std.mem.trim(u8, engine[cut..], " "));
+        try w.writeAll("</span></a><span class=\"theme\"><span class=\"k\">theme</span>");
         for (themes) |t| try w.print("<label for=\"theme-{s}\">{s}</label>", .{ t, t });
         try w.writeAll("</span></div>\n");
     }

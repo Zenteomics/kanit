@@ -284,6 +284,11 @@ Figures 1 to 3 and Table 1 cover the pipeline, so a launch that reused rules sti
 
 Every launch also keeps this page as `report.html` in its launch directory: `run` draws it as the launch starts, at least 15 s between drawings while it runs, and once more at the end ([Running workflows](Running-Workflows.md#starting-a-launch)). On a large launch it waits at least twenty times the preceding draw's duration. While the launch runs, the page reloads itself every 15 s; the final page stops reloading. `kanit report --format html` draws the same page on demand, for any launch. Reload manually for an earlier update, or use `kanit watch` for faster progress. A theme picked on a page that reloads itself lasts only while the browser keeps the page's form state; the reader's color scheme is the lasting choice.
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="images/report-live-dark.webp">
+  <img src="images/report-live-light.webp" alt="The top of the live report page while a launch runs, drawn with kanit report every two seconds and shown at about ten times its speed: the status stamp reads running in amber, the counts and elapsed time rise, the cells of each step fill as its rules finish, with running rules outlined in amber, and at the end the stamp reads completed with all 25 rules done." width="640">
+</picture>
+
 Running cells and bars are marked by steady outlines, without animation, and printing the page includes every figure. The CPU and memory charts draw every five-second run sample.
 
 For a small runnable demonstration, use `examples/report-tour/` in the repository. Its three rules produce completed, reused and failed-launch pages; optional live mode adds two six-second waits so the resource charts have samples. The tour's README explains the figures, limits and output files.

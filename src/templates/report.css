@@ -1,8 +1,8 @@
-/* The launch page's style sheet, after its theme: workz sets the colors of
-   .page, light or dark, from tokens in html.zig and prints in light. */
-:root{--mono:"JetBrains Mono","IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
---sans:"IBM Plex Sans",system-ui,-apple-system,"Segoe UI",sans-serif;
---label:"Barlow Condensed","Roboto Condensed","Arial Narrow","DejaVu Sans Condensed",system-ui,sans-serif}
+/* The launch page's style sheet, after its theme: kanit sets the colors of
+   .page, light or dark, from tokens in html.zig and prints in light. The
+   faces are the Zenteomics ones when installed, else the system's. */
+:root{--mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono",monospace;
+--sans:"Inter",system-ui,-apple-system,"Segoe UI",sans-serif;--label:var(--sans)}
 *{box-sizing:border-box}
 body{margin:0}.pick{position:absolute;opacity:0;width:1px;height:1px;margin:0}
 .page{min-height:100vh;color:var(--ink);font:14px/1.5 var(--sans);background-color:var(--paper);
@@ -17,12 +17,13 @@ code,.mono{font-family:var(--mono);font-size:.92em}
 h1{font:600 30px/1.1 var(--label);letter-spacing:.03em;margin:0;overflow-wrap:anywhere}
 .big{font:500 22px/1.15 var(--mono);white-space:nowrap}.sub{font-size:12px;color:var(--ink2)}
 .stamp{display:inline-block;font:700 15px/1 var(--label);letter-spacing:.14em;text-transform:uppercase;padding:5px 9px;border:2px solid currentColor;transform:rotate(-2deg)}
-.s-ok{color:var(--done)}.s-fail{color:var(--fail)}.s-run{color:var(--ink)}.s-cancel{color:var(--muted)}
+.s-ok{color:var(--done)}.s-fail{color:var(--fail)}.s-run{color:var(--run)}.s-cancel{color:var(--muted)}
 .error{background:var(--sheet);border:1.5px solid var(--fail);border-top:0;padding:8px 12px;color:var(--fail)}
 nav{display:flex;flex-wrap:wrap;align-items:stretch;border:1.5px solid var(--rule);border-top:0;background:var(--sheet)}
 nav a{font:600 12px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--ink2);text-decoration:none;padding:9px 13px;border-right:1px solid var(--hair)}
 nav a:hover{color:var(--ink);background:var(--wash)}nav a b{color:var(--muted);margin-right:6px}
-.corner{display:flex;justify-content:flex-end;margin:0 0 8px}.theme{display:flex;align-items:center;border:1px solid var(--rule);background:var(--sheet)}
+.corner{display:flex;justify-content:space-between;align-items:center;margin:0 0 8px}
+.brand{display:flex;align-items:center;gap:8px;font:600 15px/1 var(--sans);letter-spacing:.01em;color:var(--ink);text-decoration:none}.brand:hover b{text-decoration:underline}.brand img{display:block}.brand .mono{font-weight:400;color:var(--muted)}.theme{display:flex;align-items:center;border:1px solid var(--rule);background:var(--sheet)}
 .theme .k{margin:0;padding:0 10px}
 .theme label{font:600 11.5px/1 var(--label);letter-spacing:.1em;text-transform:uppercase;color:var(--ink2);padding:6px 10px;border-left:1px solid var(--hair);cursor:pointer}
 .theme label:hover{color:var(--ink);background:var(--wash)}
@@ -44,11 +45,11 @@ svg{display:block;width:100%;height:auto;font-family:var(--sans)}svg text{fill:v
 .g1{fill:var(--c1);background:var(--c1)}.g2{fill:var(--c2);background:var(--c2)}.g3{fill:var(--c3);background:var(--c3)}
 .g4{fill:var(--c4);background:var(--c4)}.g5{fill:var(--c5);background:var(--c5)}.g6{fill:var(--c6);background:var(--c6)}
 .g7{fill:var(--c7);background:var(--c7)}.g8{fill:var(--c8);background:var(--c8)}.g0{fill:var(--c0);background:var(--c0)}
-.box{fill:var(--sheet);stroke:var(--rule);stroke-width:1.25}.box.active{stroke:var(--ink);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
+.box{fill:var(--sheet);stroke:var(--rule);stroke-width:1.25}.box.active{stroke:var(--run);stroke-width:2.25}.box.bad{stroke:var(--fail);stroke-width:2.25}
 .wire{fill:none;stroke:var(--ink2);stroke-width:1}.arrow{fill:var(--ink2)}
 svg text.t-name{font:600 12px var(--mono);fill:var(--ink)}svg text.t-sub{font-size:11px;fill:var(--ink2)}svg text.t-count{font:600 11px var(--mono);fill:var(--ink)}
 .st-completed{fill:var(--done);background:var(--done)}.st-reused{fill:url(#hatch);background:repeating-linear-gradient(135deg,var(--done) 0 1.5px,transparent 1.5px 4px)}
-.st-running{fill:var(--sheet);stroke:var(--ink);stroke-width:2.5;background:var(--sheet);outline:2.5px solid var(--ink);outline-offset:-2.5px}.st-stopping{fill:var(--cancel);background:var(--cancel)}
+.st-running{fill:var(--sheet);stroke:var(--run);stroke-width:2.5;background:var(--sheet);outline:2.5px solid var(--run);outline-offset:-2.5px}.st-stopping{fill:var(--cancel);background:var(--cancel)}
 .st-waiting{fill:var(--sheet);stroke:var(--ink2);stroke-width:1.25;stroke-dasharray:2.5 1.5;background:var(--sheet);outline:1.25px dashed var(--ink2);outline-offset:-1.25px}
 .st-pending,.st-not_run{fill:var(--sheet);stroke:var(--pend);stroke-width:1;background:var(--sheet);outline:1px solid var(--pend);outline-offset:-1px}
 .st-failed{fill:var(--fail);background:var(--fail)}.st-blocked{fill:var(--fail);fill-opacity:.2;stroke:var(--fail);stroke-width:1;background:color-mix(in srgb,var(--fail) 20%,transparent);outline:1px solid var(--fail);outline-offset:-1px}
@@ -83,7 +84,7 @@ td.name small,small.sub{display:block;font-family:var(--sans);font-size:12px;col
 .matrix td.failed{background:var(--fail);color:var(--fail-ink)}.matrix td.cancelled{background:var(--cancel);color:var(--ink)}.matrix td.solo{background:var(--q2)}
 .matrix td.slow{box-shadow:inset 0 0 0 2px var(--sheet),inset 0 0 0 3.5px var(--ink)}
 .matrix td.reused{background-image:repeating-linear-gradient(135deg,rgba(255,255,255,.35) 0 1.5px,transparent 1.5px 5px)}
-.matrix td.running{background:var(--sheet);color:var(--ink);box-shadow:inset 0 0 0 2.5px var(--ink)}.matrix td.waiting{outline:1.25px dashed var(--ink2);outline-offset:-2px}
+.matrix td.running{background:var(--sheet);color:var(--ink);box-shadow:inset 0 0 0 2.5px var(--run)}.matrix td.waiting{outline:1.25px dashed var(--ink2);outline-offset:-2px}
 .scale{display:inline-flex;gap:2px;vertical-align:-2px;margin:0 6px 0 2px}.scale i{width:14px;height:10px;margin:0}
 .strip{width:192px;height:26px;display:block}.strip circle{fill:var(--q5);stroke:var(--sheet);stroke-width:2}
 .strip circle.slow{fill:var(--sheet);stroke:var(--ink);stroke-width:2}.strip .med{stroke:var(--ink);stroke-width:2}.strip text{font-size:9.5px}
@@ -94,9 +95,10 @@ pre{margin:0;padding:11px 13px;background:var(--wash);font:12px/1.5 var(--mono);
 .failure pre{border-top:1px solid var(--hair)}
 .failure .diag{margin:0;padding:7px 13px 0;border-top:1px solid var(--hair);color:var(--muted);font-size:12px}.failure .diag+pre{border-top:0}
 footer{color:var(--muted);font:600 11px/1.6 var(--label);letter-spacing:.1em;text-transform:uppercase;text-align:right;margin-top:16px}
+footer a{color:var(--ink2);text-decoration:none}footer a:hover{color:var(--ink);text-decoration:underline}
 @media (max-width:900px){.r1,.r2{grid-template-columns:1fr 1fr}.r1>.cell:last-child{grid-column:1/-1}}
 @media print{
-.page{background:#fff}main{max-width:none;padding:0}nav,.corner{display:none}
+.page{background:#fff}main{max-width:none;padding:0}nav,.theme{display:none}
 .fig,.failure{break-inside:avoid}.scroll{max-height:none;overflow:visible;border:0}pre{max-height:none}
 .wide{background:none}*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}
 @page{size:A4 landscape;margin:12mm}

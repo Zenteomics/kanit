@@ -99,6 +99,10 @@ test "[unit] - [report]: the html page labels every attempt, escapes its records
     try testing.expect(pick < std.mem.indexOf(u8, page, "<div class=\"page\">").?);
     try testing.expect(has(page, "id=\"theme-auto\" aria-label=\"auto theme\" checked>"));
     try testing.expect(has(page, "<label for=\"theme-light\">light</label>") and has(page, "#theme-dark:checked~.page{color-scheme:dark;"));
+    try testing.expect(has(page, ".page{color-scheme:light;--paper:#f5f2ea;") and has(page, "--run:#925300;") and has(page, "--run:#f7a41d;"));
+    try testing.expect(has(page, ".st-running{fill:var(--sheet);stroke:var(--run);") and has(page, "--sans:\"Inter\","));
+    try testing.expect(has(page, "<link rel=\"icon\" href=\"data:image/svg+xml,<svg ") and has(page, "<a class=\"brand\" href=\"https://github.com/zenteomics/kanit\" title=\"kanit on GitHub\"><img src=\"data:image/svg+xml,<svg "));
+    try testing.expect(has(page, "<a href=\"https://github.com/zenteomics/kanit/wiki/Reports#the-html-report\">About this page</a>"));
     try testing.expect(!has(page, "http-equiv=\"refresh\""));
     for (page) |c| try testing.expect(c < 0x80);
 

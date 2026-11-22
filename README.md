@@ -47,6 +47,16 @@ It is one executable, with no daemon and no database: everything it knows is in 
 
 </details>
 
+<details>
+<summary>The live report page</summary>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="wiki/images/report-live-dark.webp">
+  <img src="wiki/images/report-live-light.webp" alt="The top of the live report page while a launch runs, drawn with kanit report every two seconds and shown at about ten times its speed: the status stamp reads running in amber, the counts and elapsed time rise, the cells of each step fill as its rules finish, with running rules outlined in amber, and at the end the stamp reads completed with all 25 rules done." width="640">
+</picture>
+
+</details>
+
 ## A workflow
 
 A workflow is a TOML file of rules. Each rule names the files it reads and writes, one shell command and its request:
